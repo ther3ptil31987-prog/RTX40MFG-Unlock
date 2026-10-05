@@ -5,6 +5,8 @@ struct Session;
 Session* CreateSession(IDXGISwapChain*, IUnknown*) noexcept;
 void DestroySession(Session*) noexcept;
 bool BeginPresent(Session*, UINT flags, bool partial) noexcept;
+// The session presents the game's main output (largest area, foreground first).
+bool IsPrincipal(Session*) noexcept;
 void EndPresent(Session*, HRESULT, UINT flags) noexcept;
 bool BeginResize(Session*) noexcept;
 void EndResize(Session*, HRESULT) noexcept;

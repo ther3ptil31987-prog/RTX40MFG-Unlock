@@ -14,12 +14,15 @@
 #endif
 #include "ampere_diagnostics.h"
 #include "reflex_control.h"
+#include "vsync_control.h"
 
 #include <imgui.h>
 #if defined(MFG_UNLOCK_SINGLE_MODULE_UI)
 #include "ui_host.h"
 #include "standalone_ui.h"
 #include "single_module.h"
+#include "hudless_visualizer.h"
+#include "witcher_dots/witcher_dots.h"
 #else
 #include <reshade.hpp>
 #endif
@@ -839,6 +842,42 @@ BOOL WINAPI NativeFileGetSnapshot(MfgUnlockReShadeSnapshot* snapshot)
             output.uiRecompositionEnabled);
         ParseJsonBool(status, "uiRecompositionForced",
             output.uiRecompositionForced);
+        ParseJsonBool(status, "hudlessDetectEnabled", output.hudlessDetectEnabled);
+        const auto copyString = [&status](const char* key, char* target, size_t size) {
+            std::string value;
+            if (ParseJsonString(status, key, value)) strncpy_s(target, size, value.c_str(), _TRUNCATE);
+        };
+        copyString("hudlessDetectSource", output.hudlessDetectSource, sizeof(output.hudlessDetectSource));
+        copyString("hudlessDetectVerdict", output.hudlessDetectVerdict, sizeof(output.hudlessDetectVerdict));
+        copyString("hudlessDetectRoute", output.hudlessDetectRoute, sizeof(output.hudlessDetectRoute));
+        copyString("hudlessDetectReason", output.hudlessDetectReason, sizeof(output.hudlessDetectReason));
+        copyString("hudlessDetectBestHypothesis", output.hudlessDetectBestHypothesis,
+            sizeof(output.hudlessDetectBestHypothesis));
+        ParseJsonInteger(status, "hudlessDetectProbes", output.hudlessDetectProbes);
+        ParseJsonInteger(status, "hudlessDetectConclusive", output.hudlessDetectConclusive);
+        ParseJsonInteger(status, "hudlessDetectIdentityPermille", output.hudlessDetectIdentityPermille);
+        ParseJsonInteger(status, "hudlessDetectBestPermille", output.hudlessDetectBestPermille);
+        ParseJsonInteger(status, "hudlessDetectUiCoveragePermille", output.hudlessDetectUiCoveragePermille);
+        ParseJsonInteger(status, "hudlessDetectFormat", output.hudlessDetectFormat);
+        ParseJsonInteger(status, "hudlessDetectExtentWidth", output.hudlessDetectExtentWidth);
+        ParseJsonInteger(status, "hudlessDetectExtentHeight", output.hudlessDetectExtentHeight);
+        ParseJsonInteger(status, "hudlessDetectLifecycle", output.hudlessDetectLifecycle);
+        ParseJsonInteger(status, "hudlessDetectFinalFormat", output.hudlessDetectFinalFormat);
+        ParseJsonInteger(status, "hudlessDetectFinalWidth", output.hudlessDetectFinalWidth);
+        ParseJsonInteger(status, "hudlessDetectFinalHeight", output.hudlessDetectFinalHeight);
+        ParseJsonInteger(status, "hudlessDetectCompositePermille", output.hudlessDetectCompositePermille);
+        ParseJsonInteger(status, "hudlessDetectTranslucentTiles", output.hudlessDetectTranslucentTiles);
+        ParseJsonInteger(status, "hudlessDetectInformativeTiles", output.hudlessDetectInformativeTiles);
+        copyString("hudRecompositionState", output.hudRecompositionState, sizeof(output.hudRecompositionState));
+        ParseJsonBool(status, "hudRecompositionVerified", output.hudRecompositionVerified);
+        ParseJsonBool(status, "hudlessDetectPaired", output.hudlessDetectPaired);
+        ParseJsonInteger(status, "hudlessDetectStillPermille", output.hudlessDetectStillPermille);
+        ParseJsonInteger(status, "hudlessPresentMarkers", output.hudlessPresentMarkers);
+        ParseJsonInteger(status, "hudlessTagLead", output.hudlessTagLead);
+        ParseJsonInteger(status, "hudlessMaxTagLead", output.hudlessMaxTagLead);
+        copyString("hudRecompositionUi", output.hudRecompositionUi, sizeof(output.hudRecompositionUi));
+        ParseJsonBool(status, "hudlessDetectDiffersInMotion", output.hudlessDetectDiffersInMotion);
+        ParseJsonInteger(status, "hudlessDetectMotionDiffersProbes", output.hudlessDetectMotionDiffersProbes);
         if (!haveSavedControl)
             ParseJsonBool(status, "generatedOnlyDebug", output.generatedOnlyDebug);
         ParseJsonBool(status, "appliedGeneratedOnlyDebug",
@@ -1828,6 +1867,79 @@ const char* YesNo(BOOL value) noexcept
     return value ? "yes" : "no";
 }
 
+// Shared by the universal and split Debug panels.
+void DrawHudlessDetection(const MfgUnlockReShadeSnapshot& snapshot)
+{
+    ImGui::Separator();
+    ImGui::TextUnformatted("HUDless detection");
+    const auto text = [](const char* value) { return value[0] ? value : "waiting"; };
+    const bool gameRecomposition = strcmp(snapshot.hudRecompositionState, "game-managed") == 0;
+    ImGui::Text("UI recomposition: %s", gameRecomposition ? "on (the game's own)" : "off");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("DLSS-G UI recomposition is left to the game; RTXMFG never enables it.\n"
+            "An NVIDIA frame generation preset can still turn it on in the driver.");
+    const bool layerFromHudless = strcmp(snapshot.hudRecompositionUi, "synthesized") == 0;
+    ImGui::Text("HUD layer: %s", !snapshot.hudRecompositionVerified ? "not verified"
+        : layerFromHudless ? "verified (from final colour minus HUDless)" : "verified (game UI buffer)");
+    if (snapshot.hudlessDetectDiffersInMotion)
+        ImGui::TextWrapped("HUDless matches when the camera is still but differs while it moves "
+            "(likely motion blur).");
+#if defined(MFG_UNLOCK_SINGLE_MODULE_UI)
+    bool tint = hudless_visualizer::Enabled();
+    if (ImGui::Checkbox("Tint pixels missing from HUDless", &tint)) hudless_visualizer::SetEnabled(tint);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Debug: paints magenta wherever the presented image differs from the\n"
+            "game's HUDless image, i.e. what the HUDless image leaves out.\n"
+            "Session only; changes presented pixels while enabled.");
+    if (tint)
+    {
+        ImGui::Text("Tint: %s | %llu frames (%llu frame-paired)", hudless_visualizer::StateText(),
+            static_cast<unsigned long long>(hudless_visualizer::FramesDrawn()),
+            static_cast<unsigned long long>(hudless_visualizer::PairedFrames()));
+        // Recomposition builds generated frames from the game's HUDless and UI
+        // buffers, which never contain the tint.
+        if (gameRecomposition)
+            ImGui::TextWrapped("The game's UI recomposition is on, so the tint appears on rendered "
+                "frames only (1 in N displayed frames at Nx).");
+    }
+#endif
+    if (!snapshot.hudlessDetectEnabled)
+    {
+        ImGui::TextUnformatted("Disabled by [HUD] Detection=0");
+        return;
+    }
+    ImGui::Text("Source: %s | route: %s", text(snapshot.hudlessDetectSource),
+        text(snapshot.hudlessDetectRoute));
+    ImGui::Text("Verdict: %s | probes: %u (%u conclusive)",
+        text(snapshot.hudlessDetectVerdict), snapshot.hudlessDetectProbes,
+        snapshot.hudlessDetectConclusive);
+    if (snapshot.hudlessDetectProbes)
+    {
+        ImGui::Text("Last probe: identity %.1f%% | composite %.1f%% (%u/%u translucent) | best %s %.1f%%",
+            snapshot.hudlessDetectIdentityPermille / 10.0,
+            snapshot.hudlessDetectCompositePermille / 10.0,
+            snapshot.hudlessDetectTranslucentTiles, snapshot.hudlessDetectInformativeTiles,
+            text(snapshot.hudlessDetectBestHypothesis),
+            snapshot.hudlessDetectBestPermille / 10.0);
+    }
+    if (snapshot.hudlessPresentMarkers)
+        ImGui::Text("Frame pairing: by frame index | tags lead Present by %d (max %d) | last probe %s, still %.1f%%",
+            snapshot.hudlessTagLead, snapshot.hudlessMaxTagLead,
+            snapshot.hudlessDetectPaired ? "paired" : "unpaired", snapshot.hudlessDetectStillPermille / 10.0);
+    else
+        ImGui::TextUnformatted("Frame pairing: timing only (no present markers)");
+    if (snapshot.hudlessDetectExtentWidth)
+    {
+        ImGui::Text("HUDless %ux%u fmt %u life %u | final %ux%u fmt %u",
+            snapshot.hudlessDetectExtentWidth, snapshot.hudlessDetectExtentHeight,
+            snapshot.hudlessDetectFormat, snapshot.hudlessDetectLifecycle,
+            snapshot.hudlessDetectFinalWidth, snapshot.hudlessDetectFinalHeight,
+            snapshot.hudlessDetectFinalFormat);
+    }
+    if (snapshot.hudlessDetectReason[0] && strcmp(snapshot.hudlessDetectReason, "none") != 0)
+        ImGui::TextWrapped("Note: %s", snapshot.hudlessDetectReason);
+}
+
 const char* DlssgPresetName(uint32_t preset) noexcept
 {
     switch (preset)
@@ -1944,8 +2056,19 @@ void DrawPresentationControls(const MfgUnlockReShadeSnapshot& snapshot, bool sta
         gReflexFrameLimitFps = static_cast<int>(snapshot.reflexFrameLimitFps);
     }
     const int previousLimit = gReflexFrameLimitFps;
+    const int previousVsync = gVsyncMode;
     bool changed = false;
     ImGui::BeginDisabled(statusStale);
+    // Off submits the game's frames without V-Sync. A saved On from older
+    // builds is not offered and behaves as Game.
+    const char* const vsyncModes[] = {"Game", "Off"};
+    int vsyncChoice = gVsyncMode == 1 ? 1 : 0;
+    ImGui::SetNextItemWidth(140.0f);
+    if (ImGui::Combo("V-Sync", &vsyncChoice, vsyncModes, 2))
+    {
+        gVsyncMode = vsyncChoice;
+        changed = true;
+    }
     const bool dynamic = snapshot.dynamicMode || snapshot.appliedDynamicMode;
     ImGui::BeginDisabled(dynamic);
     bool limitEnabled = gReflexFrameLimitFps > 0;
@@ -1976,7 +2099,28 @@ void DrawPresentationControls(const MfgUnlockReShadeSnapshot& snapshot, bool sta
         gLastApplyAccepted = saved != FALSE;
         gLastNativeConfigPersisted = saved != FALSE;
         gPresentationSaveFailed = !saved;
-        if (!saved) gReflexFrameLimitFps = previousLimit;
+        if (!saved)
+        {
+            gReflexFrameLimitFps = previousLimit;
+            gVsyncMode = previousVsync;
+        }
+    }
+    if (gVsyncMode == 1)
+    {
+        const bool current = !statusStale && !changed && snapshot.vsyncMode == 1;
+        if (current && snapshot.vsyncPresentationObserved && snapshot.vsyncOverrideApplied)
+            ImGui::Text("V-Sync off: the game's interval %u is submitted as 0.",
+                snapshot.vsyncOriginalInterval);
+        else if (current && snapshot.vsyncPresentationObserved)
+            ImGui::TextUnformatted("V-Sync off: the game already presents without V-Sync.");
+        else if (current && snapshot.vsyncFailure
+                == static_cast<uint32_t>(vsync_control::Failure::ePresentFailed))
+            ImGui::TextUnformatted("V-Sync off: the game's last Present was not accepted.");
+        else if (current)
+            ImGui::TextUnformatted("V-Sync off: waiting for the game's swapchain.");
+        else
+            ImGui::TextUnformatted("V-Sync off: applying...");
+        ImGui::TextWrapped("NVIDIA Control Panel V-Sync settings take priority.");
     }
     if (dynamic)
         ImGui::TextUnformatted("Reflex limit is paused while Dynamic MFG is enabled. The saved limit is retained.");
@@ -2003,6 +2147,10 @@ void DrawPresentationControls(const MfgUnlockReShadeSnapshot& snapshot, bool sta
 
 void DrawPresentationDebug(const MfgUnlockReShadeSnapshot& snapshot)
 {
+    ImGui::Text("V-Sync: requested=%u available=%u observed=%u applied=%u interval=%u->%u failure=%s",
+        snapshot.vsyncMode, snapshot.vsyncControlAvailable, snapshot.vsyncPresentationObserved,
+        snapshot.vsyncOverrideApplied, snapshot.vsyncOriginalInterval, snapshot.vsyncSubmittedInterval,
+        vsync_control::FailureName(static_cast<vsync_control::Failure>(snapshot.vsyncFailure)));
     ImGui::Text("Reflex: available=%u accepted=%u limit=%u us pending=%u restore=%u status=%u result=%d",
         snapshot.reflexControlAvailable, snapshot.reflexAppliedKnown, snapshot.reflexAppliedFrameLimitUs,
         snapshot.reflexLimitPending, snapshot.reflexRestorePending, snapshot.reflexStatus,
@@ -2012,6 +2160,70 @@ void DrawPresentationDebug(const MfgUnlockReShadeSnapshot& snapshot)
         snapshot.reflexModuleVersionPatch, static_cast<unsigned long long>(snapshot.reflexModuleGeneration),
         snapshot.reflexHookMask);
 }
+
+#if defined(MFG_UNLOCK_SINGLE_MODULE_UI)
+void DrawWitcherDots()
+{
+    // Witcher 3 only. The fallback is always prepared there; the game's own
+    // HairWorks / Path Traced Hair settings turn hair on and off.
+    const auto status=witcher_dots::ReadSnapshot();
+    if(!status.applicable)return;
+    ImGui::Separator();
+    if(status.environmentOverride) {ImGui::TextUnformatted("Path traced hair: off (RTXMFG_WITCHER_DOTS=0)");return;}
+    ImGui::Text("Path traced hair: %s",witcher_dots::ActivityText(status));
+    if(ImGui::IsItemHovered())
+        ImGui::SetTooltip("Turn it on or off with HairWorks and Path Traced Hair in the game's graphics settings.");
+    if(status.reason[0])ImGui::TextWrapped("%s",status.reason);
+    if(status.stage==witcher_dots::Stage::Active||status.builds) {
+        ImGui::Text("Hair builds: %llu (%llu updates) | traced hair: %u | fallback checks: %llu",
+            static_cast<unsigned long long>(status.builds),static_cast<unsigned long long>(status.updates),
+            status.lastHairAgeMs<2000?status.hairInstances:0u,static_cast<unsigned long long>(status.rejected));
+        if(ImGui::CollapsingHeader("Hair diagnostics")) {
+            ImGui::Text("Prebuilds %llu | shader libraries %llu | instance copies %llu | geometry %.1f MiB",
+                static_cast<unsigned long long>(status.prebuilds),static_cast<unsigned long long>(status.shaderLibraries),
+                static_cast<unsigned long long>(status.instanceCopies),status.geometryBytes/(1024.0*1024.0));
+            ImGui::Text("Live hair owners %u | released %llu",status.liveOwners,static_cast<unsigned long long>(status.evictions));
+            constexpr double mib=1024.0*1024.0,gib=1024.0*1024.0*1024.0;
+            ImGui::Text("Hair memory: vertex pool %.0f MiB | BLAS %.0f MiB | scratch %.0f MiB",
+                status.geometryBytes/mib,status.hairBlasBytes/mib,status.hairScratchBytes/mib);
+            if(status.memoryKnown)
+                ImGui::Text("Game VRAM: %.2f of %.2f GiB budget | shared %.2f GiB",
+                    status.vramUsage/gib,status.vramBudget/gib,status.sharedUsage/gib);
+            // DOTS time per second by hook, sampled once a second.
+            static uint64_t sampleTick=0,sampleBuild=0,sampleCopy=0,sampleCalls=0,sampleInstances=0,sampleWait=0,sampleHeld=0;
+            static double buildMs=0,copyMs=0,callsPerSecond=0,instancesPerSecond=0,waitMs=0,heldMs=0;
+            const uint64_t tick=GetTickCount64();
+            if(!sampleTick||tick-sampleTick>=1000) {
+                if(sampleTick) {
+                    const double seconds=(tick-sampleTick)/1000.0;
+                    buildMs=(status.buildMicroseconds-sampleBuild)/1000.0/seconds;copyMs=(status.copyMicroseconds-sampleCopy)/1000.0/seconds;
+                    callsPerSecond=(status.copyCalls-sampleCalls)/seconds;instancesPerSecond=(status.instancesScanned-sampleInstances)/seconds;
+                    waitMs=(status.buildLockWaitMicroseconds-sampleWait)/1000.0/seconds;heldMs=(status.buildLockHeldMicroseconds-sampleHeld)/1000.0/seconds;
+                }
+                sampleTick=tick;sampleBuild=status.buildMicroseconds;sampleCopy=status.copyMicroseconds;
+                sampleWait=status.buildLockWaitMicroseconds;sampleHeld=status.buildLockHeldMicroseconds;
+                sampleCalls=status.copyCalls;sampleInstances=status.instancesScanned;
+            }
+            ImGui::Text("DOTS CPU: hair builds %.2f ms/s | instance copies %.2f ms/s (%.0f/s, %.0fk instances/s)",
+                buildMs,copyMs,callsPerSecond,instancesPerSecond/1000.0);
+            ImGui::Text("Hair builds: lock wait %.2f ms/s | under lock %.2f ms/s | other %.2f ms/s",
+                waitMs,heldMs,buildMs>waitMs+heldMs?buildMs-waitMs-heldMs:0.0);
+            ImGui::Text("Pool allocations %llu, releases %llu, returns %llu | full rebuilds %llu",
+                static_cast<unsigned long long>(status.poolAllocations),static_cast<unsigned long long>(status.poolReleases),
+                static_cast<unsigned long long>(status.poolReturns),static_cast<unsigned long long>(status.fullRebuilds));
+            bool report=status.crashReportRequested;
+            static bool reportSaveFailed=false;
+            if(ImGui::Checkbox("GPU crash report (next launch)",&report))reportSaveFailed=!witcher_dots::SetCrashReportRequested(report);
+            if(ImGui::IsItemHovered())
+                ImGui::SetTooltip("Enables D3D12 DRED breadcrumbs for the game's device. If the GPU crashes, the report is written to\n"
+                    "%%TEMP%%\\RTXMFG-witcher3-device-removed-<pid>.txt. Costs a little GPU time while enabled.");
+            if(reportSaveFailed)ImGui::TextUnformatted("Could not save the crash report setting.");
+            if(status.crashReportArmed)ImGui::TextUnformatted("Crash report armed for this session.");
+            else if(status.crashReportRequested)ImGui::TextUnformatted("Crash report starts with the next launch.");
+        }
+    }
+}
+#endif
 
 void DrawSettings(reshade::api::effect_runtime* runtime)
 {
@@ -2149,6 +2361,9 @@ void DrawSettings(reshade::api::effect_runtime* runtime)
             : snapshot.gameFrameGenerationOn ? "On" : "Off");
     DrawPresetControls(snapshot, statusStale);
     DrawPresentationControls(snapshot, statusStale);
+#if defined(MFG_UNLOCK_SINGLE_MODULE_UI)
+    DrawWitcherDots();
+#endif
     const bool fpsSampleCurrent = snapshot.realFpsMilli > 0
         && snapshot.fpsSampleAgeMs <= 2000;
     if (snapshot.appliedFrameGenerationOn && fpsSampleCurrent)
@@ -2507,6 +2722,7 @@ void DrawSettings(reshade::api::effect_runtime* runtime)
         }
         if (snapshot.intervalLogFile[0])
             ImGui::Text("Trace: %%TEMP%%\\%s", snapshot.intervalLogFile);
+        DrawHudlessDetection(snapshot);
     }
 #else
     if (ImGui::CollapsingHeader("Debug"))
@@ -2744,6 +2960,7 @@ void DrawSettings(reshade::api::effect_runtime* runtime)
     ImGui::Text("Tagged UI input coherence: %s",
         snapshot.uiInputsReady ? "established" : "not established");
     ImGui::TextUnformatted("Tag observations do not verify displayed UI.");
+    DrawHudlessDetection(snapshot);
 
     ImGui::Separator();
     ImGui::TextUnformatted("Streamline and OTA");

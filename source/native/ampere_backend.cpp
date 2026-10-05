@@ -2476,7 +2476,12 @@ void ObserveModule(HMODULE module, const wchar_t* path, uint64_t generation,
     bool wrapper, bool provider, bool runtime) noexcept
 {
 #if MFG_UNLOCK_RUNTIME_GPU_SELECTION
-    if (gpu_dispatch::IsAda() || gpu_dispatch::Selected() == gpu_dispatch::Family::eConflict) return;
+    // Streamline can probe, unload and replace plugins during slInit, before
+    // the device establishes the GPU family. Pinning a probe wrapper here can
+    // preserve its pointers into a common plugin which the host then unloads.
+    // Confirm Ampere before claiming routes or retaining any discovery owner.
+    // BeginStartup re-inspects the surviving modules after device selection.
+    if (!gpu_dispatch::IsAmpere()) return;
 #endif
     if (!module || !generation || (!wrapper && !provider && !runtime) || gFatal.load()) return;
     std::lock_guard callLock(gCalls);

@@ -42,6 +42,8 @@ enum class Kind : uint32_t
     eReflexGetState = 28,
     eNgxD3D12Init = 29,
     eNgxD3D12InitProject = 30,
+    eSlUpgradeInterface = 31,
+    eSlSetD3DDevice = 32,
     eCount,
 };
 
@@ -110,6 +112,12 @@ struct InstallOptions
     // keeps shared NGX runtime entries transparent to unrelated features.
     bool filterForwardArg2 = false;
     uintptr_t requiredForwardArg2 = 0;
+
+    // For loader-notification callers that hold the loader lock: the install
+    // never waits for the registry lock (it returns false if another install
+    // is in progress) and never uses the relocation path, whose thread
+    // suspension must not run under the loader lock.
+    bool nonBlocking = false;
 };
 
 struct Snapshot

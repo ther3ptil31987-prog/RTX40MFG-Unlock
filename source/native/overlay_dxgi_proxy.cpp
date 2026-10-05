@@ -6,6 +6,7 @@
 #include "overlay_dx12.h"
 #include "overlay_install.h"
 #include "overlay_platform.h"
+#include "vsync_control.h"
 #include <atomic>
 #include <new>
 #include <array>
@@ -112,6 +113,12 @@ public:
         // are advertised by the proxy; no private object layouts are inferred.
         return original->QueryInterface(iid,output);
     }
+    template<class T> T* Revision(unsigned v) noexcept {
+        // Witcher 3 calls newer methods on its IDXGIFactory creation pointer
+        // without QueryInterface. Acquire only the revision actually used;
+        // never assume the root pointer exposes that revision's vtable.
+        return interfaces.Acquire(v,factoryIids[v],factoryLast[v])?interfaces.As<T>(v):nullptr;
+    }
     HRESULT STDMETHODCALLTYPE CreateSwapChain(IUnknown* q,DXGI_SWAP_CHAIN_DESC* d,IDXGISwapChain** out) override {
         Lease lease(this); Creation creation;
         const HRESULT hr=original->CreateSwapChain(q,d,out);
@@ -121,21 +128,27 @@ public:
     HRESULT STDMETHODCALLTYPE CreateSwapChainForHwnd(IUnknown* q,HWND w,const DXGI_SWAP_CHAIN_DESC1* d,
         const DXGI_SWAP_CHAIN_FULLSCREEN_DESC* f,IDXGIOutput* o,IDXGISwapChain1** out) override {
         Lease lease(this); Creation creation;
-        const HRESULT hr=interfaces.As<IDXGIFactory2>(2)->CreateSwapChainForHwnd(q,w,d,f,o,out);
+        auto* target=Revision<IDXGIFactory2>(2);
+        if (!target) return E_NOINTERFACE;
+        const HRESULT hr=target->CreateSwapChainForHwnd(q,w,d,f,o,out);
         if (SUCCEEDED(hr)&&out&&*out&&creation.outer) WrapSwapchain(reinterpret_cast<IDXGISwapChain**>(out),q,this);
         return hr;
     }
     HRESULT STDMETHODCALLTYPE CreateSwapChainForCoreWindow(IUnknown* q,IUnknown* w,const DXGI_SWAP_CHAIN_DESC1* d,
         IDXGIOutput* o,IDXGISwapChain1** out) override {
         Lease lease(this); Creation creation;
-        const HRESULT hr=interfaces.As<IDXGIFactory2>(2)->CreateSwapChainForCoreWindow(q,w,d,o,out);
+        auto* target=Revision<IDXGIFactory2>(2);
+        if (!target) return E_NOINTERFACE;
+        const HRESULT hr=target->CreateSwapChainForCoreWindow(q,w,d,o,out);
         if (SUCCEEDED(hr)&&out&&*out&&creation.outer) WrapSwapchain(reinterpret_cast<IDXGISwapChain**>(out),q,this);
         return hr;
     }
     HRESULT STDMETHODCALLTYPE CreateSwapChainForComposition(IUnknown* q,const DXGI_SWAP_CHAIN_DESC1* d,
         IDXGIOutput* o,IDXGISwapChain1** out) override {
         Lease lease(this); Creation creation;
-        const HRESULT hr=interfaces.As<IDXGIFactory2>(2)->CreateSwapChainForComposition(q,d,o,out);
+        auto* target=Revision<IDXGIFactory2>(2);
+        if (!target) return E_NOINTERFACE;
+        const HRESULT hr=target->CreateSwapChainForComposition(q,d,o,out);
         if (SUCCEEDED(hr)&&out&&*out&&creation.outer) WrapSwapchain(reinterpret_cast<IDXGISwapChain**>(out),q,this);
         return hr;
     }
@@ -147,23 +160,23 @@ public:
     HRESULT STDMETHODCALLTYPE MakeWindowAssociation(HWND WindowHandle, UINT Flags) override { Lease lease(this); return interfaces.As<IDXGIFactory>(0)->MakeWindowAssociation(WindowHandle,Flags); }
     HRESULT STDMETHODCALLTYPE GetWindowAssociation(HWND *pWindowHandle) override { Lease lease(this); return interfaces.As<IDXGIFactory>(0)->GetWindowAssociation(pWindowHandle); }
     HRESULT STDMETHODCALLTYPE CreateSoftwareAdapter(HMODULE Module, IDXGIAdapter **ppAdapter) override { Lease lease(this); return interfaces.As<IDXGIFactory>(0)->CreateSoftwareAdapter(Module,ppAdapter); }
-    HRESULT STDMETHODCALLTYPE EnumAdapters1(UINT Adapter, IDXGIAdapter1 **ppAdapter) override { Lease lease(this); return interfaces.As<IDXGIFactory1>(1)->EnumAdapters1(Adapter,ppAdapter); }
-    BOOL STDMETHODCALLTYPE IsCurrent() override { Lease lease(this); return interfaces.As<IDXGIFactory1>(1)->IsCurrent(); }
-    BOOL STDMETHODCALLTYPE IsWindowedStereoEnabled() override { Lease lease(this); return interfaces.As<IDXGIFactory2>(2)->IsWindowedStereoEnabled(); }
-    HRESULT STDMETHODCALLTYPE GetSharedResourceAdapterLuid(HANDLE hResource, LUID *pLuid) override { Lease lease(this); return interfaces.As<IDXGIFactory2>(2)->GetSharedResourceAdapterLuid(hResource,pLuid); }
-    HRESULT STDMETHODCALLTYPE RegisterStereoStatusWindow(HWND WindowHandle, UINT wMsg, DWORD *pdwCookie) override { Lease lease(this); return interfaces.As<IDXGIFactory2>(2)->RegisterStereoStatusWindow(WindowHandle,wMsg,pdwCookie); }
-    HRESULT STDMETHODCALLTYPE RegisterStereoStatusEvent(HANDLE hEvent, DWORD *pdwCookie) override { Lease lease(this); return interfaces.As<IDXGIFactory2>(2)->RegisterStereoStatusEvent(hEvent,pdwCookie); }
-    void STDMETHODCALLTYPE UnregisterStereoStatus(DWORD dwCookie) override { Lease lease(this); return interfaces.As<IDXGIFactory2>(2)->UnregisterStereoStatus(dwCookie); }
-    HRESULT STDMETHODCALLTYPE RegisterOcclusionStatusWindow(HWND WindowHandle, UINT wMsg, DWORD *pdwCookie) override { Lease lease(this); return interfaces.As<IDXGIFactory2>(2)->RegisterOcclusionStatusWindow(WindowHandle,wMsg,pdwCookie); }
-    HRESULT STDMETHODCALLTYPE RegisterOcclusionStatusEvent(HANDLE hEvent, DWORD *pdwCookie) override { Lease lease(this); return interfaces.As<IDXGIFactory2>(2)->RegisterOcclusionStatusEvent(hEvent,pdwCookie); }
-    void STDMETHODCALLTYPE UnregisterOcclusionStatus(DWORD dwCookie) override { Lease lease(this); return interfaces.As<IDXGIFactory2>(2)->UnregisterOcclusionStatus(dwCookie); }
-    UINT STDMETHODCALLTYPE GetCreationFlags() override { Lease lease(this); return interfaces.As<IDXGIFactory3>(3)->GetCreationFlags(); }
-    HRESULT STDMETHODCALLTYPE EnumAdapterByLuid(LUID AdapterLuid, REFIID riid, void **ppvAdapter) override { Lease lease(this); return interfaces.As<IDXGIFactory4>(4)->EnumAdapterByLuid(AdapterLuid,riid,ppvAdapter); }
-    HRESULT STDMETHODCALLTYPE EnumWarpAdapter(REFIID riid, void **ppvAdapter) override { Lease lease(this); return interfaces.As<IDXGIFactory4>(4)->EnumWarpAdapter(riid,ppvAdapter); }
-    HRESULT STDMETHODCALLTYPE CheckFeatureSupport(DXGI_FEATURE Feature, void *pFeatureSupportData, UINT FeatureSupportDataSize) override { Lease lease(this); return interfaces.As<IDXGIFactory5>(5)->CheckFeatureSupport(Feature,pFeatureSupportData,FeatureSupportDataSize); }
-    HRESULT STDMETHODCALLTYPE EnumAdapterByGpuPreference(UINT Adapter, DXGI_GPU_PREFERENCE GpuPreference, REFIID riid, void **ppvAdapter) override { Lease lease(this); return interfaces.As<IDXGIFactory6>(6)->EnumAdapterByGpuPreference(Adapter,GpuPreference,riid,ppvAdapter); }
-    HRESULT STDMETHODCALLTYPE RegisterAdaptersChangedEvent(HANDLE hEvent, DWORD *pdwCookie) override { Lease lease(this); return interfaces.As<IDXGIFactory7>(7)->RegisterAdaptersChangedEvent(hEvent,pdwCookie); }
-    HRESULT STDMETHODCALLTYPE UnregisterAdaptersChangedEvent(DWORD dwCookie) override { Lease lease(this); return interfaces.As<IDXGIFactory7>(7)->UnregisterAdaptersChangedEvent(dwCookie); }
+    HRESULT STDMETHODCALLTYPE EnumAdapters1(UINT Adapter, IDXGIAdapter1 **ppAdapter) override { Lease lease(this); auto* target=Revision<IDXGIFactory1>(1); return target?target->EnumAdapters1(Adapter,ppAdapter):E_NOINTERFACE; }
+    BOOL STDMETHODCALLTYPE IsCurrent() override { Lease lease(this); auto* target=Revision<IDXGIFactory1>(1); return target?target->IsCurrent():FALSE; }
+    BOOL STDMETHODCALLTYPE IsWindowedStereoEnabled() override { Lease lease(this); auto* target=Revision<IDXGIFactory2>(2); return target?target->IsWindowedStereoEnabled():FALSE; }
+    HRESULT STDMETHODCALLTYPE GetSharedResourceAdapterLuid(HANDLE hResource, LUID *pLuid) override { Lease lease(this); auto* target=Revision<IDXGIFactory2>(2); return target?target->GetSharedResourceAdapterLuid(hResource,pLuid):E_NOINTERFACE; }
+    HRESULT STDMETHODCALLTYPE RegisterStereoStatusWindow(HWND WindowHandle, UINT wMsg, DWORD *pdwCookie) override { Lease lease(this); auto* target=Revision<IDXGIFactory2>(2); return target?target->RegisterStereoStatusWindow(WindowHandle,wMsg,pdwCookie):E_NOINTERFACE; }
+    HRESULT STDMETHODCALLTYPE RegisterStereoStatusEvent(HANDLE hEvent, DWORD *pdwCookie) override { Lease lease(this); auto* target=Revision<IDXGIFactory2>(2); return target?target->RegisterStereoStatusEvent(hEvent,pdwCookie):E_NOINTERFACE; }
+    void STDMETHODCALLTYPE UnregisterStereoStatus(DWORD dwCookie) override { Lease lease(this); auto* target=Revision<IDXGIFactory2>(2); if(target)target->UnregisterStereoStatus(dwCookie); }
+    HRESULT STDMETHODCALLTYPE RegisterOcclusionStatusWindow(HWND WindowHandle, UINT wMsg, DWORD *pdwCookie) override { Lease lease(this); auto* target=Revision<IDXGIFactory2>(2); return target?target->RegisterOcclusionStatusWindow(WindowHandle,wMsg,pdwCookie):E_NOINTERFACE; }
+    HRESULT STDMETHODCALLTYPE RegisterOcclusionStatusEvent(HANDLE hEvent, DWORD *pdwCookie) override { Lease lease(this); auto* target=Revision<IDXGIFactory2>(2); return target?target->RegisterOcclusionStatusEvent(hEvent,pdwCookie):E_NOINTERFACE; }
+    void STDMETHODCALLTYPE UnregisterOcclusionStatus(DWORD dwCookie) override { Lease lease(this); auto* target=Revision<IDXGIFactory2>(2); if(target)target->UnregisterOcclusionStatus(dwCookie); }
+    UINT STDMETHODCALLTYPE GetCreationFlags() override { Lease lease(this); auto* target=Revision<IDXGIFactory3>(3); return target?target->GetCreationFlags():0; }
+    HRESULT STDMETHODCALLTYPE EnumAdapterByLuid(LUID AdapterLuid, REFIID riid, void **ppvAdapter) override { Lease lease(this); auto* target=Revision<IDXGIFactory4>(4); return target?target->EnumAdapterByLuid(AdapterLuid,riid,ppvAdapter):E_NOINTERFACE; }
+    HRESULT STDMETHODCALLTYPE EnumWarpAdapter(REFIID riid, void **ppvAdapter) override { Lease lease(this); auto* target=Revision<IDXGIFactory4>(4); return target?target->EnumWarpAdapter(riid,ppvAdapter):E_NOINTERFACE; }
+    HRESULT STDMETHODCALLTYPE CheckFeatureSupport(DXGI_FEATURE Feature, void *pFeatureSupportData, UINT FeatureSupportDataSize) override { Lease lease(this); auto* target=Revision<IDXGIFactory5>(5); return target?target->CheckFeatureSupport(Feature,pFeatureSupportData,FeatureSupportDataSize):E_NOINTERFACE; }
+    HRESULT STDMETHODCALLTYPE EnumAdapterByGpuPreference(UINT Adapter, DXGI_GPU_PREFERENCE GpuPreference, REFIID riid, void **ppvAdapter) override { Lease lease(this); auto* target=Revision<IDXGIFactory6>(6); return target?target->EnumAdapterByGpuPreference(Adapter,GpuPreference,riid,ppvAdapter):E_NOINTERFACE; }
+    HRESULT STDMETHODCALLTYPE RegisterAdaptersChangedEvent(HANDLE hEvent, DWORD *pdwCookie) override { Lease lease(this); auto* target=Revision<IDXGIFactory7>(7); return target?target->RegisterAdaptersChangedEvent(hEvent,pdwCookie):E_NOINTERFACE; }
+    HRESULT STDMETHODCALLTYPE UnregisterAdaptersChangedEvent(DWORD dwCookie) override { Lease lease(this); auto* target=Revision<IDXGIFactory7>(7); return target?target->UnregisterAdaptersChangedEvent(dwCookie):E_NOINTERFACE; }
 };
 
 class SwapchainProxy;
@@ -215,10 +228,18 @@ public:
     HRESULT STDMETHODCALLTYPE GetParent(REFIID iid,void** output) override {
         Lease lease(this); return parent->QueryInterface(iid,output);
     }
+    // The optional V-Sync Off override applies to the application's own
+    // top-level Presents only; nested calls keep their arguments.
+    vsync_control::Submission AdjustSync(const PresentCall& call,UINT sync,UINT flags) noexcept {
+        if (!call.outer) { vsync_control::Submission same{}; same.interval=same.originalInterval=sync; return same; }
+        return vsync_control::BeforeApplicationPresent(sync,flags,dx12::IsPrincipal(renderer));
+    }
     HRESULT STDMETHODCALLTYPE Present(UINT sync,UINT flags) override {
         Lease lease(this); PresentCall call(this);
         const bool entered=call.outer&&dx12::BeginPresent(renderer,flags,false);
-        const HRESULT hr=original->Present(sync,flags);
+        const auto vsync=AdjustSync(call,sync,flags);
+        const HRESULT hr=original->Present(vsync.interval,flags);
+        vsync_control::AfterApplicationPresent(vsync,hr);
         if (entered) dx12::EndPresent(renderer,hr,flags);
         return hr;
     }
@@ -226,7 +247,9 @@ public:
         Lease lease(this); PresentCall call(this);
         const bool partial=params&&(params->DirtyRectsCount||params->pScrollRect||params->pScrollOffset);
         const bool entered=call.outer&&dx12::BeginPresent(renderer,flags,partial);
-        const HRESULT hr=interfaces.As<IDXGISwapChain1>(1)->Present1(sync,flags,params);
+        const auto vsync=AdjustSync(call,sync,flags);
+        const HRESULT hr=interfaces.As<IDXGISwapChain1>(1)->Present1(vsync.interval,flags,params);
+        vsync_control::AfterApplicationPresent(vsync,hr);
         if (entered) dx12::EndPresent(renderer,hr,flags);
         return hr;
     }
@@ -358,5 +381,47 @@ HRESULT ParentFactoryCall(ParentFn original,IDXGIObject* object,REFIID iid,void*
     const HRESULT hr=original(object,iid,output);
     if (SUCCEEDED(hr)&&creation.outer) WrapFactory(iid,output);
     return hr;
+}
+bool Owned(IUnknown* object) noexcept {
+    if (!object||!native::PinInterface(object,2)) return false;
+    InternalScope internal;
+    return AlreadyWrapped(object,factoryId)||AlreadyWrapped(object,chainId);
+}
+bool WrapUpgraded(void** output) noexcept {
+    if (!output||!*output||native::InsideLoader()) return false;
+    auto* upgraded=static_cast<IUnknown*>(*output);
+    if (!native::PinInterface(upgraded,2)||Owned(upgraded)) return false;
+    {
+        // A D3D12 swapchain reports its device, never its presentation queue,
+        // and the renderer needs that queue. Leave upgraded swapchains alone;
+        // Streamline's manual-hooking flow upgrades the factory first.
+        InternalScope internal;
+        ComPtr<IDXGISwapChain> chain;
+        if (SUCCEEDED(upgraded->QueryInterface(IID_PPV_ARGS(&chain)))&&chain) {
+            static std::atomic_flag logged=ATOMIC_FLAG_INIT;
+            if (!logged.test_and_set())
+                single_module::Log(L"MFG_PROXY_UI upgraded swapchain left unwrapped: its presentation queue is not discoverable");
+            return false;
+        }
+    }
+    // The application keeps using its pointer at whatever revision it holds,
+    // so the proxy's root is the highest revision the upgraded factory has.
+    for (int version=7;version>=0;--version) {
+        void* typed=nullptr;
+        {
+            InternalScope internal;
+            if (upgraded->QueryInterface(factoryIids[version],&typed)!=S_OK||!typed) {
+                if (typed) static_cast<IUnknown*>(typed)->Release();
+                continue;
+            }
+        }
+        void* wrapped=typed;
+        WrapFactory(factoryIids[version],&wrapped);
+        if (wrapped==typed) { static_cast<IUnknown*>(typed)->Release(); return false; }
+        *output=wrapped;
+        upgraded->Release(); // The application's reference moves to the proxy.
+        return true;
+    }
+    return false;
 }
 }

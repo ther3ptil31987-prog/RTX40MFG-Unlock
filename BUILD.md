@@ -1,4 +1,9 @@
-# Building v1.3.3-hotfix.2
+# Building v1.4.1-hotfix.1
+
+The v1.4.1-hotfix.1 release uses the V1.4.1 runtime with the merged dev.45
+ReShade/RenoDX hair, save-load hair, and session logging fixes. ProductVersion
+is 1.4.1-hotfix.1 and FileVersion is 1.4.1.45. The newer RTX 30 development
+work is excluded from this release.
 
 The release target is `RTXMFGUnified`, producing `Release/RTXMFG.dll`.
 Use Windows x64, Visual Studio 2022/MSVC 14.38.33130, Windows SDK
@@ -37,7 +42,7 @@ actual paths and a fresh build directory:
     -StreamlineRoot 'C:/SDKs/streamline-sdk-v2.14.1' `
     -ImGuiRoot 'C:/SDKs/reshade-6.8.0/deps/imgui' `
     -NativeCacheRoot 'C:/BuildInputs/rtxmfg-sm86' `
-    -BuildDirectory "$PWD/build/v1.3.3-hotfix.2" `
+    -BuildDirectory "$PWD/build/v1.4.1-hotfix.1" `
     -EnableNgxCreateResultDiagnostics
 ```
 
@@ -51,6 +56,10 @@ generated in the build directory. Their normalized SHA-256 values must match
 `source/native/generated_sha256.json`. The fixed export map is recorded in
 `proxy_exports.txt`; generation does not scan DLLs on the build machine.
 Third-party notices remain embedded in the release DLL.
+
+The Witcher 3 hair converter header is generated from
+`source/native/witcher_dots/converter.hlsl` and `converter_source.h.in`.
+Generated headers and runtime shader caches are not source inputs to publish.
 
 The focused font/publication checks are in `tests/ampere_font`. Configure that
 project separately with `MFG_PROVIDER_FIXTURE` pointing to the audited 310.9.1

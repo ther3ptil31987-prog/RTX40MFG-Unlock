@@ -434,24 +434,60 @@ HMODULE LoadSystemModule(const wchar_t* basename) noexcept
 }
 
 namespace {
-struct UiLogLine { std::atomic<bool> ready{false}; wchar_t text[512]{}; };
-UiLogLine gUiLog[64];
-std::atomic<uint32_t> gUiLogNext{0};
-uint32_t gUiLogRead = 0; // Only the existing backend worker drains this queue.
+// A ring the existing backend worker drains every 100 ms into the log file
+// (lines from before the file opens, and from Witcher DOTS). It was a
+// 64-line array that was never reused: every later line of a session was
+// lost. A full ring drops the newest lines and the drain reports how many.
+constexpr size_t kUiLogChars = 768;
+struct UiLogLine { wchar_t text[kUiLogChars]{}; };
+UiLogLine gUiLog[192];
+SRWLOCK gUiLogLock = SRWLOCK_INIT;
+uint32_t gUiLogHead = 0, gUiLogCount = 0, gUiLogDropped = 0; // gUiLogLock
 }
 void DrainLog(void (*sink)(const wchar_t*)) noexcept
 {
-    while (gUiLogRead < std::size(gUiLog) && gUiLog[gUiLogRead].ready.load(std::memory_order_acquire))
-        sink(gUiLog[gUiLogRead++].text);
+    for (;;)
+    {
+        wchar_t line[kUiLogChars]{};
+        uint32_t dropped = 0;
+        AcquireSRWLockExclusive(&gUiLogLock);
+        const bool have = gUiLogCount != 0;
+        if (have)
+        {
+            wcscpy_s(line, gUiLog[gUiLogHead].text);
+            gUiLogHead = (gUiLogHead + 1) % std::size(gUiLog);
+            --gUiLogCount;
+        }
+        else
+        {
+            dropped = gUiLogDropped;
+            gUiLogDropped = 0;
+        }
+        ReleaseSRWLockExclusive(&gUiLogLock); // The sink runs without the lock.
+        if (!have)
+        {
+            if (dropped)
+            {
+                swprintf_s(line, L"%u log lines dropped (log queue full)", dropped);
+                sink(line);
+            }
+            return;
+        }
+        sink(line);
+    }
 }
 void Log(const wchar_t* text) noexcept
 {
-    const auto index = gUiLogNext.fetch_add(1, std::memory_order_relaxed);
-    if (index < std::size(gUiLog))
+    AcquireSRWLockExclusive(&gUiLogLock);
+    if (gUiLogCount < std::size(gUiLog))
     {
+        const auto index = (gUiLogHead + gUiLogCount) % std::size(gUiLog);
         wcsncpy_s(gUiLog[index].text, text ? text : L"(null)", _TRUNCATE);
-        gUiLog[index].ready.store(true, std::memory_order_release);
+        ++gUiLogCount;
     }
+    else
+        ++gUiLogDropped;
+    ReleaseSRWLockExclusive(&gUiLogLock);
     OutputDebugStringW(L"[" MFG_PRODUCT_W L" single] ");
     OutputDebugStringW(text ? text : L"(null)");
     OutputDebugStringW(L"\n");

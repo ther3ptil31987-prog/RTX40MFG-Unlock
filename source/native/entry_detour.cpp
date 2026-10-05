@@ -859,7 +859,14 @@ bool Install(Kind kind, HMODULE owner, void* target, void* hook,
         return false;
 
     DeferredOwnerRelease release;
-    std::lock_guard lock(gInstallMutex);
+    std::unique_lock lock(gInstallMutex, std::defer_lock);
+    if (!options.nonBlocking)
+        lock.lock();
+    else if (!lock.try_lock())
+        return false;
+    InstallOptions effective = options;
+    if (options.nonBlocking)
+        effective.allowRelocated = false;
     size_t index = 0;
     Slot* slot = ReserveLocked(kind, owner, target, options.generation, index);
     if (!slot)
@@ -874,7 +881,7 @@ bool Install(Kind kind, HMODULE owner, void* target, void* hook,
         return false;
     }
     slot->hook.store(hook, std::memory_order_release);
-    return InstallPreparedLocked(*slot, options, originalTrampoline, release);
+    return InstallPreparedLocked(*slot, effective, originalTrampoline, release);
 }
 
 bool Install(Kind kind, HMODULE owner, void* target, void* hook,

@@ -7,7 +7,10 @@
 #include "overlay_native.h"
 #include "overlay_application_imports.h"
 #include "overlay_adapter_parent.h"
+#include "caller_scoped_import.h"
+#include "witcher_dots/witcher_dots.h"
 #include <d3d12.h>
+#include <intrin.h>
 #include <atomic>
 #include <array>
 #include <cstring>
@@ -20,19 +23,50 @@ namespace single_overlay {
 namespace {
 // Bindings have process lifetime and are published before a gateway escapes.
 // A distinct original entry always gets a distinct typed gateway.
+// First call through each gateway: which export it binds and who called it.
+// Distinguishes application, middleware and scoped-entry routes in game logs.
+void LogFirstGatewayCall(const char* api,FARPROC original,void* caller) noexcept {
+    std::unique_ptr<wchar_t[]> storage(new(std::nothrow) wchar_t[2*32768+512]);
+    if (!storage) return;
+    wchar_t* owner=storage.get();
+    wchar_t* from=owner+32768;
+    wchar_t* line=from+32768;
+    auto leaf=[](const void* address,wchar_t* path,uintptr_t& rva) {
+        HMODULE module=nullptr;
+        rva=0;
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                reinterpret_cast<LPCWSTR>(address),&module) || !module) { wcscpy_s(path,32768,L"(none)"); return path; }
+        const DWORD n=GetModuleFileNameW(module,path,32768);
+        if (!n || n>=32768) { wcscpy_s(path,32768,L"(unnamed)"); return path; }
+        rva=reinterpret_cast<uintptr_t>(address)-reinterpret_cast<uintptr_t>(module);
+        const wchar_t* separator=wcsrchr(path,L'\\');
+        return separator?const_cast<wchar_t*>(separator+1):path;
+    };
+    uintptr_t ownerRva=0,callerRva=0;
+    const wchar_t* ownerLeaf=leaf(reinterpret_cast<const void*>(original),owner,ownerRva);
+    const wchar_t* callerLeaf=leaf(caller,from,callerRva);
+    swprintf_s(line,512,L"MFG_PROXY_UI factory gateway first call api=%hs entry=%s caller=%s+0x%llX",
+        api,ownerLeaf,callerLeaf,static_cast<unsigned long long>(callerRva));
+    single_module::Log(line);
+}
 template<class Tag,class Fn> struct Gateways {
     // Keep entry identity separate from a published trampoline. Repeated slInit
     // calls must reuse the same gateway after a scoped entry has been armed.
     inline static std::array<std::atomic<FARPROC>,16> originals{};
     inline static std::array<std::atomic<FARPROC>,16> trampolines{};
+    inline static std::array<std::atomic<bool>,16> called{};
     template<size_t I> static FARPROC Original() noexcept {
         if (const auto trampoline=trampolines[I].load(std::memory_order_acquire)) return trampoline;
         return originals[I].load(std::memory_order_acquire);
     }
     template<size_t I> static HRESULT WINAPI Factory(REFIID iid,void** output) {
+        if (!called[I].exchange(true,std::memory_order_acq_rel))
+            LogFirstGatewayCall(Tag::name,originals[I].load(std::memory_order_acquire),_ReturnAddress());
         return proxy::FactoryCall(reinterpret_cast<proxy::FactoryFn>(Original<I>()),iid,output);
     }
     template<size_t I> static HRESULT WINAPI Factory2(UINT flags,REFIID iid,void** output) {
+        if (!called[I].exchange(true,std::memory_order_acq_rel))
+            LogFirstGatewayCall(Tag::name,originals[I].load(std::memory_order_acquire),_ReturnAddress());
         return proxy::FactoryCall(reinterpret_cast<proxy::Factory2Fn>(Original<I>()),flags,iid,output);
     }
     template<size_t... I> static auto Entries(std::index_sequence<I...>) {
@@ -59,13 +93,21 @@ template<class Tag,class Fn> struct Gateways {
         return target;
     }
 };
-struct Factory0; struct Factory1; struct Factory2;
+struct Factory0 { static constexpr const char* name="CreateDXGIFactory"; };
+struct Factory1 { static constexpr const char* name="CreateDXGIFactory1"; };
+struct Factory2 { static constexpr const char* name="CreateDXGIFactory2"; };
 using DeviceFn=HRESULT(WINAPI*)(IUnknown*,D3D_FEATURE_LEVEL,REFIID,void**);
 struct DeviceGateways {
     inline static std::array<std::atomic<DeviceFn>,8> originals{};
     template<size_t I> static HRESULT WINAPI Create(IUnknown* adapter,D3D_FEATURE_LEVEL level,REFIID iid,void** output) {
         adapter_parent::Observe(adapter);
-        return originals[I].load(std::memory_order_acquire)(adapter,level,iid,output);
+        if(output)witcher_dots::BeforeDeviceCreate(_ReturnAddress());
+        const auto result=originals[I].load(std::memory_order_acquire)(adapter,level,iid,output);
+        const DWORD error=GetLastError();
+        if(SUCCEEDED(result)&&output&&*output)
+            witcher_dots::ObserveDevice(static_cast<IUnknown*>(*output),_ReturnAddress());
+        SetLastError(error);
+        return result;
     }
     template<size_t... I> static auto Entries(std::index_sequence<I...>) {
         return std::array<DeviceFn,sizeof...(I)>{&Create<I>...};
@@ -113,6 +155,14 @@ bool Eligible(HMODULE module,FARPROC original) noexcept {
         if (!GetSystemDirectoryW(system,MAX_PATH)||wcscat_s(system,L"\\d3d12.dll")) return false;
         eligible=!_wcsicmp(path,system)
             && GetProcAddress(module,"D3D12CreateDevice")==original;
+        if (!eligible && witcher_dots::GameProcess()) {
+            // Witcher DOTS must observe the renderer's device even through a
+            // local ReShade d3d12.dll (same public ABI); it resolves the native
+            // device behind the returned wrapper itself.
+            eligible=GetProcAddress(module,"D3D12CreateDevice")==original;
+            for (const char* name:{"ReShadeRegisterAddon","ReShadeUnregisterAddon"})
+                eligible=slots::ImageEntry(module,reinterpret_cast<void*>(GetProcAddress(module,name)))&&eligible;
+        }
     } else if (!_wcsicmp(leaf,L"sl.interposer.dll")) {
         // Establish the expected public interposer export family in this exact
         // loaded image. Never bind a shared/private Streamline COM method.
@@ -123,6 +173,29 @@ bool Eligible(HMODULE module,FARPROC original) noexcept {
     HMODULE pinned=nullptr;
     return eligible&&GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,
         reinterpret_cast<LPCWSTR>(original),&pinned)&&pinned==module;
+}
+// Where Winds Meet's packed executable resolves the interposer's factory
+// exports itself: no import slot or GetProcAddress call reaches us, so only
+// Streamline's swapchain is created. Route main-executable callers of this
+// interposer's public factory entries through the same typed gateways.
+// Streamline, middleware and RTXMFG callers keep the original entry.
+void ArmInterposerFactories() noexcept {
+    const HMODULE interposer=GetModuleHandleW(L"sl.interposer.dll");
+    if (!interposer) return;
+    for (const char* name:{"CreateDXGIFactory","CreateDXGIFactory1","CreateDXGIFactory2"}) {
+        const FARPROC entry=GetProcAddress(interposer,name);
+        if (!entry) continue;
+        const FARPROC replacement=ResolveProc(interposer,name,entry);
+        if (replacement==entry) continue;
+        void* trampoline=nullptr;
+        if (!caller_scoped_import::PrepareInterposerEntry(reinterpret_cast<void*>(entry),reinterpret_cast<void*>(replacement),name,trampoline)
+            || !PublishFactoryOriginal(name,reinterpret_cast<void*>(entry),trampoline)
+            || !caller_scoped_import::Activate(reinterpret_cast<void*>(entry),reinterpret_cast<void*>(replacement))) {
+            wchar_t line[160]{};
+            swprintf_s(line,L"MFG_PROXY_UI interposer-entry inactive symbol=%hs; other factory routes retained",name);
+            single_module::Log(line);
+        }
+    }
 }
 }
 FARPROC ResolveProc(HMODULE module,LPCSTR name,FARPROC original) noexcept {
@@ -148,6 +221,18 @@ FARPROC ResolveProc(HMODULE module,LPCSTR name,FARPROC original) noexcept {
 #endif
 #endif
 }
+bool OwnsInterface(void* object) noexcept {
+    return object&&!gInsideOverlay&&proxy::Owned(static_cast<IUnknown*>(object));
+}
+bool WrapUpgradedInterface(void** output) noexcept {
+    if (gInsideOverlay||!single_module::OwnsBackend()) return false;
+#if MFG_UNLOCK_DIAGNOSTIC_NO_SINGLE_OVERLAY
+    (void)output;
+    return false;
+#else
+    return proxy::WrapUpgraded(output);
+#endif
+}
 void ArmFactoryGateway() noexcept {
     static std::atomic_flag publishing=ATOMIC_FLAG_INIT;
     if(publishing.test_and_set(std::memory_order_acquire))return;
@@ -155,9 +240,11 @@ void ArmFactoryGateway() noexcept {
     HMODULE executable=GetModuleHandleW(nullptr);
     slots::Batch batch;
     const bool loaderCallout=native::InsideLoader();
+    const bool dotsDevice=witcher_dots::GameProcess();
     size_t deferred=0;
     const bool inspected=slots::VisitImports(executable,[&](const char* name,void** slot) {
         if (strcmp(name,"CreateDXGIFactory")&&strcmp(name,"CreateDXGIFactory1")&&strcmp(name,"CreateDXGIFactory2")
+            && !(dotsDevice&&!strcmp(name,"D3D12CreateDevice"))
             && !(name[0]=='v'&&name[1]=='k')) return true;
         void* value=protected_pointer::ReadPointer(reinterpret_cast<uintptr_t>(slot));
         HMODULE owner=nullptr;
@@ -166,6 +253,12 @@ void ArmFactoryGateway() noexcept {
         const auto original=reinterpret_cast<FARPROC>(value);
         const auto replacement=ResolveProc(owner,name,original);
         if (original==replacement) return true;
+        if(!strcmp(name,"D3D12CreateDevice")) {
+            // DOTS requires this early, aligned import. Do not use the
+            // factory-entry fallback for a different public ABI.
+            if(!slots::ImageSlot(executable,slot)) {++deferred;return true;}
+            return batch.Add(executable,slot,value,reinterpret_cast<void*>(replacement));
+        }
         // DllMain retains only aligned data publication. Public-entry fallback
         // is retried synchronously at slInit, before application graphics calls.
         if (loaderCallout && !slots::ImageSlot(executable,slot)) { ++deferred; return true; }
@@ -176,6 +269,8 @@ void ArmFactoryGateway() noexcept {
     swprintf_s(line,L"MFG_PROXY_UI armed mainGraphicsImports=%zu graphicsProbes=0 nativeTableWrites=0",batch.published);
     single_module::Log(line);
     if (deferred) single_module::Log(L"MFG_PROXY_UI unaligned graphics imports deferred to the pre-slInit boundary");
+    // Entry relays need MinHook; never from a loader callout (DllMain).
+    if (!loaderCallout) ArmInterposerFactories();
     application_imports::ArmStartupDependencies();
 }
 void InstallKnownModules() noexcept {

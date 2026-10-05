@@ -11,6 +11,8 @@
 #include "status_transport.h"
 #include "ui_status_json.h"
 #include "ui_input_coherence.h"
+#include "hudless_probe.h"
+#include "hudless_visualizer.h"
 #include "ampere_backend.h"
 #include "adapter_discovery.h"
 #include "ngx_initialization.h"
@@ -114,6 +116,15 @@ std::atomic<PFun_slSetTag*> gOriginalSetTag{nullptr};
 std::atomic<PFun_slSetTagForFrame*> gOriginalSetTagForFrame{nullptr};
 std::atomic<PFun_slInit*> gOriginalSlInit{nullptr};
 entry_detour::Handle gSlInitEntryHandle{};
+std::atomic<PFun_slUpgradeInterface*> gOriginalSlUpgradeInterface{nullptr};
+entry_detour::Handle gSlUpgradeInterfaceEntryHandle{};
+std::atomic<bool> gSlUpgradeInterfaceResolverFallbackActive{false};
+std::atomic<uint64_t> gSlUpgradeInterfaceCalls{0};
+std::atomic<uint64_t> gSlUpgradeInterfaceWrapped{0};
+std::atomic<PFun_slSetD3DDevice*> gOriginalSlSetD3DDeviceEntry{nullptr};
+entry_detour::Handle gSlSetD3DDeviceEntryHandle{};
+std::atomic<bool> gSlInitInstalledAtLoad{false};
+std::atomic<uint64_t> gSlSetD3DDeviceCalls{0};
 using GetProcAddressFn = FARPROC (WINAPI*)(HMODULE, LPCSTR);
 using LoadLibraryAFn = HMODULE (WINAPI*)(LPCSTR);
 using LoadLibraryWFn = HMODULE (WINAPI*)(LPCWSTR);
@@ -516,6 +527,8 @@ uint32_t EnsureControlRoute(HMODULE wrapper, const std::wstring& path,
 bool InstallControlRouteEntries(uint32_t routeSlot);
 bool InstallControlRouteLifecycleEntry(uint32_t routeSlot);
 bool TryInstallSlInitEntryDetour(HMODULE interposer, void* resolvedTarget);
+bool TryInstallSlUpgradeInterfaceEntryDetour(HMODULE interposer, void* resolvedTarget);
+bool TryInstallSlSetD3DDeviceEntryDetour(HMODULE interposer);
 void WINAPI BeforeNgxD3D12EvaluateFeature(void*, uintptr_t, const void*, void*, uintptr_t, uintptr_t, entry_detour::Handle, const void*) noexcept;
 void WINAPI BeforeNgxRuntimeD3D12EvaluateFeature(void*, uintptr_t, const void*, void*, uintptr_t, uintptr_t, entry_detour::Handle, const void*) noexcept;
 bool TryInstallNgxCreateEntryDetour(HMODULE provider, const std::wstring& path,
@@ -1849,8 +1862,8 @@ bool ReflexRuntimeCurrent() noexcept
 
 bool VsyncRuntimeCurrent() noexcept
 {
-    // The optional V-Sync override is omitted from this release. Retain its
-    // saved field and ABI slots without authorizing a presentation mutation.
+    // NVIDIA's runtime V-Sync (the On request, Dynamic V-Sync) is not offered.
+    // The V-Sync Off override needs no runtime proof; see vsync_control.h.
     return false;
 }
 
@@ -1874,7 +1887,7 @@ void UpdatePresentationPolicy(const ControlConfig& control)
         ++gPresentationRuntimeEpoch;
     }
     reflex_control::Configure(control.reflexFrameLimitFps, ReflexRuntimeCurrent());
-    vsync_control::Configure(0, false, gPresentationRuntimeEpoch);
+    vsync_control::Configure(control.vsyncMode);
 }
 
 void DiscoverReflexModule()
@@ -1947,6 +1960,10 @@ bool WriteBridgeStatus(const ControlConfig& control, DWORD pid)
             std::memory_order_acquire);
     const uint64_t slInitCalls =
         gSlInitCalls.load(std::memory_order_acquire);
+    const entry_detour::Snapshot slUpgradeDetour =
+        entry_detour::ReadSnapshot(gSlUpgradeInterfaceEntryHandle);
+    const entry_detour::Snapshot slSetDeviceDetour =
+        entry_detour::ReadSnapshot(gSlSetD3DDeviceEntryHandle);
     const uint64_t slInitFlagsAfter =
         gSlInitFlagsAfter.load(std::memory_order_acquire);
     const uint64_t allowOtaMask =
@@ -2047,6 +2064,16 @@ bool WriteBridgeStatus(const ControlConfig& control, DWORD pid)
         "\"slInitResolverFallbackActive\":%s,"
         "\"slInitControlPathReady\":%s,"
         "\"slInitCalls\":%llu,"
+        "\"slUpgradeInterfaceEntryDetourCurrent\":%s,"
+        "\"slUpgradeInterfaceEntryDetourFailure\":%u,"
+        "\"slUpgradeInterfaceEntryRva\":%u,"
+        "\"slUpgradeInterfaceResolverFallbackActive\":%s,"
+        "\"slUpgradeInterfaceCalls\":%llu,"
+        "\"slUpgradeInterfaceWrapped\":%llu,"
+        "\"slSetD3DDeviceEntryDetourCurrent\":%s,"
+        "\"slSetD3DDeviceEntryDetourFailure\":%u,"
+        "\"slInitEntryInstalledAtLoad\":%s,"
+        "\"slSetD3DDeviceCalls\":%llu,"
         "\"slInitFlagsBefore\":%llu,\"slInitFlagsAfter\":%llu,"
         "\"otaPreferencesForced\":%s,\"otaPreferencesEnabledAtInit\":%s,"
         "\"downloadedStreamlinePluginsEnabledAtInit\":%s,"
@@ -2214,6 +2241,20 @@ bool WriteBridgeStatus(const ControlConfig& control, DWORD pid)
         slInitResolverFallback ? "true" : "false",
         slInitControlPathReady ? "true" : "false",
         static_cast<unsigned long long>(slInitCalls),
+        slUpgradeDetour.current ? "true" : "false",
+        static_cast<uint32_t>(slUpgradeDetour.failure),
+        slUpgradeDetour.targetRva,
+        gSlUpgradeInterfaceResolverFallbackActive.load(
+            std::memory_order_acquire) ? "true" : "false",
+        static_cast<unsigned long long>(
+            gSlUpgradeInterfaceCalls.load(std::memory_order_relaxed)),
+        static_cast<unsigned long long>(
+            gSlUpgradeInterfaceWrapped.load(std::memory_order_relaxed)),
+        slSetDeviceDetour.current ? "true" : "false",
+        static_cast<uint32_t>(slSetDeviceDetour.failure),
+        gSlInitInstalledAtLoad.load(std::memory_order_acquire) ? "true" : "false",
+        static_cast<unsigned long long>(
+            gSlSetD3DDeviceCalls.load(std::memory_order_relaxed)),
         static_cast<unsigned long long>(
             gSlInitFlagsBefore.load(std::memory_order_relaxed)),
         static_cast<unsigned long long>(slInitFlagsAfter),
@@ -2466,6 +2507,7 @@ bool WriteBridgeStatus(const ControlConfig& control, DWORD pid)
         reflex.currentHookMask, reflex.moduleVersionMajor, reflex.moduleVersionMinor,
         reflex.moduleVersionPatch, static_cast<unsigned long long>(reflex.moduleGeneration));
     serialized.insert(serialized.rfind('}'), pacing);
+    serialized.insert(serialized.rfind('}'), hudless_probe::StatusFragment());
     if (UseAmpere())
     {
         const size_t closing = serialized.rfind('}');
@@ -3307,6 +3349,20 @@ sl::DLSSGOptions CopyKnownOptions(const sl::DLSSGOptions& source, bool preserveN
     return copy;
 }
 
+bool GameEnablesUiRecomposition(const sl::DLSSGOptions& source) noexcept
+{
+    return source.structVersion >= sl::kStructVersion4
+        && source.enableUserInterfaceRecomposition == sl::Boolean::eTrue;
+}
+
+// UI recomposition is left to the game: RTXMFG never changes the option and
+// never tags a UI buffer. HUDless detection only reports the game's choice.
+void ReportUiRecomposition(const sl::DLSSGOptions& source) noexcept
+{
+    hudless_probe::ReportRecomposition(GameEnablesUiRecomposition(source)
+        ? hudless_probe::RecompositionState::eGameManaged : hudless_probe::RecompositionState::eOff);
+}
+
 sl::DLSSGOptions BuildAdjustedOptions(
     const sl::DLSSGOptions& source, const ControlSnapshot& snapshot,
     bool preserveNext)
@@ -3353,8 +3409,7 @@ sl::DLSSGOptions BuildAdjustedOptions(
             | static_cast<uint32_t>(
                 sl::DLSSGFlags::eShowOnlyInterpolatedFrame));
     }
-    // UI recomposition changes provider allocations. Preserve the game's
-    // versioned option exactly; tagged-input metadata cannot authorize it.
+    ReportUiRecomposition(source);
     return adjusted;
 }
 
@@ -3689,7 +3744,7 @@ sl::Result SubmitAdjustedOptionsImpl(
         }
     }
     RecordAppliedControl(snapshot, acceptedResult, liveReapply,
-        uiRecompositionEnabled, false,
+        uiRecompositionEnabled, uiRecompositionEnabled && !GameEnablesUiRecomposition(source),
         effectiveMultiplier, effectiveDynamicMode,
         effectiveDynamicExperimental56, dynamicOverrideApplied,
         adjusted.dynamicTargetFrameRate, effectiveDynamicTargetValid);
@@ -4961,6 +5016,14 @@ sl::Result PassPublicSet(ControlRouteRecord& route,
     }
 }
 
+// Before the control path is ready, game options pass through unchanged.
+sl::Result PassPublicSetBeforeControl(ControlRouteRecord& route,
+    const sl::ViewportHandle& viewport, const sl::DLSSGOptions& options) noexcept
+{
+    ReportUiRecomposition(options);
+    return PassPublicSet(route, viewport, options);
+}
+
 sl::Result HandlePublicSetOptions(uint32_t routeSlot,
     ControlEntryPath path, const sl::ViewportHandle& viewport,
     const sl::DLSSGOptions& options)
@@ -5013,7 +5076,7 @@ sl::Result HandlePublicSetOptions(uint32_t routeSlot,
     if (!gControlReady.load(std::memory_order_acquire)
         || !BridgeReady())
     {
-        const sl::Result result = PassPublicSet(*route, viewport, options);
+        const sl::Result result = PassPublicSetBeforeControl(*route, viewport, options);
         gSetOptionsSeen.store(true, std::memory_order_release);
         gLastSetOptionsResult.store(static_cast<int32_t>(result),
             std::memory_order_relaxed);
@@ -5224,10 +5287,15 @@ sl::Result HandleInternalSetData(uint32_t routeSlot,
     }
 
     CaptureGameOptions(publicViewport, source);
+    // As PassPublicSetBeforeControl: the game's options pass through unchanged.
+    const auto passThroughBeforeControl = [&]() {
+        ReportUiRecomposition(source);
+        return passThrough();
+    };
     if (!gControlReady.load(std::memory_order_acquire)
         || !BridgeReady())
     {
-        const sl::Result result = passThrough();
+        const sl::Result result = passThroughBeforeControl();
         gSetOptionsSeen.store(true, std::memory_order_release);
         gLastSetOptionsResult.store(static_cast<int32_t>(result),
             std::memory_order_relaxed);
@@ -5881,6 +5949,108 @@ uint32_t ResolvedDlssgControlRoute(void* resolved)
     return EnsureControlRoute(owner, discovered.path, discovered.generation, false, 0);
 }
 
+// PCL markers (and the older Reflex entry with the same ABI and marker values)
+// tell HUDless detection which frame is being presented, so frame-indexed tags
+// can be paired with their Present. Observation only; every call is forwarded.
+using PFun_PresentMarker = sl::Result(uint32_t marker, const sl::FrameToken& frame);
+std::atomic<PFun_PresentMarker*> gOriginalPclSetMarker{nullptr};
+std::atomic<PFun_PresentMarker*> gOriginalReflexSetMarker{nullptr};
+constexpr uint32_t kPresentStartMarker = 4; // sl::PCLMarker::ePresentStart
+
+// The presented frame's token (owned by Streamline's frame ring) and the
+// viewport the game tags HUDless for; a synthesized UI buffer is tagged with them.
+std::atomic<const sl::FrameToken*> gPresentToken{nullptr};
+std::atomic<uint32_t> gPresentTokenFrame{UINT32_MAX};
+std::atomic<uint32_t> gHudlessViewport{UINT32_MAX};
+
+sl::Result ForwardPresentMarker(PFun_PresentMarker* original, uint32_t marker,
+    const sl::FrameToken& frame)
+{
+    if (!original)
+        return sl::Result::eErrorNotInitialized;
+    if (marker == kPresentStartMarker)
+    {
+        const uint32_t index = static_cast<uint32_t>(frame);
+        gPresentTokenFrame.store(index, std::memory_order_relaxed);
+        gPresentToken.store(&frame, std::memory_order_release);
+        hudless_probe::ObservePresentFrame(index);
+    }
+    return original(marker, frame);
+}
+
+// Tags RTXMFG's synthesized UI alpha for the Present of `frame` through the
+// host's own tagging route, bypassing the hooks. Games tagging per frame need
+// the presented frame's token; a mismatch is refused rather than mis-tagged.
+bool TagSynthesizedUi(void* resource, uint32_t state, uint32_t width, uint32_t height,
+    uint32_t format, uint32_t frame) noexcept
+{
+    const uint32_t viewportValue = gHudlessViewport.load(std::memory_order_acquire);
+    if (!resource || viewportValue == UINT32_MAX)
+        return false;
+    sl::Resource ui(sl::ResourceType::eTex2d, resource, state);
+    ui.width = width;
+    ui.height = height;
+    ui.nativeFormat = format;
+    ui.mipLevels = 1;
+    ui.arrayLayers = 1;
+    ui.flags = 0;
+    sl::Extent extent{};
+    extent.width = width;
+    extent.height = height;
+    sl::ResourceTag tag(&ui, sl::kBufferTypeUIAlpha, sl::ResourceLifecycle::eValidUntilPresent, &extent);
+    const sl::ViewportHandle viewport{viewportValue};
+    if (gSetTagForFrameCalls.load(std::memory_order_relaxed) != 0)
+    {
+        auto* original = gOriginalSetTagForFrame.load(std::memory_order_acquire);
+        const sl::FrameToken* token = gPresentToken.load(std::memory_order_acquire);
+        if (!original || !token || frame == hudless_probe::kNoFrame
+            || gPresentTokenFrame.load(std::memory_order_relaxed) != frame)
+            return false;
+        return original(*token, viewport, &tag, 1, nullptr) == sl::Result::eOk;
+    }
+    auto* original = gOriginalSetTag.load(std::memory_order_acquire);
+    return original && original(viewport, &tag, 1, nullptr) == sl::Result::eOk;
+}
+
+sl::Result HookSlPCLSetMarker(uint32_t marker, const sl::FrameToken& frame)
+{
+    return ForwardPresentMarker(gOriginalPclSetMarker.load(std::memory_order_acquire), marker, frame);
+}
+
+sl::Result HookSlReflexSetMarker(uint32_t marker, const sl::FrameToken& frame)
+{
+    return ForwardPresentMarker(gOriginalReflexSetMarker.load(std::memory_order_acquire), marker, frame);
+}
+
+void InterceptPresentMarker(sl::Feature feature, const char* functionName, void*& function) noexcept
+{
+    std::atomic<PFun_PresentMarker*>* original = nullptr;
+    PFun_PresentMarker* hook = nullptr;
+    if (feature == sl::kFeaturePCL && strcmp(functionName, "slPCLSetMarker") == 0)
+    {
+        original = &gOriginalPclSetMarker;
+        hook = &HookSlPCLSetMarker;
+    }
+    else if (feature == sl::kFeatureReflex && strcmp(functionName, "slReflexSetMarker") == 0)
+    {
+        original = &gOriginalReflexSetMarker;
+        hook = &HookSlReflexSetMarker;
+    }
+    else
+        return;
+    auto* resolved = reinterpret_cast<PFun_PresentMarker*>(function);
+    if (resolved == hook)
+        return;
+    PFun_PresentMarker* expected = nullptr;
+    if (!original->compare_exchange_strong(expected, resolved, std::memory_order_acq_rel)
+        && expected != resolved)
+        return; // Another implementation is already bound; leave this one untouched.
+    function = reinterpret_cast<void*>(hook);
+    static std::atomic<bool> logged[2]{};
+    if (!logged[hook == &HookSlPCLSetMarker ? 0 : 1].exchange(true, std::memory_order_relaxed))
+        Log(L"Present marker observer installed: %hs", functionName);
+}
+
 sl::Result HookSlGetFeatureFunction(
     sl::Feature feature, const char* functionName, void*& function)
 {
@@ -5889,6 +6059,8 @@ sl::Result HookSlGetFeatureFunction(
         return sl::Result::eErrorNotInitialized;
 
     const sl::Result result = original(feature, functionName, function);
+    if (result == sl::Result::eOk && function && functionName)
+        InterceptPresentMarker(feature, functionName, function);
     if (result != sl::Result::eOk || feature != sl::kFeatureDLSS_G)
         return result;
     if (function && functionName && strcmp(functionName, "slDLSSGSetOptions") == 0)
@@ -5958,17 +6130,128 @@ sl::Result HookSlGetFeatureFunction(
     return result;
 }
 
+// Logs the first tag of each buffer type once, so a new integration's tagging
+// (empty resources, struct versions, lifecycles) is visible without a debugger.
+void LogFirstTagOfType(const sl::ResourceTag& tag, bool framed, bool hasList) noexcept
+{
+    static std::array<std::atomic<bool>, 96> logged{};
+    if (tag.type >= logged.size() || logged[tag.type].exchange(true, std::memory_order_relaxed))
+        return;
+    const bool tagIdentity = tag.structType == sl::ResourceTag::s_structType;
+    const auto* resource = tag.resource;
+    const bool resourceIdentity = resource && resource->structType == sl::Resource::s_structType;
+    Log(L"Streamline tag first seen: type=%u framed=%d list=%d tagIdentity=%d tagVersion=%u "
+        L"lifecycle=%u extent=%u,%u %ux%u resource=%d resourceIdentity=%d resourceVersion=%u "
+        L"resourceType=0x%08X resourceKind=%u native=%d state=0x%X format=%u size=%ux%u",
+        tag.type, framed, hasList, tagIdentity, tag.structVersion,
+        static_cast<uint32_t>(tag.lifecycle), tag.extent.left, tag.extent.top,
+        tag.extent.width, tag.extent.height, resource != nullptr, resourceIdentity,
+        resource ? resource->structVersion : 0u,
+        resource ? static_cast<uint32_t>(resource->structType.data1) : 0u,
+        resource ? static_cast<uint32_t>(resource->type) : 0u, resource && resource->native,
+        resource ? resource->state : 0u, resource ? resource->nativeFormat : 0u,
+        resource ? resource->width : 0u, resource ? resource->height : 0u);
+}
+
+// Copies bounded tag metadata for HUDless detection. Resource fields are read
+// only from structures with the Streamline identity; versions are append-only,
+// so any version from the first onward shares these fields.
+void ObserveHudlessDetectionTags(const sl::ResourceTag* tags, uint32_t numTags,
+    sl::CommandBuffer* cmdBuffer, bool framed, uint32_t frame = hudless_probe::kNoFrame) noexcept
+{
+    if (!tags || !numTags || numTags > 1024) return;
+    std::array<hudless_probe::Tag, 64> copies{};
+    const uint32_t count = std::min<uint32_t>(numTags, static_cast<uint32_t>(copies.size()));
+    for (uint32_t index = 0; index < count; ++index)
+    {
+        const auto& tag = tags[index];
+        auto& copy = copies[index];
+        copy.type = tag.type;
+        // Same presence test as the established UI-tag observer.
+        copy.present = tag.resource && tag.resource->native;
+        LogFirstTagOfType(tag, framed, cmdBuffer != nullptr);
+        if (tag.structType != sl::ResourceTag::s_structType
+            || tag.structVersion < sl::kStructVersion1)
+            continue;
+        copy.lifecycle = static_cast<uint32_t>(tag.lifecycle);
+        copy.extentLeft = tag.extent.left;
+        copy.extentTop = tag.extent.top;
+        copy.extentWidth = tag.extent.width;
+        copy.extentHeight = tag.extent.height;
+        const auto* resource = tag.resource;
+        if (!resource || !resource->native) continue;
+        // Unreal's Streamline plugin fills native/state but leaves the
+        // Resource header zero. Streamline consumes those fields from a
+        // verified tag, so the same fields are trusted here; description
+        // fields are used only when the header identifies an sl::Resource.
+        const bool resourceHeader = resource->structType == sl::Resource::s_structType
+            && resource->structVersion >= sl::kStructVersion1;
+        copy.native = resource->native;
+        copy.state = resource->state;
+        copy.nativeFormat = resourceHeader ? resource->nativeFormat : 0u;
+        copy.width = resourceHeader ? resource->width : 0u;
+        copy.height = resourceHeader ? resource->height : 0u;
+        copy.described = resource->type == sl::ResourceType::eTex2d;
+    }
+    hudless_probe::ObserveTags(copies.data(), count, cmdBuffer, framed, frame);
+}
+
+// Test hosts only (RTXMFG_TEST_HIDE_GAME_UI=1): withholds the host's UI buffer
+// tags from Streamline and detection so the synthesized-UI route can be
+// exercised with a real provider. Opt-in only.
+bool TestHidesGameUi() noexcept
+{
+    static const bool enabled = [] {
+        wchar_t value[4]{};
+        return GetEnvironmentVariableW(L"RTXMFG_TEST_HIDE_GAME_UI", value, 4) == 1
+            && value[0] == L'1';
+    }();
+    return enabled;
+}
+
+const sl::ResourceTag* WithoutHostUi(const sl::ResourceTag* tags, uint32_t& count,
+    std::vector<sl::ResourceTag>& storage)
+{
+    if (!TestHidesGameUi() || !tags || count > 1024)
+        return tags;
+    storage.clear();
+    for (uint32_t index = 0; index < count; ++index)
+        if (tags[index].type != sl::kBufferTypeUIAlpha && tags[index].type != sl::kBufferTypeUIColorAndAlpha)
+            storage.push_back(tags[index]);
+    count = static_cast<uint32_t>(storage.size());
+    return storage.data();
+}
+
+void RecordHudlessViewport(const sl::ViewportHandle& viewport, const sl::ResourceTag* tags,
+    uint32_t count) noexcept
+{
+    for (uint32_t index = 0; tags && index < count && index < 1024; ++index)
+        if (tags[index].type == sl::kBufferTypeHUDLessColor)
+        {
+            gHudlessViewport.store(static_cast<uint32_t>(viewport), std::memory_order_release);
+            return;
+        }
+}
+
 sl::Result HookSlSetTag(const sl::ViewportHandle& viewport,
     const sl::ResourceTag* tags, uint32_t numTags, sl::CommandBuffer* cmdBuffer)
 {
     auto* original = gOriginalSetTag.load(std::memory_order_acquire);
     if (!original)
         return sl::Result::eErrorNotInitialized;
+    std::vector<sl::ResourceTag> visible;
+    tags = WithoutHostUi(tags, numTags, visible);
+    if (!numTags)
+        return sl::Result::eOk;
     const auto batch = PrepareUiResourceTags(viewport, tags, numTags, false, 0);
     const sl::Result result = original(viewport, tags, numTags, cmdBuffer);
     gSetTagCalls.fetch_add(1, std::memory_order_relaxed);
     if (result == sl::Result::eOk)
+    {
         RecordUiResourceTags(batch);
+        RecordHudlessViewport(viewport, tags, numTags);
+        ObserveHudlessDetectionTags(tags, numTags, cmdBuffer, false);
+    }
     return result;
 }
 
@@ -5979,12 +6262,20 @@ sl::Result HookSlSetTagForFrame(const sl::FrameToken& frame,
     auto* original = gOriginalSetTagForFrame.load(std::memory_order_acquire);
     if (!original)
         return sl::Result::eErrorNotInitialized;
+    std::vector<sl::ResourceTag> visible;
+    tags = WithoutHostUi(tags, numTags, visible);
+    if (!numTags)
+        return sl::Result::eOk;
     const auto batch = PrepareUiResourceTags(viewport, tags, numTags, true,
         static_cast<uint32_t>(frame));
     const sl::Result result = original(frame, viewport, tags, numTags, cmdBuffer);
     gSetTagForFrameCalls.fetch_add(1, std::memory_order_relaxed);
     if (result == sl::Result::eOk)
+    {
         RecordUiResourceTags(batch);
+        RecordHudlessViewport(viewport, tags, numTags);
+        ObserveHudlessDetectionTags(tags, numTags, cmdBuffer, true, static_cast<uint32_t>(frame));
+    }
     return result;
 }
 
@@ -5992,11 +6283,30 @@ void InspectAlreadyLoadedModules();
 
 sl::Result HookSlSetD3DDevice(void* device)
 {
-    auto* original = gOriginalSetD3DDevice.load(std::memory_order_acquire);
+    // An import or resolver route and the interposer entry detour can both
+    // lead here for one call. The outer call does the work and forwards along
+    // its own route; the nested entry call goes straight to the entry body.
+    static thread_local uint32_t depth = 0;
+    auto* entry = EntryOriginal(gOriginalSlSetD3DDeviceEntry,
+        gSlSetD3DDeviceEntryHandle);
+    auto* routed = gOriginalSetD3DDevice.load(std::memory_order_acquire);
+    if (depth != 0)
+    {
+        auto* inner = entry ? entry : routed;
+        return inner ? inner(device) : sl::Result::eErrorNotInitialized;
+    }
+    auto* original = routed ? routed : entry;
     if (!original)
         return sl::Result::eErrorNotInitialized;
+    struct Depth
+    {
+        Depth() noexcept { ++depth; }
+        ~Depth() { --depth; }
+    } nested;
+    gSlSetD3DDeviceCalls.fetch_add(1, std::memory_order_relaxed);
     InvalidateUiInputEvidence();
-    if (gpu_backend::ObserveD3D12Device(device))
+    const bool verifiedDevice = gpu_backend::ObserveD3D12Device(device);
+    if (verifiedDevice)
     {
         gModuleInventoryDirty.store(true, std::memory_order_release);
         if (gpu_dispatch::IsAda())
@@ -6010,14 +6320,11 @@ sl::Result HookSlSetD3DDevice(void* device)
             temporal_interval_trace::SetEnabled(true);
         }
     }
-    if (UseAmpere())
-    {
-        return InvokeAmpereDeviceSetup(original, device);
-    }
-    else
-    {
-        return original(device);
-    }
+    const sl::Result result = UseAmpere()
+        ? InvokeAmpereDeviceSetup(original, device) : original(device);
+    if (result == sl::Result::eOk && verifiedDevice)
+        hudless_probe::ObserveD3D12Device(device);
+    return result;
 }
 
 sl::Result HookSlSetVulkanInfo(const VulkanInfoPrefix& info)
@@ -6046,6 +6353,7 @@ sl::Result HookSlSetVulkanInfo(const VulkanInfoPrefix& info)
         gModuleInventoryDirty.store(true, std::memory_order_release);
         InspectAlreadyLoadedModules();
     }
+    hudless_probe::ObserveVulkan();
     return original(info);
 }
 
@@ -6436,7 +6744,15 @@ sl::Result HookSlInit(const sl::Preferences& preferences,
     // Publish the existing resolver gateway before slInit can cache Vulkan
     // entry points inside the interposer. The worker may not have seen it yet.
     if (interposer)
+    {
         InstallSlCommonResolverDiscovery(interposer, interposerPath);
+        // Manual-hooking hosts upgrade their own DXGI objects after slInit.
+        TryInstallSlUpgradeInterfaceEntryDetour(interposer, nullptr);
+        // Hosts that resolve the interposer's exports themselves reach
+        // slSetD3DDevice only through its entry. It identifies the GPU and
+        // patches the DLSS-G wrapper before the plugins read their limits.
+        TryInstallSlSetD3DDeviceEntryDetour(interposer);
+    }
 #endif
     if (interposer
         && !gStreamlineLoaderDiscoveryInstalled.load(
@@ -6533,6 +6849,130 @@ sl::Result HookSlInit(const sl::Preferences& preferences,
     return result;
 }
 
+#if defined(MFG_UNLOCK_SINGLE_MODULE_UI)
+// Manual-hooking hosts (Streamline eUseManualHooking, e.g. Wuthering Waves)
+// create native DXGI objects themselves, so no factory or swapchain creation
+// reaches the menu. Streamline returns its factory proxy here; the menu wraps
+// it exactly as it wraps a creation return, and so sees the swapchains.
+sl::Result HookSlUpgradeInterface(void** baseInterface)
+{
+    auto* original = EntryOriginal(gOriginalSlUpgradeInterface,
+        gSlUpgradeInterfaceEntryHandle);
+    if (!original || original == &HookSlUpgradeInterface)
+        return sl::Result::eErrorNotInitialized;
+    const bool owned = baseInterface
+        && single_overlay::OwnsInterface(*baseInterface);
+    const sl::Result result = original(baseInterface);
+    const uint64_t call =
+        gSlUpgradeInterfaceCalls.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (result == sl::Result::eOk && !owned && baseInterface && *baseInterface
+        && single_overlay::WrapUpgradedInterface(baseInterface))
+    {
+        const uint64_t wrapped = gSlUpgradeInterfaceWrapped.fetch_add(1,
+            std::memory_order_relaxed) + 1;
+        Log(L"Streamline slUpgradeInterface: upgraded DXGI factory wrapped "
+            L"for the menu call=%llu wrapped=%llu",
+            static_cast<unsigned long long>(call),
+            static_cast<unsigned long long>(wrapped));
+    }
+    return result;
+}
+
+bool TryInstallSlUpgradeInterfaceEntryDetour(HMODULE interposer,
+    void* resolvedTarget)
+{
+    if (!interposer)
+        return false;
+    const std::wstring path = LoadedModulePath(interposer);
+    if (!ModuleFileNameEquals(path, L"sl.interposer.dll"))
+        return false;
+    void* target = resolvedTarget ? resolvedTarget
+        : reinterpret_cast<void*>(
+            GetProcAddress(interposer, "slUpgradeInterface"));
+    if (!target || ModuleFromAddress(target) != interposer)
+        return false;
+
+    // No version-dependent entry pattern is known; use the relocation path.
+    entry_detour::InstallOptions options{};
+    options.allowRelocated = true;
+    void* trampoline = nullptr;
+    const bool installed = entry_detour::Install(
+        entry_detour::Kind::eSlUpgradeInterface, interposer, target,
+        reinterpret_cast<void*>(&HookSlUpgradeInterface), trampoline,
+        options, &gSlUpgradeInterfaceEntryHandle);
+    if (trampoline)
+    {
+        gOriginalSlUpgradeInterface.store(
+            reinterpret_cast<PFun_slUpgradeInterface*>(trampoline),
+            std::memory_order_release);
+    }
+    static std::atomic<uint32_t> logged{0};
+    const uint32_t outcome = installed ? 1u : 2u;
+    if (logged.exchange(outcome, std::memory_order_acq_rel) != outcome)
+    {
+        const entry_detour::Snapshot state =
+            entry_detour::ReadSnapshot(gSlUpgradeInterfaceEntryHandle);
+        Log(L"Streamline slUpgradeInterface entry detour: installed=%d "
+            L"current=%d method=%hs failure=%u targetRva=0x%X path=%s",
+            installed, state.current, entry_detour::MethodName(state.method),
+            static_cast<uint32_t>(state.failure), state.targetRva,
+            path.c_str());
+    }
+    return installed;
+}
+
+bool TryInstallSlSetD3DDeviceEntryDetour(HMODULE interposer)
+{
+    if (!interposer)
+        return false;
+    const std::wstring path = LoadedModulePath(interposer);
+    if (!ModuleFileNameEquals(path, L"sl.interposer.dll"))
+        return false;
+    void* target = reinterpret_cast<void*>(
+        GetProcAddress(interposer, "slSetD3DDevice"));
+    if (!target || ModuleFromAddress(target) != interposer)
+        return false;
+
+    // No version-dependent entry pattern is known; use the relocation path.
+    entry_detour::InstallOptions options{};
+    options.allowRelocated = true;
+    void* trampoline = nullptr;
+    const bool installed = entry_detour::Install(
+        entry_detour::Kind::eSlSetD3DDevice, interposer, target,
+        reinterpret_cast<void*>(&HookSlSetD3DDevice), trampoline,
+        options, &gSlSetD3DDeviceEntryHandle);
+    if (trampoline)
+    {
+        gOriginalSlSetD3DDeviceEntry.store(
+            reinterpret_cast<PFun_slSetD3DDevice*>(trampoline),
+            std::memory_order_release);
+    }
+    static std::atomic<uint32_t> logged{0};
+    const uint32_t outcome = installed ? 1u : 2u;
+    if (logged.exchange(outcome, std::memory_order_acq_rel) != outcome)
+    {
+        const entry_detour::Snapshot state =
+            entry_detour::ReadSnapshot(gSlSetD3DDeviceEntryHandle);
+        Log(L"Streamline slSetD3DDevice entry detour: installed=%d "
+            L"current=%d method=%hs failure=%u targetRva=0x%X path=%s",
+            installed, state.current, entry_detour::MethodName(state.method),
+            static_cast<uint32_t>(state.failure), state.targetRva,
+            path.c_str());
+    }
+    return installed;
+}
+#else
+bool TryInstallSlUpgradeInterfaceEntryDetour(HMODULE, void*)
+{
+    return false;
+}
+
+bool TryInstallSlSetD3DDeviceEntryDetour(HMODULE)
+{
+    return false;
+}
+#endif
+
 bool TryInstallSlInitEntryDetour(HMODULE interposer, void* resolvedTarget)
 {
     if (!interposer)
@@ -6540,6 +6980,8 @@ bool TryInstallSlInitEntryDetour(HMODULE interposer, void* resolvedTarget)
     const std::wstring path = LoadedModulePath(interposer);
     if (!ModuleFileNameEquals(path, L"sl.interposer.dll"))
         return false;
+    TryInstallSlUpgradeInterfaceEntryDetour(interposer, nullptr);
+    TryInstallSlSetD3DDeviceEntryDetour(interposer);
     void* target = resolvedTarget ? resolvedTarget
         : reinterpret_cast<void*>(GetProcAddress(interposer, "slInit"));
     if (!target || ModuleFromAddress(target) != interposer)
@@ -6627,6 +7069,44 @@ FARPROC WINAPI HookMainGetProcAddress(HMODULE module, LPCSTR functionName)
                 std::memory_order_release);
         return reinterpret_cast<FARPROC>(&HookSlSetVulkanInfo);
     }
+
+    // Engines that load the interposer themselves (Unreal's Streamline
+    // plugin) resolve the tagging entries here rather than through imports.
+    if (std::strcmp(functionName, "slSetTag") == 0)
+    {
+        auto* candidate = reinterpret_cast<PFun_slSetTag*>(resolved);
+        if (candidate != &HookSlSetTag)
+            gOriginalSetTag.store(candidate, std::memory_order_release);
+        if (!gUiTagHookInstalled.exchange(true, std::memory_order_acq_rel))
+            Log(L"Streamline UI tag dynamic gateway installed: slSetTag path=%s",
+                LoadedModulePath(module).c_str());
+        return reinterpret_cast<FARPROC>(&HookSlSetTag);
+    }
+    if (std::strcmp(functionName, "slSetTagForFrame") == 0)
+    {
+        auto* candidate = reinterpret_cast<PFun_slSetTagForFrame*>(resolved);
+        if (candidate != &HookSlSetTagForFrame)
+            gOriginalSetTagForFrame.store(candidate, std::memory_order_release);
+        if (!gUiTagHookInstalled.exchange(true, std::memory_order_acq_rel))
+            Log(L"Streamline UI tag dynamic gateway installed: slSetTagForFrame path=%s",
+                LoadedModulePath(module).c_str());
+        return reinterpret_cast<FARPROC>(&HookSlSetTagForFrame);
+    }
+#if defined(MFG_UNLOCK_SINGLE_MODULE_UI)
+    if (std::strcmp(functionName, "slUpgradeInterface") == 0)
+    {
+        if (TryInstallSlUpgradeInterfaceEntryDetour(module,
+                reinterpret_cast<void*>(resolved)))
+            return resolved;
+        auto* candidate = reinterpret_cast<PFun_slUpgradeInterface*>(resolved);
+        if (candidate != &HookSlUpgradeInterface)
+            gOriginalSlUpgradeInterface.store(candidate,
+                std::memory_order_release);
+        gSlUpgradeInterfaceResolverFallbackActive.store(true,
+            std::memory_order_release);
+        return reinterpret_cast<FARPROC>(&HookSlUpgradeInterface);
+    }
+#endif
     if (std::strcmp(functionName, "slInit") != 0)
         return resolved;
 
@@ -8062,11 +8542,105 @@ using MfgLdrDllNotificationFunction = void (CALLBACK*)(
 using LdrRegisterDllNotificationFn = NTSTATUS (NTAPI*)(
     ULONG flags, MfgLdrDllNotificationFunction callback, void* context, void** cookie);
 
+#if defined(MFG_UNLOCK_SINGLE_MODULE_UI)
+// Reads a named, non-forwarded export from a mapped image's export table.
+void* MappedExportAddress(HMODULE module, const char* expected) noexcept
+{
+    const auto* nt = ImageHeaders(module);
+    if (!nt || !expected)
+        return nullptr;
+    const auto& directory = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+    if (!directory.VirtualAddress
+        || !RvaRangeIsValid(nt, directory.VirtualAddress, sizeof(IMAGE_EXPORT_DIRECTORY)))
+        return nullptr;
+    auto* base = reinterpret_cast<uint8_t*>(module);
+    const auto* exports = reinterpret_cast<const IMAGE_EXPORT_DIRECTORY*>(
+        base + directory.VirtualAddress);
+    if (!exports->AddressOfNames || !exports->AddressOfNameOrdinals
+        || !exports->AddressOfFunctions
+        || !RvaRangeIsValid(nt, exports->AddressOfNames,
+            static_cast<size_t>(exports->NumberOfNames) * sizeof(DWORD))
+        || !RvaRangeIsValid(nt, exports->AddressOfNameOrdinals,
+            static_cast<size_t>(exports->NumberOfNames) * sizeof(WORD))
+        || !RvaRangeIsValid(nt, exports->AddressOfFunctions,
+            static_cast<size_t>(exports->NumberOfFunctions) * sizeof(DWORD)))
+        return nullptr;
+    const auto* names = reinterpret_cast<const DWORD*>(base + exports->AddressOfNames);
+    const auto* ordinals = reinterpret_cast<const WORD*>(base + exports->AddressOfNameOrdinals);
+    const auto* functions = reinterpret_cast<const DWORD*>(base + exports->AddressOfFunctions);
+    for (DWORD index = 0; index < exports->NumberOfNames; ++index)
+    {
+        const DWORD nameRva = names[index];
+        if (!RvaRangeIsValid(nt, nameRva, 1))
+            continue;
+        const char* name = reinterpret_cast<const char*>(base + nameRva);
+        const size_t remaining = nt->OptionalHeader.SizeOfImage - nameRva;
+        if (strnlen_s(name, remaining) >= remaining || strcmp(name, expected) != 0)
+            continue;
+        if (ordinals[index] >= exports->NumberOfFunctions)
+            return nullptr;
+        const DWORD rva = functions[ordinals[index]];
+        const bool forwarded = rva >= directory.VirtualAddress
+            && rva - directory.VirtualAddress < directory.Size;
+        return !forwarded && RvaRangeIsValid(nt, rva, 1) ? base + rva : nullptr;
+    }
+    return nullptr;
+}
+
+// Loader notification for sl.interposer.dll, with the loader lock held. Hosts
+// that resolve exports themselves (Wuthering Waves) call slInit as soon as
+// LoadLibrary returns, before module discovery sees the interposer; HookSlInit
+// then installs the remaining Streamline entries in time. Hotpatch only, never
+// waits for the detour registry and never logs; discovery logs it later.
+void InstallSlInitEntryAtLoad(HMODULE interposer) noexcept
+{
+    void* target = MappedExportAddress(interposer, "slInit");
+    if (!target)
+        return;
+    entry_detour::InstallOptions options{};
+    options.nonBlocking = true;
+    void* trampoline = nullptr;
+    entry_detour::Handle handle{};
+    bool installed = false;
+    // An empty handle means another install held the registry; retry for a
+    // bounded time. Waiting could deadlock against the loader lock.
+    for (int attempt = 0; attempt < 50; ++attempt)
+    {
+        installed = entry_detour::Install(entry_detour::Kind::eSlInit,
+            interposer, target, reinterpret_cast<void*>(&HookSlInit),
+            trampoline, options, &handle);
+        if (installed || handle)
+            break;
+        Sleep(1);
+    }
+    if (trampoline)
+        gOriginalSlInit.store(reinterpret_cast<PFun_slInit*>(trampoline),
+            std::memory_order_release);
+    if (installed)
+    {
+        gSlInitEntryHandle = handle;
+        gSlInitInstalledAtLoad.store(true, std::memory_order_release);
+    }
+}
+
+bool UnicodeNameEquals(const UNICODE_STRING* name, const wchar_t* expected) noexcept
+{
+    const size_t length = wcslen(expected);
+    return name && name->Buffer && name->Length == length * sizeof(wchar_t)
+        && _wcsnicmp(name->Buffer, expected, length) == 0;
+}
+#endif
+
 void CALLBACK OnDllNotification(
     ULONG reason, const MfgLdrDllNotificationData* data, void*)
 {
     static constexpr ULONG kDllLoaded = 1;
     static constexpr ULONG kDllUnloaded = 2;
+#if defined(MFG_UNLOCK_SINGLE_MODULE_UI)
+    if (data && reason == kDllLoaded && data->loaded.dllBase
+        && UnicodeNameEquals(data->loaded.baseDllName, L"sl.interposer.dll"))
+        InstallSlInitEntryAtLoad(static_cast<HMODULE>(data->loaded.dllBase));
+#endif
     if (data && (reason == kDllLoaded || reason == kDllUnloaded))
     {
 #if MFG_UNLOCK_OUTPUT_PULL_MASK_ONLY || MFG_UNLOCK_RUNTIME_GPU_SELECTION || MFG_UNLOCK_AMPERE_MFG
@@ -8107,6 +8681,10 @@ DWORD WINAPI PatchWorker(void* context)
     const std::wstring logPath=diagnostic_paths::RuntimeLog();
     if (!logPath.empty())
     {
+        // Keep the previous session's log (a crashed session is usually
+        // followed by a relaunch) beside the new one as *.previous.log.
+        const std::wstring previousLog = logPath.substr(0, logPath.size() - 4) + L".previous.log";
+        MoveFileExW(logPath.c_str(), previousLog.c_str(), MOVEFILE_REPLACE_EXISTING);
         gLog = _wfsopen(logPath.c_str(), L"w, ccs=UTF-8", _SH_DENYWR);
     }
     gLogReady.store(gLog != nullptr, std::memory_order_release);
@@ -8167,9 +8745,12 @@ DWORD WINAPI PatchWorker(void* context)
     Log(L"Patch worker started for PID %lu", static_cast<unsigned long>(pid));
     Log(L"Diagnostics reused per executable: log=%s status=%s processBirth=%llu executable=%s",
         logPath.c_str(),gStatusPath.c_str(),static_cast<unsigned long long>(diagnostic_paths::ProcessBirth()),executablePath.c_str());
+    hudless_probe::SetLogSink(&MidpointLog);
+    hudless_visualizer::SetUiTagger(&TagSynthesizedUi);
 #if defined(MFG_UNLOCK_SINGLE_MODULE_UI)
-    Log(L"RTXMFG build=1.3.3-hotfix.2 outputPullMask=%d occupancyHint=%d "
-        L"uiInputs=framed-observations uiRecomposition=game-managed",
+    Log(L"RTXMFG build=1.4.1-hotfix.1 source=dev.45 outputPullMask=%d occupancyHint=%d "
+        L"uiInputs=framed-observations uiRecomposition=game-managed "
+        L"hudlessDetection=tile-probe",
         MFG_UNLOCK_OUTPUT_PULL_MASK_ONLY,
         MFG_UNLOCK_OUTPUT_PULL_MASK_OCCUPANCY);
 #endif
@@ -8255,7 +8836,6 @@ DWORD WINAPI PatchWorker(void* context)
     PublishLiveBridge(initialControl);
     ControlConfig activeControl = initialControl;
     reflex_control::SetRuntimeValidator(&ReflexRuntimeCurrent);
-    vsync_control::SetRuntimeValidator(&VsyncRuntimeCurrent);
     DiscoverReflexModule();
     UpdatePresentationPolicy(activeControl);
     if (!WriteBridgeStatus(activeControl, pid))
@@ -8274,6 +8854,7 @@ DWORD WINAPI PatchWorker(void* context)
 #if defined(MFG_UNLOCK_SINGLE_MODULE_UI)
         single_module::DrainLog(&MidpointLog);
 #endif
+        hudless_probe::Poll();
         ++inventoryTicks;
         if (gModuleInventoryDirty.exchange(false, std::memory_order_acq_rel))
         {

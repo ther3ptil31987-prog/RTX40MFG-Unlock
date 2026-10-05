@@ -9,6 +9,10 @@ bool Eligible(HMODULE importer, void** slot, void* expected, const char* name) n
 // Prepare is transparent. Publish the returned trampoline into the typed
 // forwarder's original pointer before Activate; never recurse via the entry.
 bool Prepare(HMODULE importer, void** slot, void* expected, void* replacement, const char* name, void*& original) noexcept;
+// Same main-executable caller scope for a loaded Streamline interposer's own
+// public DXGI factory export, when the application reaches it without any
+// import or resolver call we can observe (packed executables).
+bool PrepareInterposerEntry(void* expected, void* replacement, const char* name, void*& original) noexcept;
 bool Activate(void* expected, void* replacement) noexcept;
 bool Deactivate(void* expected, void* replacement) noexcept;
 }

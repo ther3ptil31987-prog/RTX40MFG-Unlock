@@ -5,7 +5,10 @@
 #include <array>
 #include <atomic>
 #include <cstring>
+#include <cwchar>
+#include <memory>
 #include <mutex>
+#include <new>
 
 namespace caller_scoped_import {
 namespace {
@@ -18,7 +21,7 @@ struct Entry {
     bool installed = false;
     std::array<unsigned char,5> published{};
 };
-std::array<Entry, 9> entries; // Resolver, five input APIs, three DXGI factories.
+std::array<Entry, 12> entries; // Resolver, five input APIs, three DXGI and three interposer factories.
 std::mutex mutex;
 
 const wchar_t* OwnerName(const char* name) noexcept {
@@ -115,6 +118,32 @@ bool PublicTarget(void* target, const char* name, HMODULE& owner) noexcept {
         && !(memory.Protect&(PAGE_GUARD|PAGE_NOACCESS))
         && (memory.Protect&(PAGE_EXECUTE|PAGE_EXECUTE_READ|PAGE_EXECUTE_READWRITE|PAGE_EXECUTE_WRITECOPY));
 }
+// A loaded Streamline interposer's own exported factory entry, identified by
+// the module that owns the code, its leaf name, the export table and the
+// public interposer entries beside it. Its file location is the game's choice.
+bool InterposerTarget(void* target, const char* name, HMODULE& owner) noexcept {
+    owner=nullptr;
+    if (!target || !name || (strcmp(name,"CreateDXGIFactory") && strcmp(name,"CreateDXGIFactory1")
+        && strcmp(name,"CreateDXGIFactory2"))) return false;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(target),&owner) || !owner || owner==GetModuleHandleW(nullptr)) return false;
+    std::unique_ptr<wchar_t[]> path(new(std::nothrow) wchar_t[32768]);
+    const DWORD count=path?GetModuleFileNameW(owner,path.get(),32768):0;
+    if (!count || count>=32768) return false;
+    const wchar_t* leaf=wcsrchr(path.get(),L'\\'); leaf=leaf?leaf+1:path.get();
+    if (_wcsicmp(leaf,L"sl.interposer.dll") || reinterpret_cast<void*>(GetProcAddress(owner,name))!=target) return false;
+    for (const char* identity : {"slInit","slSetD3DDevice"}) {
+        void* entry=reinterpret_cast<void*>(GetProcAddress(owner,identity));
+        HMODULE entryOwner=nullptr;
+        if (!entry || !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                reinterpret_cast<LPCWSTR>(entry),&entryOwner) || entryOwner!=owner) return false;
+    }
+    MEMORY_BASIC_INFORMATION memory{};
+    return VirtualQuery(target,&memory,sizeof(memory))==sizeof(memory)
+        && memory.AllocationBase==owner && memory.Type==MEM_IMAGE && memory.State==MEM_COMMIT
+        && !(memory.Protect&(PAGE_GUARD|PAGE_NOACCESS))
+        && (memory.Protect&(PAGE_EXECUTE|PAGE_EXECUTE_READ|PAGE_EXECUTE_READWRITE|PAGE_EXECUTE_WRITECOPY));
+}
 bool Current(const Entry& e) noexcept {
     return e.installed && !memcmp(e.target,e.published.data(),e.published.size());
 }
@@ -143,12 +172,46 @@ bool MakeRelay(Entry& entry, uintptr_t begin, uintptr_t end) noexcept {
         && protected_pointer::QueryProtection(reinterpret_cast<uintptr_t>(code),observed,at)
         && observed==PAGE_EXECUTE_READ && FlushInstructionCache(GetCurrentProcess(),code,at);
 }
+// Caller holds the mutex; the target's owner is pinned and the caller range
+// is the main executable. Returns the failed stage, or nullptr when the entry
+// is published, inactive, with its original protection.
+const wchar_t* Install(Entry& entry, void* expected, void* replacement, uintptr_t begin, uintptr_t end, unsigned& code) noexcept {
+    const auto init=MH_Initialize();
+    if (init!=MH_OK && init!=MH_ERROR_ALREADY_INITIALIZED) { code=init; return L"initialize"; }
+    entry.target=expected;
+    entry.replacement=replacement;
+    // MinHook requires an executable relay at creation time. Prepare a valid
+    // inactive relay, then finalize its trampoline while the hook is disabled.
+    entry.relay=VirtualAlloc(nullptr,4096,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE);
+    if (!entry.relay) { code=GetLastError(); return L"relay-allocation"; }
+    entry.trampoline=expected;
+    if (!MakeRelay(entry,begin,end)) { code=GetLastError(); return L"relay-preparation"; }
+    const auto create=MH_CreateHook(expected,entry.relay,&entry.trampoline);
+    if (create!=MH_OK || !entry.trampoline) { code=create; return L"decode"; }
+    // Publish the complete pass-through trampoline before enabling the entry.
+    DWORD relayProtection=0;
+    if (!VirtualProtect(entry.relay,4096,PAGE_READWRITE,&relayProtection)) {
+        code=GetLastError(); MH_RemoveHook(expected); return L"relay-finalization";
+    }
+    if (!MakeRelay(entry,begin,end)) { code=GetLastError(); MH_RemoveHook(expected); return L"relay-publication"; }
+    DWORD originalProtection=0;
+    if (!protected_pointer::QueryProtection(reinterpret_cast<uintptr_t>(expected),originalProtection,8)) {
+        MH_RemoveHook(expected); return L"protection";
+    }
+    const auto enabled=MH_EnableHook(expected);
+    if (enabled!=MH_OK) { code=enabled; MH_RemoveHook(expected); return L"entry-publication"; }
+    memcpy(entry.published.data(),expected,entry.published.size());
+    entry.installed=true;
+    if (!protected_pointer::ProtectionMatches(reinterpret_cast<uintptr_t>(expected),originalProtection,8)
+        || !Current(entry)) return L"verification";
+    return nullptr;
+}
 }
 
 bool Eligible(HMODULE importer, void** slot, void* expected, const char* name) noexcept {
     uintptr_t begin=0,end=0;
     const auto address=reinterpret_cast<uintptr_t>(slot);
-    if (!expected || (address%8)!=4 || !ImageRange(importer,begin,end)
+    if (!expected || (address%8 && address%8!=4) || !ImageRange(importer,begin,end)
         || address<begin || address>end-sizeof(void*)) return false;
     MEMORY_BASIC_INFORMATION memory{};
     if (VirtualQuery(slot,&memory,sizeof(memory))!=sizeof(memory) || memory.AllocationBase!=importer
@@ -158,8 +221,12 @@ bool Eligible(HMODULE importer, void** slot, void* expected, const char* name) n
         || address-reinterpret_cast<uintptr_t>(memory.BaseAddress)>memory.RegionSize-sizeof(void*)) return false;
     const auto* ownerName=OwnerName(name);
     const bool factory=ownerName && !wcscmp(ownerName,L"dxgi.dll");
-    if ((factory || (memory.Protect&(PAGE_EXECUTE|PAGE_EXECUTE_READ|PAGE_EXECUTE_READWRITE|PAGE_EXECUTE_WRITECOPY)))
-        && !DeclaredDataImport(importer,slot,name,end-begin)) return false;
+    const bool executablePage=(memory.Protect&(PAGE_EXECUTE|PAGE_EXECUTE_READ|PAGE_EXECUTE_READWRITE|PAGE_EXECUTE_WRITECOPY))!=0;
+    // Aligned slots in data pages publish through the IAT itself. An aligned
+    // slot is eligible only once its page became executable (the Microsoft
+    // Store MSFS 2024 input imports turn RWX after startup), never otherwise.
+    if (!(address%8) && !executablePage) return false;
+    if ((factory || executablePage) && !DeclaredDataImport(importer,slot,name,end-begin)) return false;
     void* current=nullptr;
     memcpy(&current,slot,sizeof(current));
     HMODULE owner=nullptr;
@@ -191,38 +258,49 @@ bool Prepare(HMODULE importer, void** slot, void* expected, void* replacement, c
     if (!PublicTarget(expected,name,owner)
         || !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,
             reinterpret_cast<LPCWSTR>(expected),&pinned) || pinned!=owner) return false;
-    const auto init=MH_Initialize();
-    if (init!=MH_OK && init!=MH_ERROR_ALREADY_INITIALIZED) return fail(L"initialize",init);
-    entry->target=expected;
-    entry->replacement=replacement;
-    // MinHook requires an executable relay at creation time. Prepare a valid
-    // inactive relay, then finalize its trampoline while the hook is disabled.
-    entry->relay=VirtualAlloc(nullptr,4096,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE);
-    if (!entry->relay) return fail(L"relay-allocation",GetLastError());
-    entry->trampoline=expected;
-    if (!MakeRelay(*entry,begin,end)) return fail(L"relay-preparation",GetLastError());
-    const auto create=MH_CreateHook(expected,entry->relay,&entry->trampoline);
-    if (create!=MH_OK || !entry->trampoline) return fail(L"decode",create);
-    // Publish the complete pass-through trampoline before enabling the entry.
-    DWORD relayProtection=0;
-    if (!VirtualProtect(entry->relay,4096,PAGE_READWRITE,&relayProtection)) {
-        MH_RemoveHook(expected);return fail(L"relay-finalization",GetLastError());
-    }
-    if (!MakeRelay(*entry,begin,end)) { MH_RemoveHook(expected); return fail(L"relay-publication",GetLastError()); }
-    DWORD originalProtection=0;
-    if (!protected_pointer::QueryProtection(reinterpret_cast<uintptr_t>(expected),originalProtection,8)) {
-        MH_RemoveHook(expected); return false;
-    }
-    const auto enabled=MH_EnableHook(expected);
-    if (enabled!=MH_OK) { MH_RemoveHook(expected); return fail(L"entry-publication",enabled); }
-    memcpy(entry->published.data(),expected,entry->published.size());
-    entry->installed=true;
-    if (!protected_pointer::ProtectionMatches(reinterpret_cast<uintptr_t>(expected),originalProtection,8)
-        || !Eligible(importer,slot,expected,name) || !Current(*entry)) return fail(L"verification");
+    unsigned code=0;
+    if (const auto stage=Install(*entry,expected,replacement,begin,end,code)) return fail(stage,code);
+    if (!Eligible(importer,slot,expected,name)) return fail(L"verification");
     original=entry->trampoline;
     wchar_t line[256]{};
     swprintf_s(line,L"MFG_UNALIGNED_IMPORT prepared symbol=%hs caller=main-executable slotRva=0x%llX slotWrites=0",name,
         static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(slot)-begin));
+    single_module::Log(line);
+    return true;
+}
+bool PrepareInterposerEntry(void* expected, void* replacement, const char* name, void*& original) noexcept {
+    original=nullptr;
+    auto fail=[&](const wchar_t* stage,unsigned code=0){
+        wchar_t line[256]{};swprintf_s(line,L"MFG_PROXY_UI interposer-entry unavailable symbol=%hs stage=%s code=%u",name?name:"(null)",stage,code);
+        single_module::Log(line);return false;
+    };
+    HMODULE owner=nullptr;
+    if (!replacement || replacement==expected || !InterposerTarget(expected,name,owner)) return fail(L"eligibility");
+    if (!MitigationsSupported()) return fail(L"mitigation");
+    uintptr_t begin=0,end=0;
+    if (!ImageRange(GetModuleHandleW(nullptr),begin,end)) return fail(L"caller-range");
+    std::lock_guard lock(mutex);
+    Entry* entry=nullptr;
+    for (auto& e:entries) {
+        if (e.target==expected) {
+            // Repeated slInit calls reuse the retained relay; never stack another.
+            if (e.replacement!=replacement || !Current(e)) return false;
+            original=e.trampoline;
+            return true;
+        }
+        if (!e.target && !entry) entry=&e;
+    }
+    if (!entry) return fail(L"capacity");
+    HMODULE pinned=nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,
+            reinterpret_cast<LPCWSTR>(expected),&pinned) || pinned!=owner) return fail(L"pin");
+    unsigned code=0;
+    if (const auto stage=Install(*entry,expected,replacement,begin,end,code)) return fail(stage,code);
+    if (!InterposerTarget(expected,name,owner) || owner!=pinned) return fail(L"verification");
+    original=entry->trampoline;
+    wchar_t line[256]{};
+    swprintf_s(line,L"MFG_PROXY_UI interposer-entry prepared symbol=%hs caller=main-executable entryRva=0x%llX exportWrites=0 nativeTableWrites=0",name,
+        static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(expected)-reinterpret_cast<uintptr_t>(owner)));
     single_module::Log(line);
     return true;
 }

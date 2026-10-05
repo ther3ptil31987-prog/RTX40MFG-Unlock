@@ -219,6 +219,44 @@ struct MfgUnlockReShadeSnapshot
 
     BOOL ampereLegacySinglePreset = FALSE;
 
+    // Automatic HUDless detection (v1.4). Observation only.
+    BOOL hudlessDetectEnabled = FALSE;
+    char hudlessDetectSource[24]{};
+    char hudlessDetectVerdict[24]{};
+    char hudlessDetectRoute[24]{};
+    char hudlessDetectReason[64]{};
+    char hudlessDetectBestHypothesis[16]{};
+    uint32_t hudlessDetectProbes = 0;
+    uint32_t hudlessDetectConclusive = 0;
+    uint32_t hudlessDetectIdentityPermille = 0;
+    uint32_t hudlessDetectBestPermille = 0;
+    uint32_t hudlessDetectUiCoveragePermille = 0;
+    uint32_t hudlessDetectFormat = 0;
+    uint32_t hudlessDetectExtentWidth = 0;
+    uint32_t hudlessDetectExtentHeight = 0;
+    uint32_t hudlessDetectLifecycle = 0;
+    uint32_t hudlessDetectFinalFormat = 0;
+    uint32_t hudlessDetectFinalWidth = 0;
+    uint32_t hudlessDetectFinalHeight = 0;
+    uint32_t hudlessDetectCompositePermille = 0;
+    uint32_t hudlessDetectTranslucentTiles = 0;
+    uint32_t hudlessDetectInformativeTiles = 0;
+
+    // Automatic UI recomposition (v1.4 milestone 2).
+    char hudRecompositionState[24]{};
+    BOOL hudRecompositionVerified = FALSE;
+
+    // Frame pairing of HUDless tags with Presents (v1.4 milestone 2).
+    BOOL hudlessDetectPaired = FALSE;
+    uint32_t hudlessDetectStillPermille = 0;
+    uint64_t hudlessPresentMarkers = 0;
+    int32_t hudlessTagLead = 0;
+    int32_t hudlessMaxTagLead = 0;
+
+    // UI buffer used by recomposition, and HUDless that differs only in motion.
+    char hudRecompositionUi[16]{};
+    BOOL hudlessDetectDiffersInMotion = FALSE;
+    uint32_t hudlessDetectMotionDiffersProbes = 0;
 };
 
 #if defined(MFG_UNLOCK_RESHADE_ADDON) || defined(MFG_UNLOCK_BACKEND_BRIDGE)

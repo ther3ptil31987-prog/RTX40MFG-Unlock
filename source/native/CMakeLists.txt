@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(RTX40MFGNative VERSION 1.3.3.2 LANGUAGES C CXX ASM_MASM)
+project(RTX40MFGNative VERSION 1.4.1.45 LANGUAGES C CXX ASM_MASM)
 option(MFG_UNLOCK_OVERLAY_SKIP_GPU_WORK "Isolated comparison: keep proxies/input but skip UI GPU work" OFF)
 option(MFG_UNLOCK_NGX_CREATE_RESULT_DIAGNOSTICS "Bounded NGX runtime Create results without DRED or new hooks" OFF)
 option(MFG_UNLOCK_GPU_FAULT_CAPTURE "Isolated local DRED and NGX result diagnostics" OFF)
@@ -92,6 +92,8 @@ set(MFG_UNLOCK_CORE_SOURCES
     entry_detour.asm
     nvidia_mfg_policy.cpp
     temporal_interval_trace.cpp
+    hudless_probe.cpp
+    hudless_visualizer.cpp
     fault_capture.cpp
     output_pull_telemetry.cpp
 )
@@ -113,6 +115,9 @@ if(MFG_UNLOCK_BUILD_SINGLE_MODULE)
         message(FATAL_ERROR "Set GLSLANG_VALIDATOR to the pinned Vulkan shader compiler")
     endif()
     set(MFG_GENERATED "${CMAKE_CURRENT_BINARY_DIR}/generated")
+    file(READ "${CMAKE_CURRENT_SOURCE_DIR}/witcher_dots/converter.hlsl" DOTS_CONVERTER_SOURCE)
+    configure_file(witcher_dots/converter_source.h.in "${MFG_GENERATED}/converter_source.h" @ONLY)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS witcher_dots/converter.hlsl)
     execute_process(COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/generate_build_inputs.py"
         --output "${MFG_GENERATED}" --imgui "${IMGUI_ROOT}" --glslang "${GLSLANG_VALIDATOR}"
         COMMAND_ERROR_IS_FATAL ANY)
@@ -153,6 +158,9 @@ if(MFG_UNLOCK_BUILD_SINGLE_MODULE)
     add_library(MfgSingleObjects OBJECT ${MFG_SINGLE_CORE_SOURCES}
         single_module.cpp single_overlay.cpp overlay_application_imports.cpp overlay_platform.cpp caller_scoped_import.cpp
         overlay_dx12.cpp overlay_dxgi_proxy.cpp overlay_adapter_parent.cpp overlay_vulkan.cpp overlay_install.cpp reshade_frontend.cpp
+        witcher_dots/geometry.cpp witcher_dots/shader_ir.cpp witcher_dots/shader_cache.cpp
+        witcher_dots/game_profile.cpp
+        witcher_dots/gpu_runtime.cpp witcher_dots/witcher_dots.cpp
         "${MFG_GENERATED}/proxy_generated/renamable_exports.asm")
     target_compile_features(MfgSingleObjects PRIVATE cxx_std_20)
     target_compile_options(MfgSingleObjects PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/utf-8>)
@@ -176,6 +184,7 @@ if(MFG_UNLOCK_BUILD_SINGLE_MODULE)
         MFG_UNLOCK_PREV2CURR_EXPERIMENT=$<BOOL:${MFG_UNLOCK_PREV2CURR_EXPERIMENT}>
         MFG_UNLOCK_INTERM_SCATTER_EXPERIMENT=$<BOOL:${MFG_UNLOCK_INTERM_SCATTER_EXPERIMENT}>)
     target_include_directories(MfgSingleObjects PRIVATE
+        "${MFG_GENERATED}"
         "${STREAMLINE_ROOT}/include" "${STREAMLINE_ROOT}/external/ngx-sdk/include"
         "${IMGUI_ROOT}" "${VULKAN_INCLUDE_DIR}" third_party/minhook/include)
     set_target_properties(MfgSingleObjects PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
