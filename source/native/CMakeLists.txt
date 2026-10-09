@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(RTX40MFGNative VERSION 1.4.1.45 LANGUAGES C CXX ASM_MASM)
+project(RTX40MFGNative VERSION 1.4.2.46 LANGUAGES C CXX ASM_MASM)
 option(MFG_UNLOCK_OVERLAY_SKIP_GPU_WORK "Isolated comparison: keep proxies/input but skip UI GPU work" OFF)
 option(MFG_UNLOCK_NGX_CREATE_RESULT_DIAGNOSTICS "Bounded NGX runtime Create results without DRED or new hooks" OFF)
 option(MFG_UNLOCK_GPU_FAULT_CAPTURE "Isolated local DRED and NGX result diagnostics" OFF)
@@ -159,7 +159,7 @@ if(MFG_UNLOCK_BUILD_SINGLE_MODULE)
         single_module.cpp single_overlay.cpp overlay_application_imports.cpp overlay_platform.cpp caller_scoped_import.cpp
         overlay_dx12.cpp overlay_dxgi_proxy.cpp overlay_adapter_parent.cpp overlay_vulkan.cpp overlay_install.cpp reshade_frontend.cpp
         witcher_dots/geometry.cpp witcher_dots/shader_ir.cpp witcher_dots/shader_cache.cpp
-        witcher_dots/game_profile.cpp
+        witcher_dots/game_profile.cpp witcher_dots/game_discovery.cpp
         witcher_dots/gpu_runtime.cpp witcher_dots/witcher_dots.cpp
         "${MFG_GENERATED}/proxy_generated/renamable_exports.asm")
     target_compile_features(MfgSingleObjects PRIVATE cxx_std_20)

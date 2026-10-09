@@ -1,9 +1,10 @@
-# Building v1.4.1-hotfix.1
+# Building v1.4.2
 
-The v1.4.1-hotfix.1 release uses the V1.4.1 runtime with the merged dev.45
-ReShade/RenoDX hair, save-load hair, and session logging fixes. ProductVersion
-is 1.4.1-hotfix.1 and FileVersion is 1.4.1.45. The newer RTX 30 development
-work is excluded from this release.
+The v1.4.2 release is v1.4.1-hotfix.1 with build-independent Witcher 3 hair
+support (source dev.46): the hair runtime finds the game's hair code by
+structure instead of by fixed executable profiles. ProductVersion is 1.4.2 and
+FileVersion is 1.4.2.46. The newer RTX 30 development work is excluded from
+this release.
 
 The release target is `RTXMFGUnified`, producing `Release/RTXMFG.dll`.
 Use Windows x64, Visual Studio 2022/MSVC 14.38.33130, Windows SDK
@@ -42,7 +43,7 @@ actual paths and a fresh build directory:
     -StreamlineRoot 'C:/SDKs/streamline-sdk-v2.14.1' `
     -ImGuiRoot 'C:/SDKs/reshade-6.8.0/deps/imgui' `
     -NativeCacheRoot 'C:/BuildInputs/rtxmfg-sm86' `
-    -BuildDirectory "$PWD/build/v1.4.1-hotfix.1" `
+    -BuildDirectory "$PWD/build/v1.4.2" `
     -EnableNgxCreateResultDiagnostics
 ```
 
@@ -60,6 +61,9 @@ Third-party notices remain embedded in the release DLL.
 The Witcher 3 hair converter header is generated from
 `source/native/witcher_dots/converter.hlsl` and `converter_source.h.in`.
 Generated headers and runtime shader caches are not source inputs to publish.
+The hair code discovery in `source/native/witcher_dots/game_discovery.cpp`
+decodes instructions with the hde64 decoder bundled with MinHook in
+`source/native/third_party/minhook`; it needs no additional build input.
 
 The focused font/publication checks are in `tests/ampere_font`. Configure that
 project separately with `MFG_PROVIDER_FIXTURE` pointing to the audited 310.9.1

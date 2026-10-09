@@ -1,4 +1,4 @@
-# Universal RTXMFG Unlocker — v1.4.1-hotfix.1
+# Universal RTXMFG Unlocker — v1.4.2
 
 DLSS Multi Frame Generation controls for Windows x64 games on RTX 40 series GPUs,
 with experimental RTX 30 support. The backend and menu are combined in one
@@ -13,6 +13,11 @@ MFG override maximum. A listed maximum does not guarantee that the active
 Frame Generation pipeline can apply it.
 
 If this mod helps you, [help me get through university on Ko-fi](https://ko-fi.com/dashdogy).
+
+## Changes in v1.4.2
+
+- Added more resilient detection for path-traced hair in The Witcher 3, which
+  should help keep the mod working after game patches.
 
 ## Changes in v1.4.1-hotfix.1
 
@@ -50,12 +55,12 @@ If this mod helps you, [help me get through university on Ko-fi](https://ko-fi.c
 
 ## Install
 
-The v1.4.1-hotfix.1 download contains **`RTXMFG.dll`**. The menu is built in; no separate
+The v1.4.2 download contains **`RTXMFG.dll`**. The menu is built in; no separate
 ReShade or external loader installation is needed.
 
 1. Close the game. If upgrading from a split release, remove the old mod
    components as described below first.
-2. Download `RTXMFG-v1.4.1-hotfix.1.zip` from [Releases](https://github.com/dashdogy/RTX40MFG-Unlock/releases)
+2. Download `RTXMFG-v1.4.2.zip` from [Releases](https://github.com/dashdogy/RTX40MFG-Unlock/releases)
    and extract it.
 3. Rename `RTXMFG.dll` to **one** supported filename below that the game loads
    early. Place it beside the **actual game executable**, not the launcher.
@@ -143,7 +148,8 @@ Enable the game's HairWorks, path tracing and **Path Traced Hair** settings;
 RTXMFG follows those settings automatically.
 **Fully restart the game after changing Path Traced Hair or Frame Generation.**
 The mod menu's **Path traced hair** line shows its activity or why it is unavailable.
-Support is experimental and requires a matching game and hair shader profile.
+Support is experimental and may stop working after a game patch; the menu's
+**Path traced hair** line shows when it is unavailable.
 
 ## Compatibility and troubleshooting
 

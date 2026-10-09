@@ -8748,7 +8748,7 @@ DWORD WINAPI PatchWorker(void* context)
     hudless_probe::SetLogSink(&MidpointLog);
     hudless_visualizer::SetUiTagger(&TagSynthesizedUi);
 #if defined(MFG_UNLOCK_SINGLE_MODULE_UI)
-    Log(L"RTXMFG build=1.4.1-hotfix.1 source=dev.45 outputPullMask=%d occupancyHint=%d "
+    Log(L"RTXMFG build=1.4.2 source=dev.46 outputPullMask=%d occupancyHint=%d "
         L"uiInputs=framed-observations uiRecomposition=game-managed "
         L"hudlessDetection=tile-probe",
         MFG_UNLOCK_OUTPUT_PULL_MASK_ONLY,

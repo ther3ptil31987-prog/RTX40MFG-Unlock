@@ -6,8 +6,8 @@
 102 RCDATA "third_party/minhook/LICENSE.txt"
 103 RCDATA "proxy_generated/LICENSE-UAL.txt"
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 1,4,1,45
- PRODUCTVERSION 1,4,1,45
+ FILEVERSION 1,4,2,46
+ PRODUCTVERSION 1,4,2,46
  FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
 #ifdef _DEBUG
  FILEFLAGS VS_FF_DEBUG
@@ -24,11 +24,11 @@ BEGIN
   BEGIN
    VALUE "CompanyName", "dashdogy"
    VALUE "FileDescription", "RTXMFG integrated Ada and experimental Ampere backend and UI"
-   VALUE "FileVersion", "1.4.1.45"
+   VALUE "FileVersion", "1.4.2.46"
    VALUE "InternalName", MFG_SINGLE_FILENAME
    VALUE "OriginalFilename", MFG_SINGLE_FILENAME
    VALUE "ProductName", "Universal RTXMFG Single Module"
-   VALUE "ProductVersion", "1.4.1-hotfix.1"
+   VALUE "ProductVersion", "1.4.2"
   END
  END
  BLOCK "VarFileInfo"

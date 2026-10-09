@@ -1,6 +1,7 @@
 #include "witcher_dots.h"
 #include "gpu_runtime.h"
 #include "game_profile.h"
+#include "game_discovery.h"
 #include "checked_memory.h"
 #include "../protected_pointer.h"
 #include "../overlay_native.h"
@@ -461,8 +462,52 @@ uintptr_t WINAPI Copy(void* destination,const void* source,size_t bytes) {
     LogCost();LogDiagnostics();
     return copied;
 }
-// Identifies the running build by its exact executable size and SHA-256, then
-// validates every profiled site in the loaded image.
+int64_t ExecutableSize() {
+    std::error_code failed;
+    const auto size=std::filesystem::file_size(std::filesystem::path(S().executable),failed);
+    return failed?-1:static_cast<int64_t>(size);
+}
+// A profiled build is admitted only by its exact profile; any other
+// executable size is an update whose hair code is found by structure.
+bool ProfiledSize(int64_t size) {
+    for(const auto& game:profile::kProfiles)if(size==static_cast<int64_t>(game.exeSize))return true;
+    return false;
+}
+void LogDiscovered() {
+    const auto* found=profile::DiscoveredSites();
+    if(!found)return;
+    const auto& p=found->profile;
+    wchar_t line[900]{};
+    swprintf_s(line,L"WITCHER_DOTS hair code found by structure: game=%S executable=%lld bytes builder=0x%x prebuild=0x%x build=0x%x "
+        L"copy=0x%x caps=0x%x lss=0x%x gates=0x%x,0x%x device=0x%x,0x%x owner=0x%x ptEnable=0x%x ptHair=0x%x "
+        L"shaders=0x%x,0x%x,0x%x,0x%x time=%uus",
+        p.label,static_cast<long long>(ExecutableSize()),p.entries[0].rva,p.entries[1].rva,p.entries[2].rva,p.entries[3].rva,p.entries[4].rva,
+        found->lssByte,found->gates[0].rva,found->gates[1].rva,p.deviceReturns[0],p.deviceReturns[1],p.owner.scratch,
+        p.ptEnable.object,p.ptHairQuality.object,p.shaders[0],p.shaders[1],p.shaders[2],p.shaders[3],found->microseconds);
+    single_module::Log(line);
+}
+// A D3D12CreateDevice caller DOTS prepares on: the renderer call of a profiled
+// build, or of an unprofiled build whose hair code was found. `unsupported` is
+// set once discovery has ruled the running build out.
+bool RendererCaller(const void* caller,std::string& unsupported) {
+    auto& state=S();
+    if(profile::KnownDeviceCaller(caller,state.game))return true;
+    HMODULE owner{};
+    if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        static_cast<LPCWSTR>(caller),&owner)||owner!=state.game)return false;
+    const int64_t size=ExecutableSize();
+    if(ProfiledSize(size))return false;
+    std::string why;
+    const auto* found=profile::DiscoveredProfile(state.game,why);
+    if(!found) {
+        char text[160]{};_snprintf_s(text,_TRUNCATE,"hair code not found (executable %lld bytes): %s",static_cast<long long>(size),why.c_str());
+        unsupported=text;return false;
+    }
+    return At(caller,found->deviceReturns[0])||At(caller,found->deviceReturns[1]);
+}
+// Identifies the running build by its exact executable size and SHA-256, or
+// else by its hair code found by structure (game_discovery.cpp), then
+// validates every site in the loaded image.
 bool VerifyProfile(const void* deviceCaller,std::string& error) {
     auto& state=S();
     std::ifstream file(std::filesystem::path(state.executable),std::ios::binary|std::ios::ate);
@@ -476,8 +521,11 @@ bool VerifyProfile(const void* deviceCaller,std::string& error) {
         }
         if(HashEquals(data,game.exeHash)) {selected=&game;break;}
     }
+    std::string why;
+    if(!selected&&size>0&&!ProfiledSize(size)&&(selected=profile::DiscoveredProfile(state.game,why))!=nullptr)LogDiscovered();
     if(!selected) {
-        char text[96]{};_snprintf_s(text,_TRUNCATE,"unsupported game build (executable %lld bytes)",static_cast<long long>(size));
+        char text[160]{};_snprintf_s(text,_TRUNCATE,"unsupported game build (executable %lld bytes)%s%s",static_cast<long long>(size),
+            why.empty()?"":": ",why.c_str());
         error=text;return false;
     }
     // The device was created from this build's own renderer call site.
@@ -571,7 +619,13 @@ void BeforeDeviceCreate(const void* caller) noexcept {
         {
             std::lock_guard lock(state.lock);Preferences();
             if(!state.snapshot.applicable||!state.snapshot.requested||!state.snapshot.crashReportRequested||state.dredEnabled
-                ||state.attempted||single_overlay::native::InsideLoader()||!profile::KnownDeviceCaller(caller,state.game))return;
+                ||state.attempted||single_overlay::native::InsideLoader())return;
+        }
+        std::string unsupported;
+        if(!RendererCaller(caller,unsupported))return;
+        {
+            std::lock_guard lock(state.lock);
+            if(state.dredEnabled||state.attempted)return;
             state.dredEnabled=true;
         }
         // DRED applies only to devices created after it is configured.
@@ -595,10 +649,20 @@ void ObserveDevice(IUnknown* object,const void* caller) noexcept {
         auto& state=S();
       {
         std::lock_guard lock(state.lock);Preferences();
-        if(!state.snapshot.applicable||!state.snapshot.requested||state.attempted||single_overlay::native::InsideLoader()
-            ||!profile::KnownDeviceCaller(caller,state.game))return;
-        state.attempted=true;state.snapshot.stage=Stage::Preparing;
+        if(!state.snapshot.applicable||!state.snapshot.requested||state.attempted||single_overlay::native::InsideLoader())return;
       }
+        // Outside the state lock: an unprofiled build's hair code is found
+        // once per process by scanning the executable image.
+        std::string unsupported;
+        const bool renderer=RendererCaller(caller,unsupported);
+        if(!renderer&&unsupported.empty())return;
+      {
+        std::lock_guard lock(state.lock);
+        if(state.attempted)return;
+        // An unsupported build stays unsupported for the whole process.
+        state.attempted=true;state.snapshot.stage=renderer?Stage::Preparing:Stage::UnsupportedGame;
+      }
+        if(!renderer) {Reason(Stage::UnsupportedGame,unsupported);return;}
         std::string error;
         if(!VerifyProfile(caller,error)) {Reason(Stage::UnsupportedGame,error);return;}
         settingKnown.store(true,std::memory_order_release);
