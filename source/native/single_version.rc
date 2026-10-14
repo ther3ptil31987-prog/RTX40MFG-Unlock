@@ -1,13 +1,14 @@
 #include <windows.h>
 #ifndef MFG_SINGLE_FILENAME
-#define MFG_SINGLE_FILENAME "RTXMFG.dll"
+#define MFG_SINGLE_FILENAME "MFGUnlocker.dll"
 #endif
 101 RCDATA "third_party/imgui_backends/LICENSE-ImGui.txt"
 102 RCDATA "third_party/minhook/LICENSE.txt"
 103 RCDATA "proxy_generated/LICENSE-UAL.txt"
+104 RCDATA "xess/XEFG-PROGRAMS-NOTICE.txt"
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 1,4,2,46
- PRODUCTVERSION 1,4,2,46
+ FILEVERSION 1,5,0,933
+ PRODUCTVERSION 1,5,0,933
  FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
 #ifdef _DEBUG
  FILEFLAGS VS_FF_DEBUG
@@ -23,12 +24,12 @@ BEGIN
   BLOCK "040904B0"
   BEGIN
    VALUE "CompanyName", "dashdogy"
-   VALUE "FileDescription", "RTXMFG integrated Ada and experimental Ampere backend and UI"
-   VALUE "FileVersion", "1.4.2.46"
+   VALUE "FileDescription", "MFG Unlocker: DLSS and XeSS multi frame generation"
+   VALUE "FileVersion", "1.5.0.933"
    VALUE "InternalName", MFG_SINGLE_FILENAME
    VALUE "OriginalFilename", MFG_SINGLE_FILENAME
-   VALUE "ProductName", "Universal RTXMFG Single Module"
-   VALUE "ProductVersion", "1.4.2"
+   VALUE "ProductName", "MFG Unlocker"
+   VALUE "ProductVersion", "1.5.0"
   END
  END
  BLOCK "VarFileInfo"

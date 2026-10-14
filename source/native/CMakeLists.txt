@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(RTX40MFGNative VERSION 1.4.2.46 LANGUAGES C CXX ASM_MASM)
+project(RTX40MFGNative VERSION 1.5.0.933 LANGUAGES C CXX ASM_MASM)
 option(MFG_UNLOCK_OVERLAY_SKIP_GPU_WORK "Isolated comparison: keep proxies/input but skip UI GPU work" OFF)
 option(MFG_UNLOCK_NGX_CREATE_RESULT_DIAGNOSTICS "Bounded NGX runtime Create results without DRED or new hooks" OFF)
 option(MFG_UNLOCK_GPU_FAULT_CAPTURE "Isolated local DRED and NGX result diagnostics" OFF)
@@ -76,6 +76,7 @@ add_compile_definitions(MFG_UNLOCK_RUNTIME_GPU_SELECTION=1 MFG_UNLOCK_AMPERE_MFG
 
 set(MFG_UNLOCK_CORE_SOURCES
     patcher.cpp
+    optiscaler_host.cpp
     midpoint_fix.cpp
     gpu_dispatch.cpp
     ampere_gpu.cpp
@@ -84,6 +85,8 @@ set(MFG_UNLOCK_CORE_SOURCES
     ampere_mask_transform.cpp
     ampere_backend.cpp
     ampere_wrapper_capacity.cpp
+    ampere_provider_arch.cpp
+    dlssg_provider_selection.cpp
     dlssg_provider_policy.cpp
     dlssg_preset.cpp
     reflex_control.cpp
@@ -99,6 +102,9 @@ set(MFG_UNLOCK_CORE_SOURCES
 )
 
 option(MFG_UNLOCK_BUILD_SINGLE_MODULE "Build integrated backend and ImGui UI" ON)
+option(MFG_UNLOCK_XESS "Integrate the XeSS-FG multi-frame backend (V1.5)" ON)
+set(XESS_SDK_ROOT "" CACHE PATH "XeSS SDK 3.0.2 directory containing inc/xess_fg and inc/xell")
+set(XESS_PROGRAMS_ROOT "" CACHE PATH "Directory containing programs/programs.tsv and the 54 portable DXIL programs")
 set(VULKAN_INCLUDE_DIR "" CACHE PATH "Explicit Vulkan SDK headers for the standalone renderer")
 if(MFG_UNLOCK_BUILD_SINGLE_MODULE)
     if(NOT EXISTS "${IMGUI_ROOT}/backends/imgui_impl_dx12.cpp" OR
@@ -125,6 +131,39 @@ if(MFG_UNLOCK_BUILD_SINGLE_MODULE)
         generate_build_inputs.py proxy_exports.txt generated_sha256.json ui_color.frag
         "${IMGUI_ROOT}/backends/imgui_impl_dx12.cpp" "${GLSLANG_VALIDATOR}")
     include_directories("${MFG_GENERATED}")
+    set(MFG_XESS_SOURCES)
+    set(MFG_XESS_RESOURCES)
+    if(MFG_UNLOCK_XESS)
+        if(NOT EXISTS "${XESS_SDK_ROOT}/inc/xess_fg/xefg_swapchain_d3d12.h" OR
+           NOT EXISTS "${XESS_SDK_ROOT}/inc/xell/xell_d3d12.h")
+            message(FATAL_ERROR "Set XESS_SDK_ROOT to the pinned XeSS SDK 3.0.2 headers")
+        endif()
+        execute_process(COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/xess/generate_xess_programs.py"
+            --programs "${XESS_PROGRAMS_ROOT}" --output "${MFG_GENERATED}"
+            COMMAND_ERROR_IS_FATAL ANY)
+        file(GLOB XESS_PROGRAM_INPUTS CONFIGURE_DEPENDS "${XESS_PROGRAMS_ROOT}/programs/*")
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+            xess/generate_xess_programs.py ${XESS_PROGRAM_INPUTS})
+        # splat.1: RTXMFG's own XeFG shaders, compiled by the generator's pinned Windows SDK dxc
+        # (the SDK selected by -A x64,version=...); the generator pins the dxc version and outputs.
+        get_filename_component(MFG_WINDOWS_KITS
+            "[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows Kits\\Installed Roots;KitsRoot10]" ABSOLUTE)
+        set(MFG_DXC "${MFG_WINDOWS_KITS}/bin/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/x64/dxc.exe")
+        if(NOT CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION OR NOT EXISTS "${MFG_DXC}")
+            message(FATAL_ERROR "XeFG shaders need dxc.exe from the selected Windows SDK: ${MFG_DXC}")
+        endif()
+        execute_process(COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/xess/generate_xess_shaders.py"
+            --dxc "${MFG_DXC}" --source "${CMAKE_CURRENT_SOURCE_DIR}" --output "${MFG_GENERATED}"
+            COMMAND_ERROR_IS_FATAL ANY)
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+            xess/generate_xess_shaders.py xess/port/splat_motion_aware.hlsl)
+        # beta.8: XeSS MFG under OptiScaler only (no standalone route, Reflex bridge or Intel native control).
+        set(MFG_XESS_SOURCES
+            xess/xess_mod.cpp xess/universal_hooks.cpp xess/internal_api_guards.asm
+            xess/sdk_pacing.cpp xess/game_profile.cpp xess/runtime_payload.cpp xess/xess_runtime.cpp
+            xess/present_capture.cpp xess/host_unlock.cpp xess/motion_fill.cpp xess/hudless_match.cpp)
+        set(MFG_XESS_RESOURCES "${MFG_GENERATED}/embedded_xess_programs.rc" "${MFG_GENERATED}/embedded_xess_shaders.rc")
+    endif()
 
     add_library(MfgSingleMinHook STATIC
         third_party/minhook/src/buffer.c
@@ -161,6 +200,7 @@ if(MFG_UNLOCK_BUILD_SINGLE_MODULE)
         witcher_dots/geometry.cpp witcher_dots/shader_ir.cpp witcher_dots/shader_cache.cpp
         witcher_dots/game_profile.cpp witcher_dots/game_discovery.cpp
         witcher_dots/gpu_runtime.cpp witcher_dots/witcher_dots.cpp
+        ${MFG_XESS_SOURCES}
         "${MFG_GENERATED}/proxy_generated/renamable_exports.asm")
     target_compile_features(MfgSingleObjects PRIVATE cxx_std_20)
     target_compile_options(MfgSingleObjects PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/utf-8>)
@@ -173,6 +213,7 @@ if(MFG_UNLOCK_BUILD_SINGLE_MODULE)
         MFG_UNLOCK_BOUNDED_OVERLAY_REDESIGN=$<BOOL:${MFG_UNLOCK_BOUNDED_OVERLAY_REDESIGN}>
         MFG_UNLOCK_OVERLAY_MENU_DRAW=$<BOOL:${MFG_UNLOCK_OVERLAY_MENU_DRAW}>
         MFG_UNLOCK_OVERLAY_TEST_FAULTS=$<BOOL:${MFG_UNLOCK_OVERLAY_TEST_FAULTS}>
+        MFG_UNLOCK_XESS=$<BOOL:${MFG_UNLOCK_XESS}>
         UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN ImTextureID=ImU64
         MFG_UNLOCK_SINGLE_MODULE_UI=1 MFG_UNLOCK_UNIVERSAL_CONFIG=1
         MFG_UNLOCK_RESHADE_UI_CLIENT=1 MFG_UNLOCK_V12_UNIVERSAL_UI=1
@@ -186,18 +227,25 @@ if(MFG_UNLOCK_BUILD_SINGLE_MODULE)
     target_include_directories(MfgSingleObjects PRIVATE
         "${MFG_GENERATED}"
         "${STREAMLINE_ROOT}/include" "${STREAMLINE_ROOT}/external/ngx-sdk/include"
-        "${IMGUI_ROOT}" "${VULKAN_INCLUDE_DIR}" third_party/minhook/include)
+        "${IMGUI_ROOT}" "${VULKAN_INCLUDE_DIR}" third_party/minhook/include
+        "${CMAKE_CURRENT_SOURCE_DIR}")
+    if(MFG_UNLOCK_XESS)
+        target_include_directories(MfgSingleObjects PRIVATE
+            "${XESS_SDK_ROOT}/inc/xess_fg" "${XESS_SDK_ROOT}/inc/xell")
+    endif()
     set_target_properties(MfgSingleObjects PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
     add_library(RTXMFGUnified SHARED $<TARGET_OBJECTS:MfgSingleObjects>
-        single_version.rc "${MFG_GENERATED}/proxy_generated/renamable.def" ${MFG_AMPERE_KERNEL_RESOURCE})
-    target_compile_definitions(RTXMFGUnified PRIVATE MFG_SINGLE_FILENAME="RTXMFG.dll")
+        single_version.rc "${MFG_GENERATED}/proxy_generated/renamable.def" ${MFG_AMPERE_KERNEL_RESOURCE}
+        ${MFG_XESS_RESOURCES})
+    target_compile_definitions(RTXMFGUnified PRIVATE MFG_SINGLE_FILENAME="MFGUnlocker.dll")
     target_link_libraries(RTXMFGUnified PRIVATE MfgSingleImGui MfgSingleMinHook
-        bcrypt version wintrust crypt32 delayimp d3dcompiler dxgi user32 gdi32 imm32 dwmapi)
+        bcrypt version wintrust crypt32 advapi32 delayimp d3dcompiler dxgi user32 gdi32 imm32 dwmapi psapi)
     target_link_options(RTXMFGUnified PRIVATE /DELAYLOAD:version.dll /DELAYLOAD:d3dcompiler_47.dll /DELAYLOAD:dxgi.dll
+        /DELAYLOAD:shell32.dll /DELAYLOAD:imm32.dll /DELAYLOAD:bcrypt.dll /DELAYLOAD:wintrust.dll /DELAYLOAD:crypt32.dll
         /DEBUG:FULL /OPT:REF /OPT:ICF /IGNORE:4222)
     target_include_directories(RTXMFGUnified PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
-    set_target_properties(RTXMFGUnified PROPERTIES PREFIX "" OUTPUT_NAME "RTXMFG"
+    set_target_properties(RTXMFGUnified PROPERTIES PREFIX "" OUTPUT_NAME "MFGUnlocker"
         LINKER_LANGUAGE CXX MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     add_custom_target(RTX40MFGSingle ALL DEPENDS RTXMFGUnified)
 endif()

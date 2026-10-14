@@ -6,7 +6,7 @@
 #define MFG_PRODUCT "RTXMFG"
 #define MFG_PRODUCT_W L"RTXMFG"
 #define MFG_CORE_W L"RTXMFGCore.dll"
-#define MFG_SHIM_W L"RTXMFG.dll"
+#define MFG_SHIM_W L"MFGUnlocker.dll"
 #define MFG_CONFIG_W L"RTXMFG-Universal.json"
 #define MFG_STATUS_W L"RTXMFG-Universal.status.json"
 #define MFG_CONFIG_ENV_W L"RTX_MFG_CONFIG_PATH"

@@ -2,7 +2,11 @@
 #include "fault_capture.h"
 #include "gpu_selection_policy.h"
 #include "ampere_backend.h"
+#include "adapter_vendor_kmt.h"
+#include "single_module.h"
 #include <d3d12.h>
+#include <dxgi1_6.h>
+#include <wrl/client.h>
 #include <atomic>
 #include <mutex>
 
@@ -15,6 +19,54 @@ Selection gSelection;
 std::atomic<Family> gFamily{Family::eUnknown};
 std::atomic<uint64_t> gLuid{0};
 std::atomic<midpoint_fix::LogCallback> gLog{nullptr};
+std::atomic<uint32_t> gVendor{0};
+uint64_t gVendorLuid = 0; // guarded by gSelectionMutex
+uint32_t gVendorCached = 0;
+constexpr uint32_t kNvidiaVendor = 0x10de;
+
+// DXGI's description of the adapter that owns this LUID. Zero when DXGI cannot
+// identify it; the family probes then keep their existing fail-closed checks.
+uint32_t VendorForLuid(uint64_t luid) noexcept
+{
+    if (!luid) return 0;
+    if (luid == gVendorLuid) return gVendorCached;
+    uint32_t vendor = 0;
+    try
+    {
+        Microsoft::WRL::ComPtr<IDXGIFactory4> factory;
+        Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
+        LUID identity{};
+        identity.LowPart = static_cast<DWORD>(luid);
+        identity.HighPart = static_cast<LONG>(luid >> 32);
+        DXGI_ADAPTER_DESC1 description{};
+        if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))
+            && SUCCEEDED(factory->EnumAdapterByLuid(identity, IID_PPV_ARGS(&adapter)))
+            && SUCCEEDED(adapter->GetDesc1(&description)))
+            vendor = description.VendorId;
+        // DXGI descriptions can be spoofed by another mod (OptiScaler reports
+        // NVIDIA on every vendor by default); the kernel IDs for the LUID win.
+        adapter_vendor_kmt::Ids ids{};
+        if (adapter_vendor_kmt::Query(identity, ids) && ids.vendor != vendor)
+        {
+            wchar_t corrected[160]{};
+            swprintf_s(corrected, L"GPU vendor: DXGI reported %04X, kernel adapter %04X; using the kernel value\n",
+                vendor, ids.vendor);
+            single_module::Log(corrected);
+            vendor = ids.vendor;
+        }
+    }
+    catch (...) { vendor = 0; }
+    gVendorLuid = luid;
+    gVendorCached = vendor;
+    if (vendor && vendor != kNvidiaVendor)
+    {
+        wchar_t message[160]{};
+        swprintf_s(message, L"Unified GPU selection: vendor=0x%04X adapterLuid=0x%016llX is not NVIDIA; "
+            L"DLSS-G stays dormant (XeSS-FG remains available)", vendor, luid);
+        if (auto log = gLog.load(std::memory_order_acquire)) log(message);
+    }
+    return vendor;
+}
 
 bool Publish(Family candidate, uint64_t luid) noexcept
 {
@@ -27,7 +79,7 @@ bool Publish(Family candidate, uint64_t luid) noexcept
         wchar_t message[192]{};
         swprintf_s(message, L"Unified GPU selection: family=%s adapterLuid=0x%016llX",
             gSelection.family == Family::eAda ? L"Ada (SM89)"
-            : gSelection.family == Family::eAmpere ? L"Ampere (SM86, experimental)"
+            : gSelection.family == Family::eAmpere ? L"Ampere (SM86)"
             : L"conflict; restart required", gSelection.luid);
         if (auto log = gLog.load(std::memory_order_acquire)) log(message);
     }
@@ -55,6 +107,7 @@ Family Selected() noexcept { return gFamily.load(std::memory_order_acquire); }
 bool IsAda() noexcept { return Selected() == Family::eAda; }
 bool IsAmpere() noexcept { return Selected() == Family::eAmpere; }
 uint64_t AdapterLuid() noexcept { return gLuid.load(std::memory_order_acquire); }
+uint32_t AdapterVendor() noexcept { return gVendor.load(std::memory_order_acquire); }
 void SetLogCallback(midpoint_fix::LogCallback callback) noexcept
 {
     gLog.store(callback, std::memory_order_release);
@@ -71,6 +124,14 @@ bool ObserveD3D12Device(void* source) noexcept
     if (!identity || !gSelection.Allows(luid))
     {
         if (device) device->Release();
+        return Publish(Family::eUnknown, luid);
+    }
+    const uint32_t vendor = VendorForLuid(luid);
+    gVendor.store(vendor, std::memory_order_release);
+    if (vendor && vendor != kNvidiaVendor)
+    {
+        // AMD, Intel and other GPUs: no cuInit, no NVAPI family probe.
+        device->Release();
         return Publish(Family::eUnknown, luid);
     }
     Family candidate = Family::eUnknown;

@@ -207,6 +207,9 @@ FARPROC ResolveProc(HMODULE module,LPCSTR name,FARPROC original) noexcept {
         if (!Eligible(module,original)||GetProcAddress(module,name)!=original) return original;
         return DeviceGateways::Bind(original);
     }
+    // OptiScaler mode: the device gateway above (Witcher DOTS) stays; factory,
+    // Vulkan and input routes exist only for RTXMFG's menu.
+    if (!single_module::OverlayAllowed()) return original;
     if (!strcmp(name,"CreateDXGIFactory")||!strcmp(name,"CreateDXGIFactory1")||!strcmp(name,"CreateDXGIFactory2")) {
         if (!Eligible(module,original)) return original;
         if (!strcmp(name,"CreateDXGIFactory")) return Gateways<Factory0,proxy::FactoryFn>::Bind(original);
@@ -225,7 +228,7 @@ bool OwnsInterface(void* object) noexcept {
     return object&&!gInsideOverlay&&proxy::Owned(static_cast<IUnknown*>(object));
 }
 bool WrapUpgradedInterface(void** output) noexcept {
-    if (gInsideOverlay||!single_module::OwnsBackend()) return false;
+    if (gInsideOverlay||!single_module::OverlayAllowed()) return false;
 #if MFG_UNLOCK_DIAGNOSTIC_NO_SINGLE_OVERLAY
     (void)output;
     return false;
@@ -276,9 +279,34 @@ void ArmFactoryGateway() noexcept {
 void InstallKnownModules() noexcept {
     if (single_module::OwnsBackend()) install::RequestInstall();
 }
-void BeforeStreamlineInit() noexcept {
+void BeforeStreamlineInit(const void* caller) noexcept {
     // Existing early boundary: aligned application imports or caller-scoped
     // public DXGI entries. No graphics creation or native COM table mutation.
     ArmFactoryGateway();
+#if !MFG_UNLOCK_DIAGNOSTIC_NO_SINGLE_OVERLAY
+    // Dying Light 2 / The Beast: the renderer DLL (rd3d12_x64_rwdi.dll) imports
+    // slInit and resolves the interposer's factory exports itself, before this
+    // boundary, so no import or resolver gateway sees them. Scope the relays to
+    // that verified host as well. Published even if a relay was armed earlier.
+    const HMODULE interposer=GetModuleHandleW(L"sl.interposer.dll");
+    // OptiScaler UI-delegated mode wraps no factories, so no menu host is needed.
+    if (!interposer || !single_module::OwnsBackend() || !single_module::OverlayAllowed()) return;
+    HMODULE owner=nullptr;
+    if (!caller || !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            static_cast<LPCWSTR>(caller),&owner) || owner==GetModuleHandleW(nullptr)) return;
+    const HMODULE host=application_imports::StreamlineHost(caller,interposer);
+    const bool published=host && caller_scoped_import::SetInterposerHost(host);
+    std::unique_ptr<wchar_t[]> path(new(std::nothrow) wchar_t[32768]);
+    if (!path) return;
+    const DWORD count=owner?GetModuleFileNameW(owner,path.get(),32768):0;
+    if (!count || count>=32768) wcscpy_s(path.get(),32768,L"(unknown)");
+    std::unique_ptr<wchar_t[]> line(new(std::nothrow) wchar_t[33000]);
+    if (!line) return;
+    swprintf_s(line.get(),33000,L"MFG_PROXY_UI interposer-entry host=%s caller=slInit path=%s",
+        published?L"published":host?L"conflict":L"rejected",path.get());
+    single_module::Log(line.get());
+#else
+    (void)caller;
+#endif
 }
 }

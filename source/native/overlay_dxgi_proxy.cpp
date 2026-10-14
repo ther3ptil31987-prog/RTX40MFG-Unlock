@@ -7,6 +7,11 @@
 #include "overlay_install.h"
 #include "overlay_platform.h"
 #include "vsync_control.h"
+#include <d3d12.h>
+#include <mutex>
+#if MFG_UNLOCK_XESS
+#include "xess/xess_mod.h"
+#endif
 #include <atomic>
 #include <new>
 #include <array>
@@ -201,6 +206,44 @@ public:
     dx12::Session* renderer;
     const unsigned version;
     std::atomic<ULONG> refs{1};
+    // XeSS provider swapchains retire with their FG context; other chains
+    // never set a provider generation and never retire early.
+    std::mutex methodMutex;
+    ComPtr<IDXGISwapChain> providerChain;
+    uint64_t providerGeneration = 0;
+    uint32_t activeMethods = 0;
+    bool providerRetired = false;
+    struct Method {
+        SwapchainProxy* object;
+        bool valid;
+        explicit Method(SwapchainProxy* p) : object(p) {
+            object->AddRef();
+            std::lock_guard lock(object->methodMutex);
+            valid = !object->providerRetired;
+            if (valid) ++object->activeMethods;
+        }
+        ~Method() {
+            if (valid) { std::lock_guard lock(object->methodMutex); --object->activeMethods; }
+            object->Release();
+        }
+    };
+    bool RetireProvider(uint64_t generation) noexcept {
+        {
+            std::lock_guard lock(methodMutex);
+            if (!generation || generation != providerGeneration || providerRetired || activeMethods) return false;
+            // Never wait for a method which may be acquiring the XeSS context
+            // lock held by this destroy caller. Reserve against every new call.
+            providerRetired = true;
+        }
+        if (!dx12::RetireSession(renderer)) {
+            std::lock_guard lock(methodMutex);
+            providerRetired = false;
+            return false;
+        }
+        dx12::DestroySession(renderer); renderer = nullptr;
+        interfaces.Clear(); original.Reset(); parent.Reset(); providerChain.Reset();
+        return true;
+    }
     SwapchainProxy(ComPtr<IDXGISwapChain>&& base,IDXGIFactory* factory,dx12::Session* session,unsigned v) noexcept
         : original(std::move(base)),interfaces(original.Get(),v),parent(factory),renderer(session),version(v) { ++chains; }
     ~SwapchainProxy() {
@@ -217,7 +260,16 @@ public:
     }
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid,void** output) override {
         if (!output) return E_POINTER;
-        Lease lease(this);
+        *output = nullptr;
+        Method lease(this);
+        if (!lease.valid) {
+            // The inert shell still has ordinary COM identity and can release
+            // safely after SDK teardown; it never touches the retired provider.
+            if (iid == __uuidof(IUnknown) || iid == chainId) {
+                *output = static_cast<IDXGISwapChain4*>(this); AddRef(); return S_OK;
+            }
+            return E_NOINTERFACE;
+        }
         const int v=Version(iid,chainIids);
         if (iid==__uuidof(IUnknown)||iid==__uuidof(IDXGIObject)||iid==__uuidof(IDXGIDeviceSubObject)
             ||iid==chainId||(v>=0&&interfaces.Acquire(unsigned(v),iid,chainLast[v]))) {
@@ -226,7 +278,8 @@ public:
         return original->QueryInterface(iid,output);
     }
     HRESULT STDMETHODCALLTYPE GetParent(REFIID iid,void** output) override {
-        Lease lease(this); return parent->QueryInterface(iid,output);
+        Method lease(this); if (!lease.valid) return DXGI_ERROR_INVALID_CALL;
+        return parent ? parent->QueryInterface(iid,output) : original->GetParent(iid,output);
     }
     // The optional V-Sync Off override applies to the application's own
     // top-level Presents only; nested calls keep their arguments.
@@ -235,7 +288,11 @@ public:
         return vsync_control::BeforeApplicationPresent(sync,flags,dx12::IsPrincipal(renderer));
     }
     HRESULT STDMETHODCALLTYPE Present(UINT sync,UINT flags) override {
-        Lease lease(this); PresentCall call(this);
+        Method lease(this); if (!lease.valid) return DXGI_ERROR_INVALID_CALL; PresentCall call(this);
+#if MFG_UNLOCK_XESS
+        if (call.outer && providerGeneration && !(flags & DXGI_PRESENT_TEST))
+            xess_mod::PreparePresent(providerChain.Get(), providerGeneration);
+#endif
         const bool entered=call.outer&&dx12::BeginPresent(renderer,flags,false);
         const auto vsync=AdjustSync(call,sync,flags);
         const HRESULT hr=original->Present(vsync.interval,flags);
@@ -244,7 +301,11 @@ public:
         return hr;
     }
     HRESULT STDMETHODCALLTYPE Present1(UINT sync,UINT flags,const DXGI_PRESENT_PARAMETERS* params) override {
-        Lease lease(this); PresentCall call(this);
+        Method lease(this); if (!lease.valid) return DXGI_ERROR_INVALID_CALL; PresentCall call(this);
+#if MFG_UNLOCK_XESS
+        if (call.outer && providerGeneration && !(flags & DXGI_PRESENT_TEST))
+            xess_mod::PreparePresent(providerChain.Get(), providerGeneration);
+#endif
         const bool partial=params&&(params->DirtyRectsCount||params->pScrollRect||params->pScrollOffset);
         const bool entered=call.outer&&dx12::BeginPresent(renderer,flags,partial);
         const auto vsync=AdjustSync(call,sync,flags);
@@ -254,58 +315,58 @@ public:
         return hr;
     }
     HRESULT STDMETHODCALLTYPE ResizeBuffers(UINT count,UINT w,UINT h,DXGI_FORMAT format,UINT flags) override {
-        Lease lease(this);
+        Method lease(this); if (!lease.valid) return DXGI_ERROR_INVALID_CALL;
         if (!dx12::BeginResize(renderer)) return DXGI_ERROR_WAS_STILL_DRAWING;
         const HRESULT hr=original->ResizeBuffers(count,w,h,format,flags);
         dx12::EndResize(renderer,hr); return hr;
     }
     HRESULT STDMETHODCALLTYPE ResizeBuffers1(UINT count,UINT w,UINT h,DXGI_FORMAT format,UINT flags,
         const UINT* masks,IUnknown* const* queues) override {
-        Lease lease(this);
+        Method lease(this); if (!lease.valid) return DXGI_ERROR_INVALID_CALL;
         if (!dx12::BeginResize(renderer)) return DXGI_ERROR_WAS_STILL_DRAWING;
         const HRESULT hr=interfaces.As<IDXGISwapChain3>(3)->ResizeBuffers1(count,w,h,format,flags,masks,queues);
         if (SUCCEEDED(hr)) dx12::VerifyResizeQueues(renderer,count,queues);
         dx12::EndResize(renderer,hr); return hr;
     }
     HRESULT STDMETHODCALLTYPE SetColorSpace1(DXGI_COLOR_SPACE_TYPE color) override {
-        Lease lease(this);
+        Method lease(this); if (!lease.valid) return DXGI_ERROR_INVALID_CALL;
         const HRESULT hr=interfaces.As<IDXGISwapChain3>(3)->SetColorSpace1(color);
         if (SUCCEEDED(hr)) dx12::ObserveColorSpace(renderer,color);
         return hr;
     }
-    HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID Name, UINT DataSize, const void *pData) override { Lease lease(this); return interfaces.As<IDXGISwapChain>(0)->SetPrivateData(Name,DataSize,pData); }
-    HRESULT STDMETHODCALLTYPE SetPrivateDataInterface(REFGUID Name, const IUnknown *pUnknown) override { Lease lease(this); return interfaces.As<IDXGISwapChain>(0)->SetPrivateDataInterface(Name,pUnknown); }
-    HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID Name, UINT *pDataSize, void *pData) override { Lease lease(this); return interfaces.As<IDXGISwapChain>(0)->GetPrivateData(Name,pDataSize,pData); }
-    HRESULT STDMETHODCALLTYPE GetDevice(REFIID riid, void **ppDevice) override { Lease lease(this); return interfaces.As<IDXGISwapChain>(0)->GetDevice(riid,ppDevice); }
-    HRESULT STDMETHODCALLTYPE GetBuffer(UINT Buffer, REFIID riid, void **ppSurface) override { Lease lease(this); return interfaces.As<IDXGISwapChain>(0)->GetBuffer(Buffer,riid,ppSurface); }
-    HRESULT STDMETHODCALLTYPE SetFullscreenState(BOOL Fullscreen, IDXGIOutput *pTarget) override { Lease lease(this); return interfaces.As<IDXGISwapChain>(0)->SetFullscreenState(Fullscreen,pTarget); }
-    HRESULT STDMETHODCALLTYPE GetFullscreenState(BOOL *pFullscreen, IDXGIOutput **ppTarget) override { Lease lease(this); return interfaces.As<IDXGISwapChain>(0)->GetFullscreenState(pFullscreen,ppTarget); }
-    HRESULT STDMETHODCALLTYPE GetDesc(DXGI_SWAP_CHAIN_DESC *pDesc) override { Lease lease(this); return interfaces.As<IDXGISwapChain>(0)->GetDesc(pDesc); }
-    HRESULT STDMETHODCALLTYPE ResizeTarget(const DXGI_MODE_DESC *pNewTargetParameters) override { Lease lease(this); return interfaces.As<IDXGISwapChain>(0)->ResizeTarget(pNewTargetParameters); }
-    HRESULT STDMETHODCALLTYPE GetContainingOutput(IDXGIOutput **ppOutput) override { Lease lease(this); return interfaces.As<IDXGISwapChain>(0)->GetContainingOutput(ppOutput); }
-    HRESULT STDMETHODCALLTYPE GetFrameStatistics(DXGI_FRAME_STATISTICS *pStats) override { Lease lease(this); return interfaces.As<IDXGISwapChain>(0)->GetFrameStatistics(pStats); }
-    HRESULT STDMETHODCALLTYPE GetLastPresentCount(UINT *pLastPresentCount) override { Lease lease(this); return interfaces.As<IDXGISwapChain>(0)->GetLastPresentCount(pLastPresentCount); }
-    HRESULT STDMETHODCALLTYPE GetDesc1(DXGI_SWAP_CHAIN_DESC1 *pDesc) override { Lease lease(this); return interfaces.As<IDXGISwapChain1>(1)->GetDesc1(pDesc); }
-    HRESULT STDMETHODCALLTYPE GetFullscreenDesc(DXGI_SWAP_CHAIN_FULLSCREEN_DESC *pDesc) override { Lease lease(this); return interfaces.As<IDXGISwapChain1>(1)->GetFullscreenDesc(pDesc); }
-    HRESULT STDMETHODCALLTYPE GetHwnd(HWND *pHwnd) override { Lease lease(this); return interfaces.As<IDXGISwapChain1>(1)->GetHwnd(pHwnd); }
-    HRESULT STDMETHODCALLTYPE GetCoreWindow(REFIID refiid, void **ppUnk) override { Lease lease(this); return interfaces.As<IDXGISwapChain1>(1)->GetCoreWindow(refiid,ppUnk); }
-    BOOL STDMETHODCALLTYPE IsTemporaryMonoSupported() override { Lease lease(this); return interfaces.As<IDXGISwapChain1>(1)->IsTemporaryMonoSupported(); }
-    HRESULT STDMETHODCALLTYPE GetRestrictToOutput(IDXGIOutput **ppRestrictToOutput) override { Lease lease(this); return interfaces.As<IDXGISwapChain1>(1)->GetRestrictToOutput(ppRestrictToOutput); }
-    HRESULT STDMETHODCALLTYPE SetBackgroundColor(const DXGI_RGBA *pColor) override { Lease lease(this); return interfaces.As<IDXGISwapChain1>(1)->SetBackgroundColor(pColor); }
-    HRESULT STDMETHODCALLTYPE GetBackgroundColor(DXGI_RGBA *pColor) override { Lease lease(this); return interfaces.As<IDXGISwapChain1>(1)->GetBackgroundColor(pColor); }
-    HRESULT STDMETHODCALLTYPE SetRotation(DXGI_MODE_ROTATION Rotation) override { Lease lease(this); return interfaces.As<IDXGISwapChain1>(1)->SetRotation(Rotation); }
-    HRESULT STDMETHODCALLTYPE GetRotation(DXGI_MODE_ROTATION *pRotation) override { Lease lease(this); return interfaces.As<IDXGISwapChain1>(1)->GetRotation(pRotation); }
-    HRESULT STDMETHODCALLTYPE SetSourceSize(UINT Width, UINT Height) override { Lease lease(this); return interfaces.As<IDXGISwapChain2>(2)->SetSourceSize(Width,Height); }
-    HRESULT STDMETHODCALLTYPE GetSourceSize(UINT *pWidth, UINT *pHeight) override { Lease lease(this); return interfaces.As<IDXGISwapChain2>(2)->GetSourceSize(pWidth,pHeight); }
-    HRESULT STDMETHODCALLTYPE SetMaximumFrameLatency(UINT MaxLatency) override { Lease lease(this); return interfaces.As<IDXGISwapChain2>(2)->SetMaximumFrameLatency(MaxLatency); }
-    HRESULT STDMETHODCALLTYPE GetMaximumFrameLatency(UINT *pMaxLatency) override { Lease lease(this); return interfaces.As<IDXGISwapChain2>(2)->GetMaximumFrameLatency(pMaxLatency); }
-    HANDLE STDMETHODCALLTYPE GetFrameLatencyWaitableObject() override { Lease lease(this); return interfaces.As<IDXGISwapChain2>(2)->GetFrameLatencyWaitableObject(); }
-    HRESULT STDMETHODCALLTYPE SetMatrixTransform(const DXGI_MATRIX_3X2_F *pMatrix) override { Lease lease(this); return interfaces.As<IDXGISwapChain2>(2)->SetMatrixTransform(pMatrix); }
-    HRESULT STDMETHODCALLTYPE GetMatrixTransform(DXGI_MATRIX_3X2_F *pMatrix) override { Lease lease(this); return interfaces.As<IDXGISwapChain2>(2)->GetMatrixTransform(pMatrix); }
-    UINT STDMETHODCALLTYPE GetCurrentBackBufferIndex() override { Lease lease(this); return interfaces.As<IDXGISwapChain3>(3)->GetCurrentBackBufferIndex(); }
-    HRESULT STDMETHODCALLTYPE CheckColorSpaceSupport(DXGI_COLOR_SPACE_TYPE ColorSpace, UINT *pColorSpaceSupport) override { Lease lease(this); return interfaces.As<IDXGISwapChain3>(3)->CheckColorSpaceSupport(ColorSpace,pColorSpaceSupport); }
+    HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID Name, UINT DataSize, const void *pData) override { Method lease(this); if (!lease.valid) return DXGI_ERROR_INVALID_CALL; return interfaces.As<IDXGISwapChain>(0)->SetPrivateData(Name,DataSize,pData); }
+    HRESULT STDMETHODCALLTYPE SetPrivateDataInterface(REFGUID Name, const IUnknown *pUnknown) override { Method lease(this); if (!lease.valid) return DXGI_ERROR_INVALID_CALL; return interfaces.As<IDXGISwapChain>(0)->SetPrivateDataInterface(Name,pUnknown); }
+    HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID Name, UINT *pDataSize, void *pData) override { Method lease(this); if (!lease.valid) return DXGI_ERROR_INVALID_CALL; return interfaces.As<IDXGISwapChain>(0)->GetPrivateData(Name,pDataSize,pData); }
+    HRESULT STDMETHODCALLTYPE GetDevice(REFIID riid, void **ppDevice) override { Method lease(this); if (!lease.valid) return DXGI_ERROR_INVALID_CALL; return interfaces.As<IDXGISwapChain>(0)->GetDevice(riid,ppDevice); }
+    HRESULT STDMETHODCALLTYPE GetBuffer(UINT Buffer, REFIID riid, void **ppSurface) override { Method lease(this); if (!lease.valid) return DXGI_ERROR_INVALID_CALL; return interfaces.As<IDXGISwapChain>(0)->GetBuffer(Buffer,riid,ppSurface); }
+    HRESULT STDMETHODCALLTYPE SetFullscreenState(BOOL Fullscreen, IDXGIOutput *pTarget) override { Method lease(this); if (!lease.valid) return DXGI_ERROR_INVALID_CALL; return interfaces.As<IDXGISwapChain>(0)->SetFullscreenState(Fullscreen,pTarget); }
+    HRESULT STDMETHODCALLTYPE GetFullscreenState(BOOL *pFullscreen, IDXGIOutput **ppTarget) override { Method lease(this); if (!lease.valid) return DXGI_ERROR_INVALID_CALL; return interfaces.As<IDXGISwapChain>(0)->GetFullscreenState(pFullscreen,ppTarget); }
+    HRESULT STDMETHODCALLTYPE GetDesc(DXGI_SWAP_CHAIN_DESC *pDesc) override { Method lease(this); if (!lease.valid) return DXGI_ERROR_INVALID_CALL; return interfaces.As<IDXGISwapChain>(0)->GetDesc(pDesc); }
+    HRESULT STDMETHODCALLTYPE ResizeTarget(const DXGI_MODE_DESC *pNewTargetParameters) override { Method lease(this); if (!lease.valid) return DXGI_ERROR_INVALID_CALL; return interfaces.As<IDXGISwapChain>(0)->ResizeTarget(pNewTargetParameters); }
+    HRESULT STDMETHODCALLTYPE GetContainingOutput(IDXGIOutput **ppOutput) override { Method lease(this); if (!lease.valid) return DXGI_ERROR_INVALID_CALL; return interfaces.As<IDXGISwapChain>(0)->GetContainingOutput(ppOutput); }
+    HRESULT STDMETHODCALLTYPE GetFrameStatistics(DXGI_FRAME_STATISTICS *pStats) override { Method lease(this); if (!lease.valid) return DXGI_ERROR_INVALID_CALL; return interfaces.As<IDXGISwapChain>(0)->GetFrameStatistics(pStats); }
+    HRESULT STDMETHODCALLTYPE GetLastPresentCount(UINT *pLastPresentCount) override { Method lease(this); if (!lease.valid) return DXGI_ERROR_INVALID_CALL; return interfaces.As<IDXGISwapChain>(0)->GetLastPresentCount(pLastPresentCount); }
+    HRESULT STDMETHODCALLTYPE GetDesc1(DXGI_SWAP_CHAIN_DESC1 *pDesc) override { Method lease(this); if (!lease.valid) return DXGI_ERROR_INVALID_CALL; return interfaces.As<IDXGISwapChain1>(1)->GetDesc1(pDesc); }
+    HRESULT STDMETHODCALLTYPE GetFullscreenDesc(DXGI_SWAP_CHAIN_FULLSCREEN_DESC *pDesc) override { Method lease(this); if (!lease.valid) return DXGI_ERROR_INVALID_CALL; return interfaces.As<IDXGISwapChain1>(1)->GetFullscreenDesc(pDesc); }
+    HRESULT STDMETHODCALLTYPE GetHwnd(HWND *pHwnd) override { Method lease(this); if (!lease.valid) return DXGI_ERROR_INVALID_CALL; return interfaces.As<IDXGISwapChain1>(1)->GetHwnd(pHwnd); }
+    HRESULT STDMETHODCALLTYPE GetCoreWindow(REFIID refiid, void **ppUnk) override { Method lease(this); if (!lease.valid) return DXGI_ERROR_INVALID_CALL; return interfaces.As<IDXGISwapChain1>(1)->GetCoreWindow(refiid,ppUnk); }
+    BOOL STDMETHODCALLTYPE IsTemporaryMonoSupported() override { Method lease(this); if (!lease.valid) return 0; return interfaces.As<IDXGISwapChain1>(1)->IsTemporaryMonoSupported(); }
+    HRESULT STDMETHODCALLTYPE GetRestrictToOutput(IDXGIOutput **ppRestrictToOutput) override { Method lease(this); if (!lease.valid) return DXGI_ERROR_INVALID_CALL; return interfaces.As<IDXGISwapChain1>(1)->GetRestrictToOutput(ppRestrictToOutput); }
+    HRESULT STDMETHODCALLTYPE SetBackgroundColor(const DXGI_RGBA *pColor) override { Method lease(this); if (!lease.valid) return DXGI_ERROR_INVALID_CALL; return interfaces.As<IDXGISwapChain1>(1)->SetBackgroundColor(pColor); }
+    HRESULT STDMETHODCALLTYPE GetBackgroundColor(DXGI_RGBA *pColor) override { Method lease(this); if (!lease.valid) return DXGI_ERROR_INVALID_CALL; return interfaces.As<IDXGISwapChain1>(1)->GetBackgroundColor(pColor); }
+    HRESULT STDMETHODCALLTYPE SetRotation(DXGI_MODE_ROTATION Rotation) override { Method lease(this); if (!lease.valid) return DXGI_ERROR_INVALID_CALL; return interfaces.As<IDXGISwapChain1>(1)->SetRotation(Rotation); }
+    HRESULT STDMETHODCALLTYPE GetRotation(DXGI_MODE_ROTATION *pRotation) override { Method lease(this); if (!lease.valid) return DXGI_ERROR_INVALID_CALL; return interfaces.As<IDXGISwapChain1>(1)->GetRotation(pRotation); }
+    HRESULT STDMETHODCALLTYPE SetSourceSize(UINT Width, UINT Height) override { Method lease(this); if (!lease.valid) return DXGI_ERROR_INVALID_CALL; return interfaces.As<IDXGISwapChain2>(2)->SetSourceSize(Width,Height); }
+    HRESULT STDMETHODCALLTYPE GetSourceSize(UINT *pWidth, UINT *pHeight) override { Method lease(this); if (!lease.valid) return DXGI_ERROR_INVALID_CALL; return interfaces.As<IDXGISwapChain2>(2)->GetSourceSize(pWidth,pHeight); }
+    HRESULT STDMETHODCALLTYPE SetMaximumFrameLatency(UINT MaxLatency) override { Method lease(this); if (!lease.valid) return DXGI_ERROR_INVALID_CALL; return interfaces.As<IDXGISwapChain2>(2)->SetMaximumFrameLatency(MaxLatency); }
+    HRESULT STDMETHODCALLTYPE GetMaximumFrameLatency(UINT *pMaxLatency) override { Method lease(this); if (!lease.valid) return DXGI_ERROR_INVALID_CALL; return interfaces.As<IDXGISwapChain2>(2)->GetMaximumFrameLatency(pMaxLatency); }
+    HANDLE STDMETHODCALLTYPE GetFrameLatencyWaitableObject() override { Method lease(this); if (!lease.valid) return nullptr; return interfaces.As<IDXGISwapChain2>(2)->GetFrameLatencyWaitableObject(); }
+    HRESULT STDMETHODCALLTYPE SetMatrixTransform(const DXGI_MATRIX_3X2_F *pMatrix) override { Method lease(this); if (!lease.valid) return DXGI_ERROR_INVALID_CALL; return interfaces.As<IDXGISwapChain2>(2)->SetMatrixTransform(pMatrix); }
+    HRESULT STDMETHODCALLTYPE GetMatrixTransform(DXGI_MATRIX_3X2_F *pMatrix) override { Method lease(this); if (!lease.valid) return DXGI_ERROR_INVALID_CALL; return interfaces.As<IDXGISwapChain2>(2)->GetMatrixTransform(pMatrix); }
+    UINT STDMETHODCALLTYPE GetCurrentBackBufferIndex() override { Method lease(this); if (!lease.valid) return 0; return interfaces.As<IDXGISwapChain3>(3)->GetCurrentBackBufferIndex(); }
+    HRESULT STDMETHODCALLTYPE CheckColorSpaceSupport(DXGI_COLOR_SPACE_TYPE ColorSpace, UINT *pColorSpaceSupport) override { Method lease(this); if (!lease.valid) return DXGI_ERROR_INVALID_CALL; return interfaces.As<IDXGISwapChain3>(3)->CheckColorSpaceSupport(ColorSpace,pColorSpaceSupport); }
     HRESULT STDMETHODCALLTYPE SetHDRMetaData(DXGI_HDR_METADATA_TYPE Type, UINT Size, void *pMetaData) override {
-        Lease lease(this);
+        Method lease(this); if (!lease.valid) return DXGI_ERROR_INVALID_CALL;
         // GTA may call this method on the creation-return pointer before it
         // requests revision 4 from our proxy. Acquire that public interface on
         // first use, retaining the exact owning layer and normal cache lifetime.
@@ -339,7 +400,7 @@ void WrapSwapchain(IDXGISwapChain** output,IUnknown* queue,IDXGIFactory* parent)
 }
 
 void WrapFactory(REFIID iid,void** output) noexcept {
-    if (!output||!*output||Version(iid,factoryIids)<0||liveFactories.load()>=64) return;
+    if (!output||!*output||!single_module::OverlayAllowed()||Version(iid,factoryIids)<0||liveFactories.load()>=64) return;
     Capacity capacity(liveFactories); if(!capacity.held)return;
     InternalScope internal;
     auto* returned=static_cast<IUnknown*>(*output);
@@ -423,5 +484,48 @@ bool WrapUpgraded(void** output) noexcept {
         return true;
     }
     return false;
+}
+}
+
+namespace single_overlay::dx12 {
+using Microsoft::WRL::ComPtr;
+bool AttachProviderSwapchain(IDXGISwapChain* chain, ID3D12CommandQueue* queue,
+    HMODULE provider, uint64_t generation, IDXGISwapChain** output) noexcept
+{
+    if (!output) return false;
+    *output = nullptr;
+    if (!chain || !queue || !provider || !generation || native::InsideLoader()) return false;
+    proxy::Capacity capacity(proxy::liveChains);
+    if (!capacity.held) return false;
+    InternalScope internal;
+    // Only the verified provider's own swapchain can take this route.
+    if (!native::PinInterface(chain, 2)) return false;
+    ComPtr<IDXGISwapChain3> version3;
+    if (FAILED(chain->QueryInterface(IID_PPV_ARGS(&version3)))
+        || !native::PinInterface(version3.Get(), 39)
+        || !slots::ImageSlot(provider, *reinterpret_cast<void***>(version3.Get()))
+        || !slots::ImageEntry(provider, (*reinterpret_cast<void***>(version3.Get()))[8])) return false;
+    // OptiScaler mode keeps the provider wrapper for XeSS present preparation
+    // (input fixes and UI composition) but creates no menu session or input hooks.
+    const bool menu = single_module::OverlayAllowed();
+    if (menu && !install::PrepareInput()) return false;
+    auto* session = menu ? CreateSession(version3.Get(), queue, provider) : nullptr;
+    if (menu && !session) return false;
+    ComPtr<IDXGISwapChain> base = version3;
+    auto* wrapper = new(std::nothrow) proxy::SwapchainProxy(std::move(base), nullptr, session, 3);
+    if (!wrapper) { DestroySession(session); return false; }
+    wrapper->providerGeneration = generation;
+    wrapper->providerChain = chain;
+    capacity.Transfer();
+    *output = wrapper;
+    single_module::Log(L"MFG_PROXY_UI XeSS provider swapchain attached with exact generation and queue");
+    return true;
+}
+bool DetachProviderSwapchain(IDXGISwapChain* chain, uint64_t generation) noexcept
+{
+    if (!chain || !generation) return false;
+    ComPtr<IUnknown> owned;
+    if (chain->QueryInterface(proxy::chainId, reinterpret_cast<void**>(owned.GetAddressOf())) != S_OK || !owned) return false;
+    return static_cast<proxy::SwapchainProxy*>(owned.Get())->RetireProvider(generation);
 }
 }

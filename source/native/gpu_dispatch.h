@@ -8,6 +8,9 @@ Family Selected() noexcept;
 bool IsAda() noexcept;
 bool IsAmpere() noexcept;
 uint64_t AdapterLuid() noexcept;
+// PCI vendor of the last observed game device (0 until a device is seen).
+// Non-NVIDIA devices never reach the CUDA/NVAPI family probes.
+uint32_t AdapterVendor() noexcept;
 void SetLogCallback(midpoint_fix::LogCallback) noexcept;
 bool ObserveD3D12Device(void*) noexcept;
 bool ObserveVulkanPhysicalDevice(void*) noexcept;

@@ -41,6 +41,8 @@ bool PrepareInput() noexcept {
 #if !MFG_UNLOCK_OVERLAY_MENU_DRAW
     return true;
 #else
+    // OptiScaler mode: no RTXMFG menu, so no input imports are published.
+    if (!single_module::OverlayAllowed()) return false;
     if (native::InsideLoader()) return false;
     unsigned expected=0;
     if (!inputState.compare_exchange_strong(expected,1,std::memory_order_acq_rel))

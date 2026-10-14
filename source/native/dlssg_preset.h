@@ -29,13 +29,18 @@ struct Snapshot
     uint32_t observedPreset = 0;
     bool observedPresetValid = false;
     uint64_t overrideReads = 0;
+    // The provider implements Preset C (DLSS-G 310.9.16 and newer).
+    bool presetCAvailable = false;
 };
 
-// 0 leaves game/driver reads untouched; 1 selects A and 2 selects B. A process
+// 0 leaves game/driver reads untouched; 1 selects A, 2 selects B and 3 selects C
+// on providers that implement it (elsewhere C leaves the game/driver value). A process
 // keeps one selection after its first relevant provider query. Later requests
 // are saved for restart, without replacing cached settings or live programs.
 bool SetRequested(uint32_t preset) noexcept;
 uint32_t FreezeSelection() noexcept;
+// The selection a provider receives: C becomes the game/driver value (0) on providers without it.
+uint32_t EffectiveSelection(uint32_t preset, HMODULE provider) noexcept;
 SelectionSnapshot ReadSelection() noexcept;
 using InitialSelectionLoader = uint32_t (*)() noexcept;
 // Assign before enabling hooks. Only FreezeSelection calls this loader, once,
@@ -51,5 +56,8 @@ bool Prepare() noexcept;
 void PrepareForExport(HMODULE module, const char* name) noexcept;
 // Bounded entry discovery; no NVIDIA initialization is invoked here.
 void ObserveProvider(HMODULE module, uint64_t generation) noexcept;
+// The provider's FG preset reader: every decoded preset-key call site must call this one
+// reader (known prologue, at its unwind entry). Null when absent or when sites disagree.
+void* FindPresetReader(HMODULE module) noexcept;
 Snapshot ReadSnapshot(HMODULE provider) noexcept;
 }

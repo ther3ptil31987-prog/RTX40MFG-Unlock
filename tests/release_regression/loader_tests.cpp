@@ -99,7 +99,7 @@ int wmain(int argc, wchar_t** argv)
             && actual.wPeriodMin > 0 && actual.wPeriodMax >= actual.wPeriodMin, "WinMM timing APIs forward correctly");
         passed &= Check(GetProcAddress(module, MAKEINTRESOURCEA(2)) != nullptr, "WinMM ordinal-only export retained");
     }
-    if (path.extension() == L".dll" && name.find(L"bink") != 0 && _wcsicmp(name.c_str(), L"RTXMFG.dll") != 0)
+    if (path.extension() == L".dll" && name.find(L"bink") != 0 && _wcsicmp(name.c_str(), L"MFGUnlocker.dll") != 0)
     {
         HMODULE system = System(name.c_str());
         passed &= Check(system && WindowsProxySmoke(module, system, name.c_str()),

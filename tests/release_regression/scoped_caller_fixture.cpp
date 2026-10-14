@@ -67,6 +67,15 @@ extern "C" __declspec(dllexport) HRESULT WINAPI ForeignFactory(unsigned api,UINT
     return result;
 }
 
+// Calls an exported interposer factory entry from this DLL; the volatile result
+// keeps this module's return address (no tail dispatch).
+extern "C" __declspec(dllexport) HRESULT WINAPI ForeignFactoryEntry(void* entry,unsigned api,UINT flags,REFIID iid,void** out) {
+    using Fn=HRESULT(WINAPI*)(REFIID,void**);
+    using Fn2=HRESULT(WINAPI*)(UINT,REFIID,void**);
+    HRESULT volatile result=api<2?reinterpret_cast<Fn>(entry)(iid,out):reinterpret_cast<Fn2>(entry)(flags,iid,out);
+    return result;
+}
+
 // Identify this foreign caller as middleware so application renderer discovery
 // does not intentionally instrument it during caller-transparency checks.
 extern "C" __declspec(dllexport) BOOL slOnPluginStartup(){return FALSE;}

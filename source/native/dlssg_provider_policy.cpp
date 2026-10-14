@@ -72,6 +72,14 @@ bool IsSupportedProvider(HMODULE module, const wchar_t* path) noexcept
         && SupportedProviderVersionMatches(path);
 }
 
+bool IsSupportedAmpereProvider(HMODULE module, const wchar_t* path) noexcept
+{
+    VersionTriplet version{};
+    return IsDlssgImplementationModule(module)
+        && ReadProviderVersion(path, version)
+        && IsSupportedAmpereVersion(version);
+}
+
 namespace
 {
 // Keep the large cold-path buffer and its stack probing out of cached calls.
@@ -124,5 +132,29 @@ bool IsSupportedRetainedProvider(HMODULE module) noexcept
             break;
     }
     return RetainSupportedProvider(module);
+}
+
+namespace
+{
+__declspec(noinline) bool RetainedProviderVersion(HMODULE module, VersionTriplet& version) noexcept
+{
+    wchar_t path[32768]{};
+    const DWORD length = GetModuleFileNameW(module, path, static_cast<DWORD>(std::size(path)));
+    return length != 0 && length < std::size(path) && ReadProviderVersion(path, version);
+}
+}
+
+bool IsSupportedRetainedAmpereProvider(HMODULE module) noexcept
+{
+    VersionTriplet version{};
+    return IsSupportedRetainedProvider(module) && RetainedProviderVersion(module, version)
+        && IsSupportedAmpereVersion(version);
+}
+
+bool ProviderImplementsPresetC(HMODULE module) noexcept
+{
+    VersionTriplet version{};
+    return IsSupportedRetainedProvider(module) && RetainedProviderVersion(module, version)
+        && ImplementsPresetC(version);
 }
 }

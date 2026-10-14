@@ -4,6 +4,7 @@
 #include <sl_reflex.h>
 
 #include <array>
+#include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <cstring>
@@ -50,6 +51,7 @@ struct Route
     // All fields below are protected by gStateMutex, never held over a call.
     Snapshot state{};
     sl::ReflexOptions gameOptions{};
+    sl::ReflexOptions appliedOptions{};
     ThreadStamp gameThread{};
     bool overrideOwned = false;
     bool uncertainOverride = false;
@@ -247,6 +249,25 @@ bool Current(size_t index, Snapshot* output = nullptr) noexcept
     return !stale && current == eAllHooks && covered;
 }
 
+bool ReadFrame(const sl::FrameToken& token, uint32_t& frame) noexcept
+{
+    __try { frame = static_cast<uint32_t>(token); return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+bool ReadHelper(const sl::BaseStructure* input, uint32_t& marker, uint32_t& frame) noexcept
+{
+    sl::ReflexHelper copy(sl::MarkerUnderlying(0));
+    if (!ReadBytes(input, &copy, sizeof(sl::BaseStructure))
+        || copy.structType != sl::ReflexHelper::s_structType || copy.structVersion != sl::kStructVersion1
+        || !ReadBytes(input, &copy, sizeof(copy)) || !copy.next) return false;
+    sl::ReflexOptions header{};
+    if (!ReadBytes(copy.next, &header, sizeof(sl::BaseStructure))
+        || header.structType != sl::FrameToken::s_structType || header.structVersion != sl::kStructVersion1)
+        return false;
+    marker = static_cast<sl::MarkerUnderlying>(copy);
+    return ReadFrame(*static_cast<const sl::FrameToken*>(copy.next), frame);
+}
+
 bool ReadOptions(const sl::BaseStructure* source, sl::ReflexOptions& copy) noexcept
 {
     sl::ReflexOptions header{};
@@ -388,6 +409,8 @@ void Finish(size_t index, const Attempt& attempt, sl::Result result,
     }
     route.state.appliedKnown = true;
     route.state.appliedFrameLimitUs = submitted.frameLimitUs;
+    route.appliedOptions = submitted;
+    route.appliedOptions.next = nullptr;
     route.overrideOwned = attempt.modified;
     route.uncertainOverride = false;
     route.state.status = attempt.modified ? Status::eApplied : Status::eFollowGame;
@@ -414,7 +437,14 @@ sl::Result OptionsCall(size_t index, const sl::BaseStructure* input,
 
     sl::ReflexOptions game{};
     const bool known = ReadOptions(input, game);
-    if (!known && !publicOptions && !ContainsOptions(input)) return forward(input);
+    if (!known && !publicOptions && !ContainsOptions(input))
+    {
+        // A ReflexHelper (sleep or marker) passes through unchanged.
+        uint32_t marker = 0, frame = 0;
+        if (!ReadHelper(input, marker, frame)) return forward(input);
+        CallScope scope(index);
+        return forward(input);
+    }
     if (gThread[index].depth) Concurrent(index);
     CallLease lease(route);
     if (!lease.held) Concurrent(index);
@@ -447,7 +477,7 @@ sl::Result OptionsCall(size_t index, const sl::BaseStructure* input,
         modify = current && lease.held && runtimeEligible && gDesired.fps && gDesired.eligible
             && route.state.availabilityKnown && route.state.lowLatencyAvailable;
         if (modify) adjusted.frameLimitUs = gDesired.us;
-        else if (!current) route.state.status = Status::eStaleRoute;
+        if (!current) route.state.status = Status::eStaleRoute;
     }
     const Attempt attempt = Begin(index, modify);
     const sl::BaseStructure* forwarded = modify ? &adjusted : input;
@@ -535,7 +565,9 @@ sl::Result HookSleep(const sl::FrameToken& frame) noexcept
 {
     const auto entry = Entry(Index, 2);
     if (!entry.original) return sl::Result::eErrorInvalidIntegration;
-    if (!gThread[Index].depth) ReplayAtSleep(Index);
+    uint32_t frameId = 0;
+    if (!ReadFrame(frame, frameId)) return sl::Result::eErrorInvalidParameter;
+    if (gThread[Index].depth == 0) ReplayAtSleep(Index);
     CallScope scope(Index);
     return reinterpret_cast<PFun_slReflexSleep*>(entry.original)(frame);
 }
@@ -545,9 +577,9 @@ sl::Result HookGetState(sl::ReflexState& state) noexcept
 {
     const auto entry = Entry(Index, 3);
     if (!entry.original) return sl::Result::eErrorInvalidIntegration;
-    const bool outer = gThread[Index].depth == 0;
     CallLease lease(gRoutes[Index]);
-    if (outer && !lease.held) Concurrent(Index);
+    // A read-only availability query cannot make an accepted options copy
+    // unsafe to replay. Actual contending writers still call Concurrent.
     CallScope scope(Index);
     const auto result = reinterpret_cast<PFun_slReflexGetState*>(entry.original)(state);
     if (entry.current && !gRoutes[Index].stale.load(std::memory_order_acquire))
@@ -564,6 +596,7 @@ auto Thunks(std::index_sequence<Index...>) noexcept
             reinterpret_cast<void*>(&HookGetState<Index>)}...};
 }
 const auto kThunks = Thunks(std::make_index_sequence<kRouteCount>{});
+
 }
 
 bool Configure(uint32_t frameLimitFps, bool eligible) noexcept

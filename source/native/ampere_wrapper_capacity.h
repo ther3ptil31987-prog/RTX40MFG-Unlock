@@ -6,7 +6,8 @@
 
 namespace ampere_wrapper
 {
-enum class Profile : uint32_t { eUnknown, eCompact, eExtended };
+enum class Profile : uint32_t
+{ eUnknown, eCompact, eExtended, eLegacyPacer, eLegacyCompact, eLegacySmall, eLegacyLarge, eLegacyDirect };
 // Read-only allocation view. The private layout is admitted by independently
 // matched startup, swap-chain, buffer-loop and NGX creation code windows.
 struct Layout
@@ -15,12 +16,16 @@ struct Layout
     uintptr_t contextSlot = 0;
     uintptr_t createBegin = 0, createEnd = 0;
     Profile profile = Profile::eUnknown;
+    uint32_t maximumGeneratedFrames = 0;
+    bool frameIdAvailable = true;
 };
 struct Capacity
 {
     uintptr_t context = 0, swapchain = 0;
     uintptr_t buffersBegin = 0, buffersEnd = 0, buffersCapacity = 0;
     std::array<uintptr_t, ampere_mfg::kPresentationBuffers> buffers{};
+    uintptr_t ringOwner = 0;
+    uint32_t maximumGeneratedFrames = 0, bufferCount = 0;
     bool operator==(const Capacity&) const = default;
 };
 // Failure reporting only. Observed fields do not certify an allocation.

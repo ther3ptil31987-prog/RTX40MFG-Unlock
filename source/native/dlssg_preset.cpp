@@ -50,6 +50,15 @@ struct CachedReader
 };
 std::array<CachedReader, 64> gCachedReaders{};
 std::mutex gCachedInstallMutex;
+// Preset C reaches only providers that implement it. Providers are retained for the
+// process, so a module handle keeps one answer.
+struct PresetCSupport
+{
+    HMODULE module = nullptr;
+    bool supported = false;
+};
+std::array<PresetCSupport, 64> gPresetC{};
+std::mutex gPresetCMutex;
 
 void RecordRead(HMODULE provider, bool valueValid, uint32_t value, bool overridden) noexcept
 {
@@ -64,6 +73,34 @@ void RecordRead(HMODULE provider, bool valueValid, uint32_t value, bool overridd
         read.valueValid = valueValid;
         break;
     }
+}
+
+bool PresetCSupported(HMODULE provider) noexcept
+{
+    if (!provider) return false;
+    {
+        std::lock_guard lock(gPresetCMutex);
+        for (const auto& entry : gPresetC)
+            if (entry.module == provider) return entry.supported;
+    }
+    const bool supported = dlssg_provider_policy::ProviderImplementsPresetC(provider);
+    std::lock_guard lock(gPresetCMutex);
+    for (auto& entry : gPresetC)
+    {
+        if (entry.module == provider) return entry.supported;
+        if (!entry.module)
+        {
+            entry = {provider, supported};
+            break;
+        }
+    }
+    return supported;
+}
+
+// The selection this provider receives: C becomes the game/driver value on providers without it.
+uint32_t EffectivePreset(uint32_t preset, HMODULE provider) noexcept
+{
+    return preset == kPresetC && !PresetCSupported(provider) ? kGameOrDriver : preset;
 }
 
 HMODULE Owner(const void* address) noexcept
@@ -174,7 +211,8 @@ void* FindCachedReader(HMODULE module) noexcept
                     || base+function->BeginAddress != target
                     || function->EndAddress <= function->BeginAddress || function->EndAddress > imageSize
                     || function->UnwindData >= imageSize
-                    || selected) return nullptr;
+                    || (selected && selected != reinterpret_cast<void*>(target))) return nullptr;
+                // 310.9.16 reads the key at two call sites (settings and their report); one reader only.
                 selected = reinterpret_cast<void*>(target);
             }
         }
@@ -196,8 +234,8 @@ __declspec(noinline) bool HookCachedReader(uint32_t id, uint32_t* value) noexcep
         && state.target == reader.target.load(std::memory_order_acquire)
         && Owner(caller) == provider && id == kSettingId && Writable(value, sizeof(*value)))
     {
-        const uint32_t preset = FreezeSelection();
-        const bool overridden = preset == kPresetA || preset == kPresetB;
+        const uint32_t preset = EffectivePreset(FreezeSelection(), provider);
+        const bool overridden = IsOverride(preset);
         bool result = true;
         if (overridden) *value = preset;
         else result = original(id, value);
@@ -225,6 +263,7 @@ void InstallCachedReader(HMODULE module, uint64_t generation) noexcept
         if (reader.module.load(std::memory_order_acquire) == module) return;
         if (reader.module.load(std::memory_order_acquire)) continue;
         void* target = FindCachedReader(module);
+        PresetCSupported(module); // Settle Preset C support outside the provider's own reads.
         HMODULE pinned = nullptr;
         if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
                 | GET_MODULE_HANDLE_EX_FLAG_PIN, reinterpret_cast<LPCWSTR>(module), &pinned)
@@ -263,7 +302,7 @@ __declspec(noinline) int32_t __cdecl HookGetSetting(
         && Writable(setting, sizeof(*setting));
     // Freeze before entering the driver. A simultaneous config reload must
     // not change which process selection this first provider query receives.
-    const uint32_t preset = eligible ? FreezeSelection() : kGameOrDriver;
+    const uint32_t preset = eligible ? EffectivePreset(FreezeSelection(), provider) : kGameOrDriver;
     const int32_t result = original(session, profile, id, setting);
     if (!eligible || !Writable(setting, sizeof(*setting)) || !CompatibleRead(id, result, *setting))
         return result;
@@ -330,6 +369,11 @@ uint32_t FreezeSelection() noexcept
     return gSelection.latched;
 }
 
+uint32_t EffectiveSelection(uint32_t preset, HMODULE provider) noexcept
+{
+    return EffectivePreset(preset, provider);
+}
+
 SelectionSnapshot ReadSelection() noexcept
 {
     std::lock_guard lock(gSelectionMutex);
@@ -359,6 +403,10 @@ bool Prepare() noexcept
         gFailure.store(2, std::memory_order_release);
         return false;
     }
+    // Even a failed attempt must not unmap NVAPI (see nvidia_mfg_policy).
+    HMODULE retained = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+        reinterpret_cast<LPCWSTR>(module), &retained);
     wchar_t loaded[32768]{};
     const DWORD loadedLength = GetModuleFileNameW(module, loaded, static_cast<DWORD>(std::size(loaded)));
     const auto query = reinterpret_cast<QueryInterface>(GetProcAddress(module, "nvapi_QueryInterface"));
@@ -444,6 +492,11 @@ void ObserveProvider(HMODULE module, uint64_t generation) noexcept
     }
 }
 
+void* FindPresetReader(HMODULE module) noexcept
+{
+    return FindCachedReader(module);
+}
+
 Snapshot ReadSnapshot(HMODULE provider) noexcept
 {
     const auto state = entry_detour::ReadSnapshot(entry_detour::Kind::eDlssgPresetRead);
@@ -456,6 +509,7 @@ Snapshot ReadSnapshot(HMODULE provider) noexcept
     if (state.installed && !state.current)
         result.failure = 100u + static_cast<uint32_t>(entry_detour::Failure::eHookConflict);
     if (!provider) return result;
+    result.presetCAvailable = PresetCSupported(provider);
     for (const auto& reader : gCachedReaders)
     {
         if (reader.module.load(std::memory_order_acquire) != provider) continue;

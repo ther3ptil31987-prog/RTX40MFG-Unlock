@@ -4,8 +4,9 @@
 namespace single_overlay
 {
 void ArmFactoryGateway() noexcept;
-// The existing backend boundary rechecks application imports only.
-void BeforeStreamlineInit() noexcept;
+// The existing backend boundary rechecks application imports, and scopes the
+// interposer factory relays to a verified renderer DLL that called slInit.
+void BeforeStreamlineInit(const void* caller) noexcept;
 void InstallKnownModules() noexcept;
 FARPROC ResolveProc(HMODULE module, LPCSTR name, FARPROC original) noexcept;
 // Streamline manual hooking (slUpgradeInterface). OwnsInterface: the object

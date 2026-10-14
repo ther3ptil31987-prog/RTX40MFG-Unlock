@@ -2,6 +2,8 @@
     [Parameter(Mandatory = $true)][string]$NativeCacheRoot,
     [Parameter(Mandatory = $true)][string]$StreamlineRoot,
     [Parameter(Mandatory = $true)][string]$ImGuiRoot,
+    [Parameter(Mandatory = $true)][string]$XessSdkRoot,
+    [Parameter(Mandatory = $true)][string]$XessProgramsRoot,
     [string]$VulkanIncludeDirectory = 'C:/VulkanSDK/1.2.176.1/Include',
     [string]$CMakeExecutable = 'C:/Program Files/CMake/bin/cmake.exe',
     [string]$VisualStudioInstance = 'C:/Program Files/Microsoft Visual Studio/2022/Professional',
@@ -104,8 +106,20 @@ Assert-InputHash (Join-Path $nativeCache 'ampere_native_manifest.inc') '4C8765C7
 Assert-InputHash (Join-Path $nativeCache3109 'ampere_native_manifest.inc') '90E3E797B5121B6FFBF52C1765FAC9683A9C1641363EE0CC669296754B4B2291'
 Assert-InputHash (Join-Path $nativeCache 'manifest.json') 'B90F4131CD7E9E93C164FE2680C29475EFA2434DD6CF343C8713FCE4E2557E09'
 Assert-InputHash (Join-Path $nativeCache3109 'manifest.json') 'D6D42F8BC002B29833EDE69E27DBC00E6E2913716BC6131DBAE19D02215E58D9'
-Assert-InputHash (Join-Path $nativeCacheAdditional 'ampere_native_manifest_additional.inc') '1E0770EA6C85B4267E1068D16A723845D4AB949FA0BC142D2DFF2C24E88C9F64'
-Assert-InputHash (Join-Path $nativeCacheAdditional 'additional-resources.json') '0007B3CCBC3D3B3ACE90DF4B438050013EE31DE8B6069AF1A39DCA5B7DAE7EDD'
+# Complete cache with the 310.9.16 program appended (ids 5200-5225); the earlier 311 resources are unchanged.
+Assert-InputHash (Join-Path $nativeCacheAdditional 'ampere_native_manifest_additional.inc') '4504A5B76EC2A702475F112985E98F174FD1D4515C3CAF4F45BCA2AABDCC21F7'
+Assert-InputHash (Join-Path $nativeCacheAdditional 'additional-resources.json') '30CEC6E13CA852CD46EA313FF2A3FFFB684910B88DD007F6311D3F81300E3E09'
+
+# XeSS SDK 3.0.2 public headers (MIT). The program set is pinned by the
+# configure-time generator against its manifest hash.
+Assert-InputHash (Join-Path $XessSdkRoot 'inc/xess_fg/xefg_swapchain.h') '39F20FC1EEF0B5D3FD41E25A2C5C04734D1A2CBDCF3F3DA1C86CEFEF181CE976'
+Assert-InputHash (Join-Path $XessSdkRoot 'inc/xess_fg/xefg_swapchain_d3d12.h') '1AA9A1C31214AAEFB2C4CA4FD3BCE29A166C8384148466D69F679EA554CF2DBC'
+Assert-InputHash (Join-Path $XessSdkRoot 'inc/xess_fg/xefg_swapchain_debug.h') '3600F2698FC747810948DEB6FE568F105A8F40C003C73B6940262AE311F33AEB'
+Assert-InputHash (Join-Path $XessSdkRoot 'inc/xell/xell.h') '0A65A677001EDF473156E6ED1D6CF97150FA12FF9930811BBAF4613B080C11B2'
+Assert-InputHash (Join-Path $XessSdkRoot 'inc/xell/xell_d3d12.h') 'E3B07F2F3ADC317416A6AAA2343AE9B56C7707A34BB0E56FBEFEA14463A76BCE'
+Assert-InputHash (Join-Path $StreamlineRoot 'external/nvapi/nvapi.h') '4EE1BFF7568CEEC72124B8B3E43BF65CCB69DBB878B08C634B128F7EDCD28F3B'
+Assert-InputHash (Join-Path $StreamlineRoot 'external/nvapi/nvapi_lite_common.h') '5DDC178D1D504B89907DAD59D41D670E92647E5B7847D4DE1461E6765D8871E8'
+Assert-InputHash (Join-Path $XessProgramsRoot 'programs/programs.tsv') 'D74BD783D29280ED372653701CE9B0395362E381FAACE1213206E0BDD9BFC9E5'
 
 if (-not (Test-Path -LiteralPath (Join-Path $sourceDirectory 'CMakeLists.txt') -PathType Leaf)) {
     throw "Corrected source snapshot is incomplete: $sourceDirectory"
@@ -124,6 +138,9 @@ $arguments = @(
     "-DCMAKE_VS_GLOBALS=VCToolsVersion=$MsvcToolsVersion",
     "-DSTREAMLINE_ROOT=$StreamlineRoot",
     "-DIMGUI_ROOT=$ImGuiRoot",
+    '-DMFG_UNLOCK_XESS=ON',
+    "-DXESS_SDK_ROOT=$XessSdkRoot",
+    "-DXESS_PROGRAMS_ROOT=$XessProgramsRoot",
     "-DVULKAN_INCLUDE_DIR=$VulkanIncludeDirectory",
     "-DGLSLANG_VALIDATOR=$(Join-Path $VulkanIncludeDirectory ../Bin/glslangValidator.exe)",
     '-DMFG_UNLOCK_RUNTIME_GPU_SELECTION=ON',
@@ -189,6 +206,9 @@ Assert-CachePath 'MFG_AMPERE_KERNEL_DIRECTORY_ADDITIONAL' (Join-Path $nativeCach
 Assert-CacheValue 'MFG_UNLOCK_OVERLAY_SKIP_GPU_WORK' $SkipOverlayGpuWork.IsPresent.ToString().ToUpperInvariant()
 Assert-CacheValue 'MFG_UNLOCK_NGX_CREATE_RESULT_DIAGNOSTICS' $EnableNgxCreateResultDiagnostics.IsPresent.ToString().ToUpperInvariant()
 Assert-CacheValue 'MFG_UNLOCK_OUTPUT_PULL_MASK_ONLY' 'ON'
+Assert-CacheValue 'MFG_UNLOCK_XESS' 'ON'
+Assert-CachePath 'XESS_SDK_ROOT' $XessSdkRoot
+Assert-CachePath 'XESS_PROGRAMS_ROOT' $XessProgramsRoot
 Assert-CacheValue 'MFG_UNLOCK_OUTPUT_PULL_MASK_OCCUPANCY' 'OFF'
 Assert-CacheValue 'MFG_UNLOCK_BOUNDED_OVERLAY_REDESIGN' $EnableBoundedOverlayRedesign.IsPresent.ToString().ToUpperInvariant()
 Assert-CacheValue 'MFG_UNLOCK_OVERLAY_MENU_DRAW' $EnableOverlayMenuDraw.IsPresent.ToString().ToUpperInvariant()
@@ -223,7 +243,7 @@ if (-not $compilerText.Contains($compilerRecord) `
 & $CMakeExecutable --build $BuildDirectory --config Release --parallel --target RTXMFGUnified
 if ($LASTEXITCODE -ne 0) { throw "Native build failed: $LASTEXITCODE" }
 
-$dll = Join-Path $BuildDirectory 'Release/RTXMFG.dll'
+$dll = Join-Path $BuildDirectory 'Release/MFGUnlocker.dll'
 if (-not (Test-Path -LiteralPath $dll -PathType Leaf)) {
     throw "Unified build did not produce the expected DLL: $dll"
 }

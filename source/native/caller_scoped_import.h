@@ -11,8 +11,13 @@ bool Eligible(HMODULE importer, void** slot, void* expected, const char* name) n
 bool Prepare(HMODULE importer, void** slot, void* expected, void* replacement, const char* name, void*& original) noexcept;
 // Same main-executable caller scope for a loaded Streamline interposer's own
 // public DXGI factory export, when the application reaches it without any
-// import or resolver call we can observe (packed executables).
+// import or resolver call we can observe (packed executables). These relays
+// also dispatch callers inside the published Streamline host renderer image.
 bool PrepareInterposerEntry(void* expected, void* replacement, const char* name, void*& original) noexcept;
+// Publishes the pinned application renderer DLL that owns the game's slInit
+// call (Dying Light 2 / The Beast) as the interposer relays' second caller
+// scope. Published once for the process; a different module is refused.
+bool SetInterposerHost(HMODULE host) noexcept;
 bool Activate(void* expected, void* replacement) noexcept;
 bool Deactivate(void* expected, void* replacement) noexcept;
 }

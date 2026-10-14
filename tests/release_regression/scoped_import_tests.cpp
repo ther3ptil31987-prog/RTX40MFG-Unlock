@@ -33,6 +33,7 @@ int main(){
     DWORD prior=0,unused=0;
     Check(VirtualProtect(slots,sizeof(slots),PAGE_EXECUTE_READWRITE,&prior)!=FALSE,"executable data rejection fixture prepared");
     Check(!install(main,unaligned,target,"GetProcAddress",FALSE),"executable data outside the declared IAT is rejected");
+    Check(!install(main,aligned,target,"GetProcAddress",FALSE),"aligned executable data outside the declared IAT is rejected");
     Check(VirtualProtect(slots,sizeof(slots),prior,&unused)!=FALSE,"rejection fixture protection restored");
     Check(install(main,unaligned,target,"GetProcAddress",FALSE),"verified unaligned resolver fallback installs");
     if(!okay)return 1;

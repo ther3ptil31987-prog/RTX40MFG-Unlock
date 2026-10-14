@@ -22,6 +22,8 @@ namespace midpoint_fix
 namespace
 {
 constexpr size_t kKernelCount = 25;
+// DLSS-G 310.9.16 registers BlendCandidatesFGLite (Preset C) at slot 1: 26 named kernels.
+constexpr size_t kMaximumKernelCount = 26;
 constexpr size_t kDescriptorBytes = 48;
 constexpr size_t kNameBytes = 96;
 constexpr uint64_t kMaximumFatbinBytes = 64ull * 1024ull * 1024ull;
@@ -66,6 +68,11 @@ struct TemporalProviderProfile
     uint64_t sm89PayloadBytes = 0;
     uint32_t sm89CompressedBytes = 0;
     uint64_t sm89RawBytes = 0;
+    // Named registration table: its length, its names (null selects k3109KernelNames) and the
+    // OutputPull slot used by the OutputPull mask.
+    size_t kernelCount = kKernelCount;
+    const char* const* kernelNames = nullptr;
+    size_t outputPullSlot = 14;
 };
 
 constexpr TemporalProviderProfile kEarlyTemporalProfile{
@@ -169,6 +176,80 @@ constexpr std::array<const char*, kKernelCount> k3109KernelNames{{
     "ZeroBuffer",
 }};
 
+// 310.9.16: the 310.9 table with BlendCandidatesFGLite inserted at slot 1. Every later kernel moves by one;
+// the midpoint kernel (now slot 10) and OutputPull (now slot 15) keep their exact 310.9 payloads.
+constexpr std::array<const char*, kMaximumKernelCount> k310916KernelNames{{
+    "BlendCandidatesFused",
+    "BlendCandidatesFGLite",
+    "Copy4Channel",
+    "DL1Net_Input",
+    "DL1Net_Output",
+    "DetectMenus",
+    "DetectMenusHudless",
+    "Distortion",
+    "DownsampleDistortion",
+    "DownsampleRGBAndEstimateUIFused",
+    "EstimateIntermMvecsScatter",
+    "EstimatePrev2CurrScatter",
+    "InitMvecQualityMask",
+    "InputMvecProcessing",
+    "MenuDetectionOutput",
+    "OutputPull",
+    "OutputPullMiddle",
+    "OutputPush",
+    "OutputPushFine",
+    "Prev2CurrUnpackPull",
+    "Prev2CurrPullMiddle",
+    "Prev2CurrPush",
+    "Prev2CurrPushFine",
+    "Scatter3d",
+    "WarpBlendingWeights",
+    "ZeroBuffer",
+}};
+
+constexpr TemporalProviderProfile k310916TemporalProfile{
+    10,
+    true,
+    98704,
+    "FBA7599CC9CDC1EED947AD5ADB94436052E8C17AD7FD268C2590AB36A0C731E9",
+    "D1EB7A60C57915238AA228511DA16386F95AAAA5A0D1C1B7903F1DA8FB9519B4",
+    "579ACF3317ED39B45AC0ABBC70F4DC812A53AE0F8B11E528B7B5542681E8BEF4",
+    nullptr,
+    nullptr,
+    k3109TemporalInput,
+    "%f136",
+    "%f134",
+    28144,
+    28040,
+    28040,
+    90732,
+    30408,
+    30402,
+    99626,
+    kMaximumKernelCount,
+    k310916KernelNames.data(),
+    15,
+};
+
+constexpr bool SameName(const char* a, const char* b) noexcept
+{
+    if (!a || !b) return false;
+    for (; *a || *b; ++a, ++b)
+        if (*a != *b) return false;
+    return true;
+}
+
+static_assert([] {
+    if (!SameName(k310916KernelNames[0], k3109KernelNames[0])
+        || !SameName(k310916KernelNames[1], "BlendCandidatesFGLite")) return false;
+    for (size_t slot = 2; slot < kMaximumKernelCount; ++slot)
+        if (!SameName(k310916KernelNames[slot], k3109KernelNames[slot - 1])) return false;
+    return SameName(k310916KernelNames[k310916TemporalProfile.temporalSlot], "EstimateIntermMvecsScatter")
+        && SameName(k310916KernelNames[k310916TemporalProfile.outputPullSlot], "OutputPull")
+        && SameName(k3109KernelNames[k3109TemporalProfile.temporalSlot], "EstimateIntermMvecsScatter")
+        && SameName(k3109KernelNames[k3109TemporalProfile.outputPullSlot], "OutputPull");
+}(), "310.9.16 is the 310.9 table with BlendCandidatesFGLite at slot 1");
+
 constexpr const TemporalProviderProfile* ProfileForVersion(
     dlssg_provider_policy::VersionTriplet version) noexcept
 {
@@ -191,6 +272,9 @@ constexpr const TemporalProviderProfile* ProfileForVersion(
     if (version.major == 310 && version.minor == 9
         && (version.build == 0 || version.build == 1))
         return &k3109TemporalProfile;
+    // 310.9.16 (Preset C) keeps the exact 310.9 midpoint payload behind a 26-name table.
+    if (version.major == 310 && version.minor == 9 && version.build == 16)
+        return &k310916TemporalProfile;
     if (version.major == 310
         && ((version.minor == 7
                 && (version.build == 0 || version.build == 128
@@ -212,6 +296,9 @@ static_assert(kLegacySlot11TemporalProfile.temporalSlot == 11);
 static_assert(kLegacySlot10TemporalProfile.temporalSlot == 10);
 static_assert(kLegacySlot9TemporalProfile.temporalSlot == 9);
 static_assert(k3109TemporalProfile.temporalSlot == 9);
+static_assert(k310916TemporalProfile.temporalSlot == 10
+    && k310916TemporalProfile.kernelCount == kMaximumKernelCount
+    && k310916TemporalProfile.outputPullSlot == 15);
 static_assert(kEarlyTemporalProfile.sourceFatbinBytes <= kOutputCapacity);
 static_assert(264968 <= kOutputCapacity);
 
@@ -376,7 +463,9 @@ bool IsReadOnlyImageAddress(HMODULE module, uintptr_t address) noexcept
 bool KernelIdentityMatches(const TemporalProviderProfile& profile, size_t slot,
     const char* descriptorName, const char* entryName) noexcept
 {
-    if (!descriptorName || !entryName || slot >= kKernelCount)
+    if (!descriptorName || !entryName || slot >= profile.kernelCount
+        || profile.kernelCount > kMaximumKernelCount
+        || (!profile.kernelNames && profile.kernelCount != kKernelCount))
         return false;
     if (!profile.namedKernelDescriptors)
     {
@@ -385,7 +474,7 @@ bool KernelIdentityMatches(const TemporalProviderProfile& profile, size_t slot,
     }
 
     constexpr char kEntryPrefix[] = "Kernel_";
-    const char* const expected = k3109KernelNames[slot];
+    const char* const expected = profile.kernelNames ? profile.kernelNames[slot] : k3109KernelNames[slot];
     return expected && std::strcmp(descriptorName, expected) == 0
         && std::strncmp(entryName, kEntryPrefix,
             sizeof(kEntryPrefix) - 1) == 0
@@ -449,11 +538,11 @@ bool DescriptorMatches(uintptr_t moduleBase, uintptr_t moduleEnd,
 bool DescriptorTableMatches(uintptr_t moduleBase, uintptr_t moduleEnd,
     uintptr_t table, const TemporalProviderProfile& profile) noexcept
 {
-    constexpr size_t kTableBytes = kKernelCount * sizeof(uintptr_t);
+    const size_t kTableBytes = profile.kernelCount * sizeof(uintptr_t);
     if (!table || moduleEnd <= moduleBase || table < moduleBase
         || moduleEnd - moduleBase < kTableBytes || table > moduleEnd - kTableBytes)
         return false;
-    for (size_t slot = 0; slot < kKernelCount; ++slot)
+    for (size_t slot = 0; slot < profile.kernelCount; ++slot)
     {
         uintptr_t descriptor = 0;
         if (!SafeRead(table + slot * sizeof(uintptr_t), descriptor)
@@ -467,7 +556,7 @@ bool DescriptorTableMatches(uintptr_t moduleBase, uintptr_t moduleEnd,
 uintptr_t FindDescriptorEntry(HMODULE module, uint32_t imageSize,
     const TemporalProviderProfile& profile) noexcept
 {
-    constexpr size_t kTableBytes = kKernelCount * sizeof(uintptr_t);
+    const size_t kTableBytes = profile.kernelCount * sizeof(uintptr_t);
     if (!module || imageSize < kTableBytes)
         return 0;
     const uintptr_t base = reinterpret_cast<uintptr_t>(module);

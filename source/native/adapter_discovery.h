@@ -123,6 +123,30 @@ inline bool NvapiOwnerPath(const wchar_t* systemDirectory, const wchar_t* candid
     return leaf && leaf > relative + prefixLength && _wcsicmp(leaf + 1, L"nvapi64_impl.dll") == 0;
 }
 
+// NVIDIA's NGX core ships with the display driver: in the driver store on
+// current drivers, or as System32\_nvngx.dll on older installs. Game-local NGX
+// intermediaries never qualify.
+inline bool DriverNgxRuntimePath(const wchar_t* candidate) noexcept
+{
+    std::array<wchar_t, kPathCapacity> systemDirectory{}, system{}, path{};
+    const UINT systemLength = GetSystemDirectoryW(systemDirectory.data(), static_cast<UINT>(systemDirectory.size()));
+    if (!systemLength || systemLength >= systemDirectory.size()
+        || !CanonicalPath(systemDirectory.data(), system) || !CanonicalPath(candidate, path)) return false;
+    const size_t baseLength = wcslen(system.data()), pathLength = wcslen(path.data());
+    if (baseLength + 1 >= pathLength || path[baseLength] != L'\\'
+        || CompareStringOrdinal(system.data(), static_cast<int>(baseLength), path.data(),
+            static_cast<int>(baseLength), TRUE) != CSTR_EQUAL) return false;
+    const wchar_t* relative = path.data() + baseLength + 1;
+    if (_wcsicmp(relative, L"_nvngx.dll") == 0) return true;
+    constexpr wchar_t repository[] = L"DriverStore\\FileRepository\\";
+    constexpr size_t prefixLength = std::size(repository) - 1;
+    if (wcslen(relative) <= prefixLength
+        || _wcsnicmp(relative, repository, prefixLength) != 0) return false;
+    const wchar_t* directory = relative + prefixLength;
+    const wchar_t* leaf = wcschr(directory, L'\\');
+    return leaf && leaf > directory && !wcschr(leaf + 1, L'\\') && _wcsicmp(leaf + 1, L"_nvngx.dll") == 0;
+}
+
 using QueryInterface = void*(__cdecl*)(uint32_t);
 inline bool OwnerFactoryMatches(HMODULE owner, uint32_t id, const void* target) noexcept
 {
@@ -140,6 +164,11 @@ inline bool IsAmpere(const LUID& luid) noexcept
     ModuleReference dispatcher;
     dispatcher.module = LoadLibraryExW(stubPath.data(), nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (!dispatcher.module) return false;
+    // Never be the reference which unmaps NVAPI: hooks other modules placed on
+    // its first load (OptiScaler's QueryInterface detour) would go with it.
+    HMODULE pinnedDispatcher = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+        reinterpret_cast<LPCWSTR>(dispatcher.module), &pinnedDispatcher);
     const DWORD stubLength = GetModuleFileNameW(dispatcher.module, loadedPath.data(), static_cast<DWORD>(loadedPath.size()));
     if (!stubLength || stubLength >= loadedPath.size()
         || !NvapiOwnerPath(systemDirectory.data(), loadedPath.data(), true)) return false;

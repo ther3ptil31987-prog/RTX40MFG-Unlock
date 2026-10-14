@@ -257,6 +257,9 @@ struct MfgUnlockReShadeSnapshot
     char hudRecompositionUi[16]{};
     BOOL hudlessDetectDiffersInMotion = FALSE;
     uint32_t hudlessDetectMotionDiffersProbes = 0;
+
+    // The provider implements Frame Generation Preset C (DLSS-G 310.9.16 and newer).
+    BOOL dlssgPresetCAvailable = FALSE;
 };
 
 #if defined(MFG_UNLOCK_RESHADE_ADDON) || defined(MFG_UNLOCK_BACKEND_BRIDGE)

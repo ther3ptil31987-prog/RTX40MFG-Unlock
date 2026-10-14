@@ -1,3 +1,4 @@
+#include "single_module.h"
 #include "overlay_vulkan.h"
 #include "overlay_platform.h"
 #include "overlay_hook.h"
@@ -660,7 +661,7 @@ struct PresentTag
             if (next->sType == VK_STRUCTURE_TYPE_PRESENT_REGIONS_KHR
                 || next->sType == VK_STRUCTURE_TYPE_DEVICE_GROUP_PRESENT_INFO_KHR)
                 supportedPresent = false;
-        if (selected && supportedPresent && nativeWaits)
+        if (selected && supportedPresent && nativeWaits && single_module::OverlayAllowed())
         {
             gVulkanFrames.fetch_add(1, std::memory_order_relaxed);
             selected->Render(queue, info->pImageIndices[selectedIndex], *info, renderFailure);

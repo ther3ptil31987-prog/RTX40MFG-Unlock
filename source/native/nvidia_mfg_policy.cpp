@@ -1,4 +1,5 @@
 #include "nvidia_mfg_policy.h"
+#include "optiscaler_host.h"
 
 #include <Windows.h>
 
@@ -125,9 +126,25 @@ ProfileQuery IdentifyExecutable(const wchar_t* executablePath)
         LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (!nvapi)
         return result;
+    // NVAPI stays mapped for the process. When this lookup is its first load
+    // (an OptiScaler plug-in loads before the game), our FreeLibrary would
+    // unmap it together with the hooks other modules installed on that load
+    // (OptiScaler's nvapi_QueryInterface detour, which carries its Reflex
+    // input), and the game would later map a fresh, unhooked copy.
+    HMODULE pinned = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+        | GET_MODULE_HANDLE_EX_FLAG_PIN, reinterpret_cast<LPCWSTR>(nvapi), &pinned);
     const auto query = reinterpret_cast<QueryInterfaceFn>(
         GetProcAddress(nvapi, "nvapi_QueryInterface"));
     if (!query)
+    {
+        FreeLibrary(nvapi);
+        return result;
+    }
+    // A fakenvapi (OptiScaler's bundled or built-in replacement, or any
+    // game-folder nvapi64.dll) has no NVIDIA driver profile store.
+    if (optiscaler_host::IsFakeNvapi(nvapi,
+            reinterpret_cast<optiscaler_host::NvapiQueryInterface>(query)))
     {
         FreeLibrary(nvapi);
         return result;

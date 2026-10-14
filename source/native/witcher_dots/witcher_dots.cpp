@@ -81,7 +81,7 @@ uint64_t Microseconds(uint64_t ticks) noexcept {
 }
 // The game's own Path Traced Hair state (profile-validated config variables).
 // Off: DOTS declines hair builds and keeps hair out of ray tracing, so
-// HairWorks behaves as on a stock RTX 40 series GPU.
+// HairWorks behaves as on a stock RTX 30/40 series GPU.
 bool GameHairTraced() noexcept {
     if(!settingKnown.load(std::memory_order_acquire))return false;
     const auto* base=reinterpret_cast<const std::byte*>(S().game);
@@ -576,10 +576,11 @@ void AbortPreparation() noexcept {
 bool PublishGates(std::string& error) {
     return profile::PublishGates(reinterpret_cast<uintptr_t>(S().game),Game().gates,error);
 }
-// RTX 40 series is Ada: CUDA compute capability 8.9 (desktop, laptop and
-// workstation parts). The CUDA device must match the game's D3D12 adapter LUID
-// exactly once; any incomplete or ambiguous enumeration is not admitted.
-bool AdaAdapter(const LUID& luid,int& major,int& minor) noexcept {
+// RTX 40 series is Ada (CUDA compute capability 8.9) and RTX 30 series is
+// Ampere (8.6), desktop, laptop and workstation parts. 8.0 (GA100) has no RT
+// cores. The CUDA device must match the game's D3D12 adapter LUID exactly once;
+// any incomplete or ambiguous enumeration is not admitted.
+bool SupportedAdapter(const LUID& luid,int& major,int& minor) noexcept {
     using InitFn=int(WINAPI*)(unsigned);using CountFn=int(WINAPI*)(int*);using DeviceFn=int(WINAPI*)(int*,int);
     using CapabilityFn=int(WINAPI*)(int*,int*,int);using LuidFn=int(WINAPI*)(char*,unsigned*,int);
     const HMODULE cuda=LoadLibraryExW(L"nvcuda.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
@@ -600,7 +601,7 @@ bool AdaAdapter(const LUID& luid,int& major,int& minor) noexcept {
         if(candidate.LowPart==luid.LowPart&&candidate.HighPart==luid.HighPart) {++matches;major=candidateMajor;minor=candidateMinor;}
     }
     FreeLibrary(cuda);
-    return complete&&matches==1&&major==8&&minor==9;
+    return complete&&matches==1&&major==8&&(minor==9||minor==6);
 }
 bool Adapter(ID3D12Device5* device,DXGI_ADAPTER_DESC1& desc,ComPtr<IDXGIAdapter3>& memory) {
     const HMODULE module=single_module::LoadSystemModule(L"dxgi.dll");
@@ -700,20 +701,23 @@ void ObserveDevice(IUnknown* object,const void* caller) noexcept {
             const auto initialize=query?reinterpret_cast<InitializeFn>(query(0x0150e828)):nullptr;
             if(initialize&&initialize()==0) {lss=0;capsStatus=caps(state.device.Get(),6,&lss,sizeof(lss));}
         }
+        // NVAPI_NOT_SUPPORTED: the driver has no LSS capability record for this
+        // GPU, which is the same answer as a cleared support bit.
+        if(capsStatus==-104) {lss=0;capsStatus=0;}
         if(capsStatus!=0) {Reason(Stage::Failed,"native LSS capability query failed");return;}
         if(lss&1) {Reason(Stage::NativeLss,"native LSS supported; game path retained");return;}
         D3D12_FEATURE_DATA_D3D12_OPTIONS5 options{};
-        D3D12_FEATURE_DATA_SHADER_MODEL model{D3D_SHADER_MODEL_6_5};
+        D3D12_FEATURE_DATA_SHADER_MODEL model{D3D_SHADER_MODEL_6_6};
         int major=0,minor=0;
-        if(adapter.VendorId!=0x10de||!AdaAdapter(state.device->GetAdapterLuid(),major,minor)) {
+        if(adapter.VendorId!=0x10de||!SupportedAdapter(state.device->GetAdapterLuid(),major,minor)) {
             char text[128]{};
-            _snprintf_s(text,_TRUNCATE,"requires an RTX 40 series (Ada) GPU; adapter compute capability %d.%d",major,minor);
+            _snprintf_s(text,_TRUNCATE,"requires an RTX 30 or RTX 40 series GPU; adapter compute capability %d.%d",major,minor);
             Reason(Stage::UnsupportedGpu,text);return;
         }
         if(FAILED(state.device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5,&options,sizeof(options)))
             ||options.RaytracingTier<D3D12_RAYTRACING_TIER_1_1
-            ||FAILED(state.device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL,&model,sizeof(model)))||model.HighestShaderModel<D3D_SHADER_MODEL_6_5) {
-            Reason(Stage::UnsupportedGpu,"requires DXR 1.1 and shader model 6.5");return;
+            ||FAILED(state.device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL,&model,sizeof(model)))||model.HighestShaderModel<D3D_SHADER_MODEL_6_6) {
+            Reason(Stage::UnsupportedGpu,"requires DXR 1.1 and shader model 6.6");return;
         }
         const HMODULE nvapi=GetModuleHandleW(L"nvapi64.dll");
         using QueryFn=void*(__cdecl*)(uint32_t);using DriverFn=int32_t(__cdecl*)(uint32_t*,char*);

@@ -68,6 +68,9 @@ void ObserveActiveWrapper(HMODULE, uint64_t generation) noexcept;
 int32_t LastCreateCount() noexcept;
 uint64_t CreatedFeatures() noexcept;
 uint64_t SubmittedBatches() noexcept;
+uint64_t FailedBatches() noexcept;
+uint64_t RecoveredBatches() noexcept;
+uint64_t OutputReuseLatches() noexcept;
 
 // All module work occurs on loader return or ordinary calls, never from the
 // loader notification callback. Startup is serialized with feature creation.

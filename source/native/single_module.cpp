@@ -4,10 +4,12 @@
 #include "overlay_install.h"
 #include "single_overlay.h"
 #include "overlay_dxgi_proxy.h"
+#include "optiscaler_host.h"
 #include "proxy_generated/proxy_export_names.h"
 #include "proxy_generated/renamable_names.h"
 
 #include <delayimp.h>
+#include <intrin.h>
 #include <atomic>
 #include <array>
 #include <cwchar>
@@ -195,7 +197,7 @@ bool SelectProxyExports(HMODULE module, uint32_t family) noexcept
     if (directory.VirtualAddress >= size || directory.Size < sizeof(IMAGE_EXPORT_DIRECTORY)
         || directory.Size > size - directory.VirtualAddress) return false;
     const auto exports = reinterpret_cast<const IMAGE_EXPORT_DIRECTORY*>(base + directory.VirtualAddress);
-    constexpr uint32_t kLegacyLimit = 427, kNamedBase = 1024, kPublicLast = 4098;
+    constexpr uint32_t kLegacyLimit = 427, kNamedBase = 1024, kPublicLast = 4099;
     if (exports->Base != 1 || exports->NumberOfFunctions != kPublicLast
         || exports->AddressOfFunctions >= size
         || exports->NumberOfFunctions > (size - exports->AddressOfFunctions) / sizeof(DWORD)
@@ -384,6 +386,10 @@ namespace single_module
 {
 HMODULE Self() noexcept { return gSelf; }
 bool OwnsBackend() noexcept { return gOwnsBackend; }
+// OptiScaler mode hides every RTXMFG surface: OptiScaler's own menu owns the
+// controls. Already-wrapped objects stay in the chain but stop drawing and
+// capturing input.
+bool OverlayAllowed() noexcept { return gOwnsBackend && !optiscaler_host::UiDelegated(); }
 
 HMODULE LoadSystemModule(const wchar_t* basename) noexcept
 {
@@ -628,12 +634,36 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved)
         return TRUE;
     }
     gOwnsBackend = true;
+    // Decide OptiScaler cooperation before any hook is armed. As a plugin,
+    // RTXMFG is loaded from OptiScaler's DllMain, so its image is mapped here
+    // (not necessarily initialized: only its resources are read).
+    optiscaler_host::ObserveProcessStart(instance);
+    if (optiscaler_host::Detected())
+        single_module::Log(L"OptiScaler detected at startup; its menu owns the frame-generation controls unless optiScalerUi is \"rtxmfg\".");
     if (!MfgUnlockCoreEntry(instance, reason, reserved))
     {
         gOwnsBackend = false;
         return FALSE;
     }
     // Bounded application import publication only; no UI discovery worker.
+    // In OptiScaler mode the menu routes stay unbound inside ResolveProc; the
+    // Witcher DOTS device import is still published here.
     single_overlay::InstallKnownModules();
     return TRUE;
+}
+
+// OptiScaler ASI plugin contract (loaded from its plugins folder, called from
+// its DllMain under the loader lock). Backend setup already ran in DllMain;
+// this only records the caller identity.
+extern "C" __declspec(dllexport) __declspec(noinline) void InitializeASI()
+{
+    if (gDuplicate || !gOwnsBackend) return;
+    HMODULE caller = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+            | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(_ReturnAddress()), &caller))
+        caller = nullptr;
+    single_module::Log(optiscaler_host::AcceptPluginCaller(caller)
+        ? L"OptiScaler plugin host accepted (InitializeASI)."
+        : L"InitializeASI caller is not OptiScaler; ignored.");
 }

@@ -1,5 +1,6 @@
 #include "overlay_platform.h"
 #include "overlay_hook.h"
+#include "optiscaler_host.h"
 #include "overlay_scaling.h"
 #include "standalone_ui.h"
 #include "single_hotkey.h"
@@ -12,6 +13,7 @@
 #include <cstdint>
 #include <deque>
 #include <filesystem>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -27,6 +29,7 @@ struct InputMessage
     WPARAM wparam;
     LPARAM lparam;
     ImGuiMouseSource mouseSource = ImGuiMouseSource_Mouse;
+    bool fromHook = false; // lparam = mouse_route cursor (physical client x, y, width, height)
 };
 struct WindowInput
 {
@@ -51,6 +54,28 @@ bool gHavePreviousClip = false;
 std::mutex gClipMutex;
 void DetachWindow(HWND window, bool releaseClient = true);
 
+// "MFG Unlocker <version>###RTXMFG": the window ID ignores the visible text, so the
+// saved position and size survive updates and the RTXMFG -> MFG Unlocker rename.
+const char* PanelTitle()
+{
+    static const std::string title = []
+    {
+        wchar_t version[96]{};
+        std::string text = "MFG Unlocker";
+        if (optiscaler_host::ReadVersionString(single_module::Self(), L"ProductVersion", version, std::size(version))
+            && version[0])
+        {
+            char utf8[192]{};
+            if (WideCharToMultiByte(CP_UTF8, 0, version, -1, utf8, static_cast<int>(sizeof(utf8)), nullptr, nullptr) > 1)
+                text.append(" ").append(utf8);
+        }
+        return text + "###RTXMFG";
+    }();
+    return title.c_str();
+}
+// Builds up to 1.5.0-beta.5 saved the panel as "DLSS MFG".
+constexpr const char* kLegacyPanelName = "DLSS MFG";
+
 bool Foreground(HWND window) noexcept
 {
     const HWND foreground = GetForegroundWindow();
@@ -60,7 +85,7 @@ bool Foreground(HWND window) noexcept
 
 bool CaptureInput() noexcept
 {
-    return !gInsideOverlay && gVisible.load(std::memory_order_acquire)
+    return !gInsideOverlay && single_module::OverlayAllowed() && gVisible.load(std::memory_order_acquire)
         && Foreground(gActiveWindow.load(std::memory_order_acquire));
 }
 
@@ -268,8 +293,236 @@ void ReleaseRetiredRawMouse(HWND window, const RAWMOUSE& mouse)
                 index >= 3 ? MAKEWPARAM(0, index == 3 ? XBUTTON1 : XBUTTON2) : 0);
 }
 
+// DirectInput mouse route. dinput8 reads an exclusive mouse as raw input on its
+// own thread (hidden DIEmWin window, RIDEV_NOLEGACY | RIDEV_CAPTUREMOUSE), so
+// the game window receives no button messages and the menu cannot be clicked
+// (Dying Light: The Beast). While the menu holds input in such a process, a
+// WH_MOUSE_LL hook on our own thread takes the mouse: the cursor follows each
+// event and buttons and wheel are queued for the menu. Consuming the event does
+// not stop raw input, and DirectInput reads its packets before dispatching
+// them, so the game still receives the mouse while the menu is open. The hook
+// exists only while the menu is open; other processes keep the window-message
+// path unchanged.
+namespace mouse_route
+{
+constexpr UINT kApply = WM_APP + 0x51;
+std::atomic<HWND> gWindow{nullptr};     // menu window the hook serves; null = no hook wanted
+std::atomic<HWND> gDeclined{nullptr};   // menu window checked without a DirectInput window
+std::atomic<uint32_t> gGeneration{0};   // each request reinstalls, so ours runs first
+std::atomic<bool> gForeground{false};
+std::atomic<uint64_t> gCursor{0};       // physical client x, y, width, height (16 bits each)
+std::atomic<bool> gThreadStarted{false};
+std::atomic<DWORD> gThread{0};
+std::atomic<uint32_t> gMoves{0};
+std::atomic<uint32_t> gButtons{0};
+std::atomic<uint32_t> gWheel{0};
+std::atomic<uint32_t> gLogLines{0};
+
+void Log(const wchar_t* line) noexcept
+{
+    if (gLogLines.fetch_add(1, std::memory_order_relaxed) < 32) single_module::Log(line);
+}
+
+std::optional<ImVec2> Map(uint64_t cursor, ImVec2 display) noexcept
+{
+    const float width = float(uint16_t(cursor >> 32));
+    const float height = float(uint16_t(cursor >> 48));
+    if (width <= 0.0f || height <= 0.0f || display.x <= 0.0f || display.y <= 0.0f) return std::nullopt;
+    return ImVec2((float(uint16_t(cursor)) + 0.5f) * display.x / width,
+        (float(uint16_t(cursor >> 16)) + 0.5f) * display.y / height);
+}
+
+LRESULT CALLBACK HookProc(int code, WPARAM message, LPARAM parameter)
+{
+    const HWND window = gWindow.load(std::memory_order_acquire);
+    if (code != HC_ACTION || !window || window != gActiveWindow.load(std::memory_order_acquire)
+        || !CaptureInput())
+        return CallNextHookEx(nullptr, code, message, parameter);
+    // This thread is per-monitor aware: event, cursor and client rectangle
+    // are all physical pixels.
+    const auto& event = *reinterpret_cast<const MSLLHOOKSTRUCT*>(parameter);
+    RECT client{};
+    POINT origin{};
+    if (!GetClientRect(window, &client) || !ClientToScreen(window, &origin)
+        || client.right <= 0 || client.bottom <= 0 || client.right > 0xFFFF || client.bottom > 0xFFFF)
+        return CallNextHookEx(nullptr, code, message, parameter);
+    const POINT target{std::clamp<LONG>(event.pt.x, origin.x, origin.x + client.right - 1),
+        std::clamp<LONG>(event.pt.y, origin.y, origin.y + client.bottom - 1)};
+    POINT cursor{};
+    if (GetCursorPos(&cursor) && (cursor.x != target.x || cursor.y != target.y))
+    {
+        SetCursorPos(target.x, target.y);
+        // A clip left by the game or DirectInput would hold the cursor.
+        if (GetCursorPos(&cursor) && (cursor.x != target.x || cursor.y != target.y))
+        {
+            ClipCursor(nullptr);
+            SetCursorPos(target.x, target.y);
+        }
+    }
+    const uint64_t packed = uint64_t(uint16_t(target.x - origin.x))
+        | uint64_t(uint16_t(target.y - origin.y)) << 16
+        | uint64_t(uint16_t(client.right)) << 32 | uint64_t(uint16_t(client.bottom)) << 48;
+    gCursor.store(packed, std::memory_order_release);
+    WPARAM wparam = 0;
+    switch (message)
+    {
+    case WM_MOUSEMOVE:
+        gMoves.fetch_add(1, std::memory_order_relaxed);
+        return 1;
+    case WM_LBUTTONDOWN: case WM_LBUTTONUP: case WM_RBUTTONDOWN: case WM_RBUTTONUP:
+    case WM_MBUTTONDOWN: case WM_MBUTTONUP:
+        gButtons.fetch_add(1, std::memory_order_relaxed);
+        break;
+    case WM_XBUTTONDOWN: case WM_XBUTTONUP:
+        gButtons.fetch_add(1, std::memory_order_relaxed);
+        wparam = MAKEWPARAM(0, HIWORD(event.mouseData));
+        break;
+    case WM_MOUSEWHEEL: case WM_MOUSEHWHEEL:
+        gWheel.fetch_add(1, std::memory_order_relaxed);
+        wparam = MAKEWPARAM(0, HIWORD(event.mouseData));
+        break;
+    default:
+        return 1;
+    }
+    QueueWindowMessage(window, {static_cast<UINT>(message), wparam,
+        static_cast<LPARAM>(packed), ImGuiMouseSource_Mouse, true});
+    return 1;
+}
+
+DWORD WINAPI Thread(void*)
+{
+    gThread.store(GetCurrentThreadId(), std::memory_order_seq_cst);
+    // Every mouse event in the system waits for this thread while the hook is
+    // installed; a busy game must not delay it.
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+    using SetContext = HANDLE (WINAPI*)(HANDLE);
+    if (const auto set = reinterpret_cast<SetContext>(GetProcAddress(
+            GetModuleHandleW(L"user32.dll"), "SetThreadDpiAwarenessContext")))
+        if (!set(reinterpret_cast<HANDLE>(-4))) set(reinterpret_cast<HANDLE>(-3)); // per-monitor v2, else v1
+    MSG message{};
+    PeekMessageW(&message, nullptr, WM_USER, WM_USER, PM_NOREMOVE); // message queue for requests
+    HHOOK hook = nullptr;
+    uint32_t applied = 0;
+    for (;;)
+    {
+        const bool wanted = gWindow.load(std::memory_order_seq_cst) != nullptr;
+        const uint32_t generation = gGeneration.load(std::memory_order_seq_cst);
+        if (wanted && (!hook || applied != generation))
+        {
+            if (hook) UnhookWindowsHookEx(hook);
+            hook = SetWindowsHookExW(WH_MOUSE_LL, &HookProc, single_module::Self(), 0);
+            const DWORD error = hook ? 0ul : GetLastError();
+            applied = generation;
+            wchar_t line[160]{};
+            swprintf_s(line, L"MFG_PROXY_UI mouse-route=low-level-hook reason=directinput installed=%d generation=%u error=%lu",
+                hook ? 1 : 0, generation, error);
+            Log(line);
+        }
+        else if (!wanted && hook)
+        {
+            UnhookWindowsHookEx(hook);
+            hook = nullptr;
+            wchar_t line[160]{};
+            swprintf_s(line, L"MFG_PROXY_UI mouse-route closed moves=%u buttons=%u wheel=%u",
+                gMoves.exchange(0), gButtons.exchange(0), gWheel.exchange(0));
+            Log(line);
+        }
+        // Low-level hook callbacks are dispatched inside GetMessageW; a posted
+        // kApply only wakes the loop to apply a new request.
+        if (GetMessageW(&message, nullptr, 0, 0) <= 0) break;
+    }
+    if (hook) UnhookWindowsHookEx(hook);
+    return 0;
+}
+
+void Request(HWND window) noexcept
+{
+    if (window)
+    {
+        gCursor.store(0, std::memory_order_release);
+        gGeneration.fetch_add(1, std::memory_order_seq_cst);
+    }
+    gWindow.store(window, std::memory_order_seq_cst);
+    if (!gThreadStarted.exchange(true))
+    {
+        // The thread runs this module's hook; keep the image for its lifetime.
+        HMODULE pinned = nullptr;
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+            reinterpret_cast<LPCWSTR>(&HookProc), &pinned);
+        if (const HANDLE thread = CreateThread(nullptr, 0, &Thread, nullptr, 0, nullptr)) CloseHandle(thread);
+        else
+        {
+            gThreadStarted.store(false);
+            Log(L"MFG_PROXY_UI mouse-route=window-messages hook thread unavailable");
+        }
+        return;
+    }
+    // The thread reads the request after publishing its id and creating its
+    // queue, so a request it cannot be woken for is still applied.
+    if (const DWORD thread = gThread.load(std::memory_order_seq_cst))
+        PostThreadMessageW(thread, kApply, 0, 0);
+}
+
+bool DirectInputWindow() noexcept
+{
+    const DWORD self = GetCurrentProcessId();
+    for (HWND candidate = FindWindowExW(nullptr, nullptr, L"DIEmWin", nullptr); candidate;
+         candidate = FindWindowExW(nullptr, candidate, L"DIEmWin", nullptr))
+    {
+        DWORD process = 0;
+        if (GetWindowThreadProcessId(candidate, &process) && process == self) return true;
+    }
+    return false;
+}
+
+// Render thread, every frame: request the hook when the menu opens in a
+// DirectInput process, reinstall it when the game regains the foreground (a
+// low-level hook installed meanwhile would otherwise run ahead of ours), and
+// remove it when the menu closes.
+void Refresh(HWND window, bool foreground) noexcept
+{
+    const bool open = window && gVisible.load(std::memory_order_acquire)
+        && window == gActiveWindow.load(std::memory_order_acquire);
+    const HWND current = gWindow.load(std::memory_order_acquire);
+    if (!open)
+    {
+        if (current && current == window) Request(nullptr);
+        if (gDeclined.load(std::memory_order_acquire) == window) gDeclined.store(nullptr);
+        return;
+    }
+    if (current != window)
+    {
+        if (gDeclined.load(std::memory_order_acquire) == window) return;
+        if (!DirectInputWindow())
+        {
+            gDeclined.store(window, std::memory_order_release);
+            Log(L"MFG_PROXY_UI mouse-route=window-messages directinput=0");
+            return;
+        }
+        gForeground.store(foreground, std::memory_order_release);
+        Request(window);
+        return;
+    }
+    if (!foreground) gForeground.store(false, std::memory_order_release);
+    else if (!gForeground.exchange(true)) Request(window);
+}
+
+bool Serving(HWND window) noexcept
+{
+    return window && gWindow.load(std::memory_order_acquire) == window
+        && gCursor.load(std::memory_order_acquire) != 0;
+}
+}
+
 bool ProcessKey(HWND window, int key, bool down)
 {
+    if (!single_module::OverlayAllowed())
+    {
+        // OptiScaler detected after the menu was attached: close it once and
+        // leave every key to the game and OptiScaler.
+        if (gVisible.load(std::memory_order_acquire)) SetVisible(false, window);
+        return false;
+    }
     const bool wasBinding = gMenuKey.Binding();
     const auto action = gMenuKey.Process(key, down);
     if (action == KeyAction::Toggle)
@@ -533,6 +786,22 @@ bool PlatformState::Initialize(HWND hwnd)
     ContextScope current(context);
     InternalScope internal;
     ImGui::StyleColorsDark();
+    {
+        // Stock dark colours; slightly roomier spacing and rounded corners.
+        auto& style = ImGui::GetStyle();
+        style.WindowPadding = ImVec2(12.0f, 10.0f);
+        style.FramePadding = ImVec2(8.0f, 4.0f);
+        style.ItemSpacing = ImVec2(8.0f, 6.0f);
+        style.ItemInnerSpacing = ImVec2(6.0f, 4.0f);
+        style.CellPadding = ImVec2(6.0f, 3.0f);
+        style.WindowRounding = 6.0f;
+        style.ChildRounding = 4.0f;
+        style.FrameRounding = 4.0f;
+        style.PopupRounding = 4.0f;
+        style.GrabRounding = 4.0f;
+        style.ScrollbarRounding = 6.0f;
+        style.SeparatorTextPadding = ImVec2(0.0f, 4.0f);
+    }
     auto& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io.ConfigFlags &= ~ImGuiConfigFlags_ViewportsEnable;
@@ -620,9 +889,16 @@ void PlatformState::Shutdown()
 
 bool PlatformState::WantsFrame() const noexcept
 {
+    if (!single_module::OverlayAllowed())
+    {
+        if (gVisible.load(std::memory_order_acquire)) SetVisible(false, window);
+        mouse_route::Refresh(window, false); // the closed menu releases the mouse route
+        return false;
+    }
     // The edge state is shared with window/raw messages, so polling cannot
     // toggle twice for a single press. It also covers custom input pumps.
-    if (context && inputAttached && Foreground(window))
+    const bool foreground = context && inputAttached && Foreground(window);
+    if (foreground)
     {
         InternalScope internal;
         if (gFirstLaunchPending)
@@ -646,6 +922,7 @@ bool PlatformState::WantsFrame() const noexcept
             ProcessKey(window, key, (GetAsyncKeyState(key) & 0x8000) != 0);
         }
     }
+    if (context && inputAttached) mouse_route::Refresh(window, foreground);
     return context && inputAttached && IsWindow(window) && (gVisible.load(std::memory_order_acquire)
         || GetTickCount64() - firstFrame < 7000);
 }
@@ -670,6 +947,23 @@ bool PlatformState::NewFrame(uint32_t outputWidth, uint32_t outputHeight)
     {
         bool down = false;
         const int button = MouseButton(input.message, input.wparam, down);
+        if (input.fromHook)
+        {
+            // Position first, so the button or wheel applies where it happened.
+            auto& io = ImGui::GetIO();
+            if (const auto position = mouse_route::Map(static_cast<uint64_t>(input.lparam), io.DisplaySize))
+                io.AddMousePosEvent(position->x, position->y);
+            if (button >= 0)
+            {
+                io.AddMouseSourceEvent(ImGuiMouseSource_Mouse);
+                io.AddMouseButtonEvent(button, down);
+            }
+            else if (input.message == WM_MOUSEWHEEL)
+                io.AddMouseWheelEvent(0.0f, float(GET_WHEEL_DELTA_WPARAM(input.wparam)) / float(WHEEL_DELTA));
+            else if (input.message == WM_MOUSEHWHEEL)
+                io.AddMouseWheelEvent(-float(GET_WHEEL_DELTA_WPARAM(input.wparam)) / float(WHEEL_DELTA), 0.0f);
+            continue;
+        }
         if (button >= 0)
         {
             // Native capture was handled synchronously by WindowProc. Calling
@@ -682,6 +976,11 @@ bool PlatformState::NewFrame(uint32_t outputWidth, uint32_t outputHeight)
     }
     ImGui_ImplWin32_NewFrame();
     auto& io = ImGui::GetIO();
+    // The backend reads the cursor only while it tracks no window area. When
+    // the hook drives the mouse, its last cursor is the position.
+    if (visible && mouse_route::Serving(window) && Foreground(window))
+        if (const auto position = mouse_route::Map(mouse_route::gCursor.load(std::memory_order_acquire), io.DisplaySize))
+            io.AddMousePosEvent(position->x, position->y);
     const auto scaling = CalculateOverlayScaling(outputWidth, outputHeight,
         io.DisplaySize.x, io.DisplaySize.y, ImGui_ImplWin32_GetDpiScaleForHwnd(window));
     if (!scaling.valid) return false;
@@ -726,12 +1025,14 @@ void PlatformState::Draw()
         {
             ImVec2 size(570.0f*uiScale, 610.0f*uiScale), position(24.0f*uiScale, 24.0f*uiScale);
             const float ratio = uiScale/layoutScale;
-            if (const ImGuiWindow* panel = ImGui::FindWindowByName("DLSS MFG"))
+            const ImGuiWindowSettings* saved = ImGui::FindWindowSettingsByID(ImHashStr(PanelTitle()));
+            if (!saved) saved = ImGui::FindWindowSettingsByID(ImHashStr(kLegacyPanelName));
+            if (const ImGuiWindow* panel = ImGui::FindWindowByName(PanelTitle()))
             {
                 size = ImVec2(panel->SizeFull.x*ratio, panel->SizeFull.y*ratio);
                 position = ImVec2(panel->Pos.x*ratio, panel->Pos.y*ratio);
             }
-            else if (const ImGuiWindowSettings* saved = ImGui::FindWindowSettingsByID(ImHashStr("DLSS MFG")))
+            else if (saved)
             {
                 size = ImVec2(float(saved->Size.x)*ratio, float(saved->Size.y)*ratio);
                 position = ImVec2(float(saved->Pos.x)*ratio, float(saved->Pos.y)*ratio);
@@ -743,8 +1044,17 @@ void PlatformState::Draw()
             ImGui::SetNextWindowSize(size, ImGuiCond_Always);
             ImGui::SetNextWindowPos(position, ImGuiCond_Always);
         }
-        if (ImGui::Begin("DLSS MFG", &open))
+        if (ImGui::Begin(PanelTitle(), &open))
         {
+            // The settings scroll; the footer keeps the menu key and status in view.
+            const auto& style = ImGui::GetStyle();
+            float footer = 2.0f*style.ItemSpacing.y + 1.0f + ImGui::GetFrameHeight();
+            if (gShortcutSaveFailed) footer += 2.0f*ImGui::GetTextLineHeightWithSpacing();
+            if (ImGui::BeginChild("##settings", ImVec2(0.0f, -footer), ImGuiChildFlags_NavFlattened))
+                standalone_ui::Draw();
+            ImGui::EndChild();
+            ImGui::Separator();
+            ImGui::AlignTextToFramePadding();
             ImGui::Text("Menu key: %s", KeyLabel().c_str());
             ImGui::SameLine();
             if (gMenuKey.Binding())
@@ -754,10 +1064,9 @@ void PlatformState::Draw()
                 if (ImGui::Button("Cancel")) gMenuKey.CancelBinding();
             }
             else if (ImGui::Button("Change key")) gMenuKey.BeginBinding();
+            standalone_ui::DrawFooterStatus();
             if (gShortcutSaveFailed)
                 ImGui::TextWrapped("The new shortcut works for this session, but could not be saved.");
-            ImGui::Separator();
-            standalone_ui::Draw();
         }
         ImGui::End();
         if (gFirstLaunchSavePending)
@@ -794,7 +1103,7 @@ void PlatformState::Draw()
             ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize
             | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoSavedSettings))
         {
-            ImGui::Text("RTX40MFG  |  %s opens DLSS MFG", KeyLabel().c_str());
+            ImGui::Text("MFG Unlocker  |  %s opens the menu", KeyLabel().c_str());
         }
         ImGui::End();
     }

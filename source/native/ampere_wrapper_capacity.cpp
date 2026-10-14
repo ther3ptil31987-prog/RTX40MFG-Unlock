@@ -2,22 +2,41 @@
 #include "third_party/minhook/src/hde/hde64.h"
 #include <algorithm>
 #include <cstring>
+#include "ampere_legacy_wrapper_contracts.h"
+#include "ampere_ota_wrapper_contracts.h"
 
 namespace ampere_wrapper
 {
 namespace
 {
-// Independently traced in local production 2.13 and 2.14 wrappers. Every
+// Independently traced in local production 2.13 and 2.14 wrappers (OTA 2.14.16 included). Every
 // window must match one complete profile; version text grants no admission.
 struct Fields { size_t maximum, swapchain, count, buffers; };
 constexpr Fields kCompactFields{0x45dc, 0x4150, 0x4158, 0x42c0};
 constexpr Fields kExtendedFields{0x460c, 0x4180, 0x4188, 0x42f0};
+// Legacy rings live in the independently matched pacer object at context+18.
+// count/buffers below are pacer offsets; maximum/swapchain are context offsets.
+constexpr Fields kPacerFields{0x10d00, 0x3538, 0x60, 0x48};
+constexpr Fields kLegacyCompactFields{0x45a4, 0x4120, 0x58, 0x40};
+constexpr Fields kLegacySmallFields{0x39f8, 0x3538, 0x60, 0x48};
+constexpr Fields kLegacyLargeFields{0x45c8, 0x4138, 0x60, 0x48};
+constexpr Fields kLegacyDirectFields{0x45e4, 0x4150, 0x4158, 0x42c0};
+bool UsesPacer(const Layout& layout) noexcept
+{
+    return layout.profile == Profile::eLegacyPacer || layout.profile == Profile::eLegacyCompact
+        || layout.profile == Profile::eLegacySmall || layout.profile == Profile::eLegacyLarge;
+}
 const Fields* ProfileFields(const Layout& layout) noexcept
 {
     switch (layout.profile)
     {
     case Profile::eCompact: return &kCompactFields;
     case Profile::eExtended: return &kExtendedFields;
+    case Profile::eLegacyPacer: return &kPacerFields;
+    case Profile::eLegacyCompact: return &kLegacyCompactFields;
+    case Profile::eLegacySmall: return &kLegacySmallFields;
+    case Profile::eLegacyLarge: return &kLegacyLargeFields;
+    case Profile::eLegacyDirect: return &kLegacyDirectFields;
     default: return nullptr;
     }
 }
@@ -125,7 +144,8 @@ struct Image
             && Contains(reinterpret_cast<uintptr_t>(IMAGE_FIRST_SECTION(nt)),
                 nt->FileHeader.NumberOfSections * sizeof(IMAGE_SECTION_HEADER));
     }
-    template<size_t N> uintptr_t Unique(const uint8_t (&pattern)[N], size_t displacement = SIZE_MAX) const noexcept
+    template<size_t N> uintptr_t Unique(const uint8_t (&pattern)[N], size_t displacement = SIZE_MAX,
+        size_t secondDisplacement = SIZE_MAX) const noexcept
     {
         uintptr_t result = 0;
         const auto* sections = IMAGE_FIRST_SECTION(nt);
@@ -141,7 +161,9 @@ struct Image
                 const auto* candidate = reinterpret_cast<const uint8_t*>(address);
                 bool same = true;
                 for (size_t j = 0; same && j < N; ++j)
-                    same = (displacement != SIZE_MAX && j >= displacement && j - displacement < 4) || candidate[j] == pattern[j];
+                    same = (displacement != SIZE_MAX && j >= displacement && j - displacement < 4)
+                        || (secondDisplacement != SIZE_MAX && j >= secondDisplacement && j - secondDisplacement < 4)
+                        || candidate[j] == pattern[j];
                 if (!same) continue;
                 size_t decoded = 0;
                 while (decoded < N)
@@ -178,19 +200,29 @@ bool ReadUnchecked(const Layout& layout, Capacity& value) noexcept
     const Fields* fields = ProfileFields(layout);
     if (!fields || !layout.contextSlot) return false;
     value.context = Field<uintptr_t>(layout.contextSlot, 0);
-    if (!value.context || Field<uint32_t>(value.context, fields->maximum) != ampere_mfg::kMaximumGeneratedFrames
-        || Field<uint32_t>(value.context, fields->count) != ampere_mfg::kPresentationBuffers) return false;
+    if (!value.context || (layout.maximumGeneratedFrames != 1
+            && layout.maximumGeneratedFrames != ampere_mfg::kMaximumGeneratedFrames)
+        || Field<uint32_t>(value.context, fields->maximum) != layout.maximumGeneratedFrames) return false;
+    value.maximumGeneratedFrames = layout.maximumGeneratedFrames;
+    const bool legacy = UsesPacer(layout);
+    value.ringOwner = legacy ? Field<uintptr_t>(value.context, 0x18) : value.context;
+    if (!value.ringOwner) return false;
+    value.bufferCount = Field<uint32_t>(value.ringOwner, fields->count);
+    if (value.bufferCount < value.maximumGeneratedFrames + 1
+        || value.bufferCount > value.buffers.size()
+        || (layout.maximumGeneratedFrames != 1 && value.bufferCount != value.maximumGeneratedFrames + 1)) return false;
     value.swapchain = Field<uintptr_t>(value.context, fields->swapchain);
-    value.buffersBegin = Field<uintptr_t>(value.context, fields->buffers);
-    value.buffersEnd = Field<uintptr_t>(value.context, fields->buffers + 8);
-    value.buffersCapacity = Field<uintptr_t>(value.context, fields->buffers + 16);
+    value.buffersBegin = Field<uintptr_t>(value.ringOwner, fields->buffers);
+    value.buffersEnd = Field<uintptr_t>(value.ringOwner, fields->buffers + 8);
+    value.buffersCapacity = Field<uintptr_t>(value.ringOwner, fields->buffers + 16);
+    const size_t bytes = value.bufferCount * sizeof(uintptr_t);
     if (!value.swapchain || !value.buffersBegin || value.buffersBegin % alignof(uintptr_t)
-        || value.buffersBegin > UINTPTR_MAX - sizeof(value.buffers)
-        || value.buffersEnd != value.buffersBegin + sizeof(value.buffers)
+        || value.buffersBegin > UINTPTR_MAX - bytes
+        || value.buffersEnd != value.buffersBegin + bytes
         || value.buffersCapacity < value.buffersEnd
         || value.buffersCapacity - value.buffersBegin > 6 * sizeof(uintptr_t)) return false;
-    memcpy(value.buffers.data(), reinterpret_cast<void*>(value.buffersBegin), sizeof(value.buffers));
-    for (size_t i = 0; i < value.buffers.size(); ++i)
+    memcpy(value.buffers.data(), reinterpret_cast<void*>(value.buffersBegin), bytes);
+    for (size_t i = 0; i < value.bufferCount; ++i)
     {
         if (!value.buffers[i]) return false;
         for (size_t j = 0; j < i; ++j)
@@ -210,31 +242,72 @@ bool Discover(HMODULE module, Layout& layout) noexcept
         const uintptr_t compactContext = image.Unique(kCompactContextWindow, 32);
         const bool extended = extendedContext && image.Unique(kMaximumWindow)
             && image.Unique(kSwapchainCountWindow) && image.Unique(kBufferLoopWindow);
+        // OTA 2.14.16: the extended fields with the moved count override and its own Create frame.
+        const bool extendedOverride = extendedContext && image.Unique(kMaximumWindow)
+            && image.Unique(kOverrideSwapchainCountWindow) && image.Unique(kBufferLoopWindow);
         const bool compact = compactContext && image.Unique(kCompactMaximumWindow)
             && image.Unique(kCompactSwapchainCountWindow) && image.Unique(kCompactBufferLoopWindow);
-        if (extended == compact) return false;
-        const uintptr_t prologue = compact ? compactContext : extendedContext;
-        const uintptr_t create = image.Unique(kCreateWindow);
+        const uintptr_t pacerContext = image.Unique(kPacerContextWindow, 3, 10);
+        const uintptr_t otaPacerContext = image.Unique(kOtaPacerContextWindow, 3, 10);
+        const uintptr_t legacyCompactContext = image.Unique(kLegacyCompactContextWindow, 3, 10);
+        const bool pacer = pacerContext && image.Unique(kPacerMaximumWindow) && image.Unique(kPacerBuffersWindow);
+        const bool otaPacer = otaPacerContext && image.Unique(kOtaPacerMaximumWindow) && image.Unique(kPacerBuffersWindow);
+        const bool legacyCompact = legacyCompactContext && image.Unique(kLegacyCompactMaximumWindow)
+            && image.Unique(kLegacyCompactBuffersWindow);
+        const uintptr_t smallContext = image.Unique(kLegacySmallContextWindow, 3, 10);
+        const uintptr_t largeContext = image.Unique(kLegacyLargeContextWindow, 3, 10);
+        const bool small = smallContext && image.Unique(kLegacySmallMaximumWindow) && image.Unique(kLegacySmallBuffersWindow);
+        const bool large = largeContext && image.Unique(kLegacyLargeMaximumWindow) && image.Unique(kLegacyLargeBuffersWindow);
+        const bool direct = compactContext && image.Unique(kLegacyDirectMaximumWindow)
+            && image.Unique(kLegacyDirectCountWindow) && image.Unique(kLegacyDirectBuffersWindow);
+        // Small-wrapper code over the pacer context: the pacer's fields and pre-frame-ID ordinals.
+        const bool latePacer = smallContext && image.Unique(kLatePacerMaximumWindow)
+            && image.Unique(kLatePacerBuffersWindow);
+        if (static_cast<unsigned>(extended) + extendedOverride + compact + pacer + otaPacer + latePacer + legacyCompact + small + large
+            + direct != 1) return false;
+        const bool pacerFields = pacer || otaPacer || latePacer;
+        const bool legacy = pacerFields || legacyCompact || small || large;
+        const bool fixedTwoX = legacy || direct;
+        const uintptr_t prologue = compact ? compactContext : extended || extendedOverride ? extendedContext
+            : pacer ? pacerContext : otaPacer ? otaPacerContext : small || latePacer ? smallContext
+            : large ? largeContext : direct ? compactContext : legacyCompactContext;
+        const uintptr_t create = pacer || otaPacer ? image.Unique(kPacerCreateWindow)
+            : small || latePacer ? image.Unique(kLegacySmallCreateWindow) : large ? image.Unique(kLegacyLargeCreateWindow)
+            : direct ? image.Unique(kLegacyDirectCreateWindow)
+            : legacyCompact ? image.Unique(kLegacyCompactCreateWindow)
+            : extendedOverride ? image.Unique(kOverrideCreateWindow) : image.Unique(kCreateWindow);
         if (!prologue || !create) return false;
         // mov rbx,[rip+disp32] in the verified swap-chain entry.
-        const uintptr_t slot = prologue + 36 + Field<int32_t>(prologue, 32);
+        const uintptr_t slot = legacy ? prologue + 7 + Field<int32_t>(prologue, 3)
+            : prologue + 36 + Field<int32_t>(prologue, 32);
+        if (legacy)
+        {
+            const uintptr_t auxiliary = prologue + 14 + Field<int32_t>(prologue, 10);
+            if (!image.Contains(auxiliary, sizeof(void*)) || !Range(auxiliary, sizeof(void*), MEM_IMAGE, module)) return false;
+        }
         if (!image.Contains(slot, sizeof(void*)) || slot % alignof(void*)
             || !Range(slot, sizeof(void*), MEM_IMAGE, module)) return false;
         const auto& directory = image.nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
         if (!directory.Size || directory.Size % sizeof(RUNTIME_FUNCTION)
             || !image.Contains(image.base + directory.VirtualAddress, directory.Size)) return false;
         const auto* functions = reinterpret_cast<const RUNTIME_FUNCTION*>(image.base + directory.VirtualAddress);
-        uintptr_t end = 0;
+        uintptr_t begin = 0, end = 0;
         for (size_t i = 0; i < directory.Size / sizeof(RUNTIME_FUNCTION); ++i)
         {
-            if (functions[i].BeginAddress != create - image.base) continue;
+            if (!(functions[i].BeginAddress <= create - image.base && create - image.base < functions[i].EndAddress)) continue;
+            if (!fixedTwoX && functions[i].BeginAddress != create - image.base) return false;
             if (end || functions[i].EndAddress <= functions[i].BeginAddress
                 || functions[i].EndAddress - functions[i].BeginAddress > 4096
-                || !image.Contains(create, functions[i].EndAddress - functions[i].BeginAddress)) return false;
+                || !image.Contains(image.base + functions[i].BeginAddress,
+                    functions[i].EndAddress - functions[i].BeginAddress)) return false;
+            begin = image.base + functions[i].BeginAddress;
             end = image.base + functions[i].EndAddress;
         }
         if (!end) return false;
-        layout = {module, slot, create, end, compact ? Profile::eCompact : Profile::eExtended};
+        layout = {module, slot, begin, end, compact ? Profile::eCompact : extended || extendedOverride ? Profile::eExtended
+            : pacerFields ? Profile::eLegacyPacer : small ? Profile::eLegacySmall
+            : large ? Profile::eLegacyLarge : direct ? Profile::eLegacyDirect : Profile::eLegacyCompact,
+            fixedTwoX ? 1u : ampere_mfg::kMaximumGeneratedFrames, !pacerFields};
         return true;
     }
     __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
@@ -246,9 +319,23 @@ bool BeforeSwapchain(const Layout& layout) noexcept
         const Fields* fields = ProfileFields(layout);
         if (!fields || !Range(layout.contextSlot, sizeof(void*), MEM_IMAGE, layout.module)) return false;
         const uintptr_t context = Field<uintptr_t>(layout.contextSlot, 0);
-        return context && Range(context, fields->maximum + sizeof(uint32_t), MEM_PRIVATE)
+        if (!context || !Range(context, fields->maximum + sizeof(uint32_t), MEM_PRIVATE)
+            || Field<uintptr_t>(context, fields->swapchain)) return false;
+        const bool legacy = UsesPacer(layout);
+        const uintptr_t ring = legacy ? Field<uintptr_t>(context, 0x18) : context;
+        // sl.common queries NGX capabilities before the legacy DLSS-G plugin's
+        // onStartup allocates its pacer. A verified, current context with no
+        // swapchain/pacer is still before allocation. This only bootstraps the
+        // capability; Read() at Create continues to require the actual ring.
+        if (legacy && !ring)
+            return Field<uintptr_t>(layout.contextSlot, 0) == context
+                && !Field<uintptr_t>(context, fields->swapchain)
+                && !Field<uintptr_t>(context, 0x18);
+        return ring && (!legacy || Range(ring, fields->count + sizeof(uint32_t), MEM_PRIVATE))
+            && Field<uintptr_t>(ring, fields->buffers) == Field<uintptr_t>(ring, fields->buffers + 8)
+            && Field<uintptr_t>(layout.contextSlot, 0) == context
             && !Field<uintptr_t>(context, fields->swapchain)
-            && Field<uintptr_t>(context, fields->buffers) == Field<uintptr_t>(context, fields->buffers + 8);
+            && (!legacy || Field<uintptr_t>(context, 0x18) == ring);
     }
     __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
@@ -261,9 +348,14 @@ bool Read(const Layout& layout, Capacity& capacity) noexcept
         if (!fields || !Range(layout.contextSlot, sizeof(void*), MEM_IMAGE, layout.module)) return false;
         const uintptr_t context = Field<uintptr_t>(layout.contextSlot, 0);
         if (!context || !Range(context, fields->maximum + sizeof(uint32_t), MEM_PRIVATE)) return false;
-        const uintptr_t buffers = Field<uintptr_t>(context, fields->buffers);
+        const bool legacy = UsesPacer(layout);
+        const uintptr_t ring = legacy ? Field<uintptr_t>(context, 0x18) : context;
+        if (!ring || (legacy && !Range(ring, fields->count + sizeof(uint32_t), MEM_PRIVATE))) return false;
+        const uint32_t count = Field<uint32_t>(ring, fields->count);
+        if (count < 2 || count > ampere_mfg::kPresentationBuffers) return false;
+        const uintptr_t buffers = Field<uintptr_t>(ring, fields->buffers);
         Capacity candidate{};
-        if (!Range(buffers, sizeof(candidate.buffers), MEM_PRIVATE) || !ReadUnchecked(layout, candidate)) return false;
+        if (!Range(buffers, count * sizeof(uintptr_t), MEM_PRIVATE) || !ReadUnchecked(layout, candidate)) return false;
         // Verify that the fields did not change while taking the snapshot.
         Capacity again{};
         if (!ReadUnchecked(layout, again) || again != candidate) return false;
@@ -307,14 +399,18 @@ Observation InspectFailure(const Layout& layout) noexcept
         if (!Range(value.context, fields->maximum + sizeof(uint32_t), MEM_PRIVATE)) return result;
         result.contextReadable = true;
         result.maximum = Field<uint32_t>(value.context, fields->maximum);
-        result.bufferCount = Field<uint32_t>(value.context, fields->count);
         value.swapchain = Field<uintptr_t>(value.context, fields->swapchain);
-        value.buffersBegin = Field<uintptr_t>(value.context, fields->buffers);
-        value.buffersEnd = Field<uintptr_t>(value.context, fields->buffers + 8);
-        value.buffersCapacity = Field<uintptr_t>(value.context, fields->buffers + 16);
-        if (value.buffersBegin % alignof(uintptr_t)
-            || !Range(value.buffersBegin, sizeof(value.buffers), MEM_PRIVATE)) return result;
-        memcpy(value.buffers.data(), reinterpret_cast<void*>(value.buffersBegin), sizeof(value.buffers));
+        const bool legacy = UsesPacer(layout);
+        value.ringOwner = legacy ? Field<uintptr_t>(value.context, 0x18) : value.context;
+        if (!value.ringOwner || (legacy && !Range(value.ringOwner, fields->count + sizeof(uint32_t), MEM_PRIVATE))) return result;
+        result.bufferCount = Field<uint32_t>(value.ringOwner, fields->count);
+        value.maximumGeneratedFrames = result.maximum; value.bufferCount = result.bufferCount;
+        value.buffersBegin = Field<uintptr_t>(value.ringOwner, fields->buffers);
+        value.buffersEnd = Field<uintptr_t>(value.ringOwner, fields->buffers + 8);
+        value.buffersCapacity = Field<uintptr_t>(value.ringOwner, fields->buffers + 16);
+        if (result.bufferCount < 2 || result.bufferCount > value.buffers.size() || value.buffersBegin % alignof(uintptr_t)
+            || !Range(value.buffersBegin, result.bufferCount * sizeof(uintptr_t), MEM_PRIVATE)) return result;
+        memcpy(value.buffers.data(), reinterpret_cast<void*>(value.buffersBegin), result.bufferCount * sizeof(uintptr_t));
         result.buffersReadable = true;
     }
     __except (EXCEPTION_EXECUTE_HANDLER) { result.buffersReadable = false; }

@@ -17,7 +17,13 @@ extern "C" __declspec(dllexport) FARPROC WINAPI FixtureVulkanProc(const char* na
     return GetProcAddress(vulkanLoader,name);
 }
 // Minimal ABI fixture, not an NVIDIA binary. It never loads a plugin/provider.
+// The hotpatch build exports an assembly slInit with the real interposer's
+// hotpatchable entry (slinit_fixture_hotpatch.asm) that jumps to this body.
+#if defined(FIXTURE_HOTPATCH_SLINIT)
+extern "C" sl::Result FixtureSlInitBody(const sl::Preferences&,uint64_t) {
+#else
 extern "C" __declspec(dllexport) sl::Result slInit(const sl::Preferences&,uint64_t) {
+#endif
     ++calls;
     if(cacheVulkan){
         vulkanLoader=LoadLibraryW(L"vulkan-1.dll");
@@ -28,7 +34,21 @@ extern "C" __declspec(dllexport) sl::Result slInit(const sl::Preferences&,uint64
     return sl::Result::eOk;
 }
 extern "C" __declspec(dllexport) unsigned WINAPI FixtureInitCalls(){return calls.load();}
-extern "C" __declspec(dllexport) sl::Result slSetD3DDevice(void*){return sl::Result::eOk;}
+// Exercise the host's intercepted loader return without a feature lookup.
+extern "C" __declspec(dllexport) HMODULE WINAPI FixtureLoadProbe(const wchar_t* path){return LoadLibraryW(path);}
+// Manual hooking: an identity upgrade. The real interposer returns its own
+// proxy; the menu's contract is the same for any returned DXGI object.
+static std::atomic<unsigned> upgrades{0};
+extern "C" __declspec(dllexport) sl::Result slUpgradeInterface(void** baseInterface){
+    if(!baseInterface||!*baseInterface)return sl::Result::eErrorInvalidParameter;
+    ++upgrades;
+    return sl::Result::eOk;
+}
+extern "C" __declspec(dllexport) unsigned WINAPI FixtureUpgradeCalls(){return upgrades.load();}
+// Counts calls so the entry is long enough for a relocated entry detour.
+static std::atomic<unsigned> deviceSets{0};
+extern "C" __declspec(dllexport) sl::Result slSetD3DDevice(void*){++deviceSets;return sl::Result::eOk;}
+extern "C" __declspec(dllexport) unsigned WINAPI FixtureDeviceSets(){return deviceSets.load();}
 static unsigned lookupMode = 0;
 extern "C" __declspec(dllexport) void FixtureLookupMode(unsigned mode){lookupMode=mode;}
 extern "C" __declspec(dllexport) sl::Result slGetFeatureFunction(sl::Feature, const char* name, void*& function){

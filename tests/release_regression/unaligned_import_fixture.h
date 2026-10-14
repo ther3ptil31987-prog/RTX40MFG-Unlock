@@ -7,6 +7,9 @@
 // executable's mapped .data section. Normal callsites retain their original
 // IATs, so the candidate must catch real public-entry calls rather than merely
 // overwriting the synthetic slots. No game file is used or changed.
+// The aligned variant relocates only USER32 to an eight-byte-aligned copy,
+// as in the Microsoft Store MSFS 2024 executable whose aligned input imports
+// sit in a page that turns executable after startup.
 namespace unaligned_fixture {
 alignas(16) inline std::array<std::array<unsigned char,32768>,3> storage{};
 inline std::array<size_t,3> sizes{};
@@ -14,20 +17,24 @@ inline std::array<std::array<unsigned char,32768>,3> baseline{};
 inline DWORD inputProtection = 0;
 inline DWORD graphicsProtection = 0;
 inline size_t tables = 2;
+inline size_t offset = 4;
+inline bool inputOnly = false;
 inline bool MakeInputPagesExecutable() {
     DWORD previous=0;
-    if(!sizes[1]||!VirtualProtect(storage[1].data()+4,sizes[1],PAGE_EXECUTE_READWRITE,&previous))return false;
+    if(!sizes[1]||!VirtualProtect(storage[1].data()+offset,sizes[1],PAGE_EXECUTE_READWRITE,&previous))return false;
     inputProtection=PAGE_EXECUTE_READWRITE;
     return true;
 }
 inline bool MakeGraphicsPagesExecutable() {
     DWORD previous=0;
-    if(!sizes[2]||!VirtualProtect(storage[2].data()+4,sizes[2],PAGE_EXECUTE_READWRITE,&previous))return false;
+    if(!sizes[2]||!VirtualProtect(storage[2].data()+offset,sizes[2],PAGE_EXECUTE_READWRITE,&previous))return false;
     graphicsProtection=PAGE_EXECUTE_READWRITE;
     return true;
 }
-inline bool Prepare(bool graphics=false) {
+inline bool Prepare(bool graphics=false,bool alignedInput=false) {
     tables=graphics?3:2;
+    offset=alignedInput?8:4;
+    inputOnly=alignedInput;
     auto* base=reinterpret_cast<unsigned char*>(GetModuleHandleW(nullptr));
     const auto* dos=reinterpret_cast<IMAGE_DOS_HEADER*>(base);
     const auto* nt=reinterpret_cast<IMAGE_NT_HEADERS64*>(base+dos->e_lfanew);
@@ -36,33 +43,36 @@ inline bool Prepare(bool graphics=false) {
     for(auto* imp=imports;imp->Name;++imp) {
         const auto* name=reinterpret_cast<char*>(base+imp->Name);
         const int index=!_stricmp(name,"KERNEL32.dll")?0:!_stricmp(name,"USER32.dll")?1:graphics&&!_stricmp(name,"dxgi.dll")?2:-1;
-        if(index<0)continue;
+        if(index<0||(inputOnly&&index!=1))continue;
         auto* original=reinterpret_cast<uint64_t*>(base+imp->FirstThunk);
         size_t count=0;while(count<4090&&original[count])++count;
         if(count==4090)return false;
         sizes[index]=(count+1)*8;
-        memcpy(storage[index].data()+4,original,sizes[index]);
-        memcpy(baseline[index].data(),storage[index].data()+4,sizes[index]);
-        const auto offset=storage[index].data()+4-base;
-        if(offset<0 || static_cast<size_t>(offset)+sizes[index]>nt->OptionalHeader.SizeOfImage)return false;
+        memcpy(storage[index].data()+offset,original,sizes[index]);
+        memcpy(baseline[index].data(),storage[index].data()+offset,sizes[index]);
+        const auto relative=storage[index].data()+offset-base;
+        if(relative<0 || static_cast<size_t>(relative)+sizes[index]>nt->OptionalHeader.SizeOfImage)return false;
         DWORD old=0,unused=0;
         if(!VirtualProtect(&imp->FirstThunk,sizeof(DWORD),PAGE_READWRITE,&old))return false;
-        imp->FirstThunk=static_cast<DWORD>(offset);
+        imp->FirstThunk=static_cast<DWORD>(relative);
         if(!VirtualProtect(&imp->FirstThunk,sizeof(DWORD),old,&unused))return false;
-        if(reinterpret_cast<uintptr_t>(storage[index].data()+4)%8!=4)return false;
+        if(reinterpret_cast<uintptr_t>(storage[index].data()+offset)%8!=(inputOnly?0u:4u))return false;
         ++found;
     }
-    return found==tables;
+    return found==(inputOnly?1:tables);
 }
 inline bool Unchanged(){
-    for(size_t i=0;i<tables;++i)if(!sizes[i]||memcmp(storage[i].data()+4,baseline[i].data(),sizes[i]))return false;
+    for(size_t i=0;i<tables;++i){
+        if(inputOnly&&i!=1)continue;
+        if(!sizes[i]||memcmp(storage[i].data()+offset,baseline[i].data(),sizes[i]))return false;
+    }
     if(inputProtection){
         MEMORY_BASIC_INFORMATION memory{};
-        if(!VirtualQuery(storage[1].data()+4,&memory,sizeof(memory))||memory.Protect!=inputProtection)return false;
+        if(!VirtualQuery(storage[1].data()+offset,&memory,sizeof(memory))||memory.Protect!=inputProtection)return false;
     }
     if(graphicsProtection){
         MEMORY_BASIC_INFORMATION memory{};
-        if(!VirtualQuery(storage[2].data()+4,&memory,sizeof(memory))||memory.Protect!=graphicsProtection)return false;
+        if(!VirtualQuery(storage[2].data()+offset,&memory,sizeof(memory))||memory.Protect!=graphicsProtection)return false;
     }
     return true;
 }

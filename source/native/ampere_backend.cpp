@@ -5,6 +5,8 @@
 #include "gpu_dispatch.h"
 #endif
 #include "ampere_patterns.h"
+#include "ampere_provider_arch.h"
+#include "adapter_discovery.h"
 #include "ampere_host_contracts.h"
 #include "ampere_policy.h"
 #include "dlssg_provider_policy.h"
@@ -100,6 +102,7 @@ std::atomic<uint64_t> gActiveWrapperGeneration{0};
 std::atomic_flag gWrapperWriter = ATOMIC_FLAG_INIT;
 std::atomic<int32_t> gLastCreateCount{-1};
 std::atomic<uint64_t> gCreatedFeatures{0}, gSubmittedBatches{0};
+std::atomic<uint64_t> gFailedBatches{0}, gRecoveredBatches{0}, gOutputReuseLatches{0};
 std::atomic<uint64_t> gCreateAttempts{0}, gCreateBlockedBeforeProvider{0}, gEvaluateAttempts{0};
 std::atomic<bool> gPipelineCreateObserved{false};
 std::atomic<uint64_t> gCandidateProviderVersion{0};
@@ -263,52 +266,6 @@ bool FunctionBounds(const Image& image, uintptr_t entry, uint32_t& begin, uint32
     return false;
 }
 
-// NGX may outline Create's architecture validation into a helper far from
-// its public export. Inspect only that function and its decoded direct callees;
-// neighboring API implementations and unrelated image-wide matches grant no
-// coverage. Resolve before installing our Create entry detour, then retain the
-// owned addresses for the scoped startup/Create patches.
-uintptr_t FindCreateValidation(const Image& image, uintptr_t create) noexcept
-{
-    uint32_t begin = 0, end = 0;
-    if (!FunctionBounds(image, create, begin, end)) return 0;
-    std::array<uintptr_t, 65> functions{};
-    functions[0] = create;
-    size_t count = 1;
-    for (uintptr_t cursor = create; cursor < image.base + end;)
-    {
-        hde64s ins{};
-        const unsigned length = hde64_disasm(reinterpret_cast<void*>(cursor), &ins);
-        if (!length || (ins.flags & F_ERROR) || length > image.base + end - cursor) return 0;
-        if (ins.opcode == 0xe8)
-        {
-            int32_t displacement = 0;
-            memcpy(&displacement, reinterpret_cast<void*>(cursor + length - 4), sizeof(displacement));
-            const uintptr_t target = cursor + length + displacement;
-            uint32_t childBegin = 0, childEnd = 0;
-            if (FunctionBounds(image, target, childBegin, childEnd)
-                && std::find(functions.begin(), functions.begin() + count, target) == functions.begin() + count)
-            {
-                if (count == functions.size()) return 0;
-                functions[count++] = target;
-            }
-        }
-        cursor += length;
-    }
-    uintptr_t selected = 0;
-    for (size_t i = 0; i < count; ++i)
-    {
-        if (!FunctionBounds(image, functions[i], begin, end)) return 0;
-        unsigned matches = 0;
-        const uintptr_t candidate = FindPattern(image, kAmpereNgxCreateValidationPattern.data(),
-            kAmpereNgxCreateValidationPatternMask.data(), kAmpereNgxCreateValidationPattern.size(),
-            kAmpereNgxCreateValidationBranchOffset, begin, end, &matches);
-        if (matches > 1 || (candidate && selected)) return 0;
-        if (candidate) selected = candidate;
-    }
-    return selected;
-}
-
 struct Patch
 {
     uintptr_t address = 0;
@@ -346,6 +303,7 @@ struct Route
     bool runtime = false;
     bool prepared = false;
     bool runtimeInspected = false;
+    bool runtimeDriverOwned = false;
     bool deviceGateReady = false;
     bool legacyPresetReady = false;
     uint32_t nativeMaximum = 0;
@@ -355,7 +313,7 @@ struct Route
     ampere_wrapper::Layout wrapperLayout{};
     entry_detour::Handle create{}, evaluate{}, release{}, requirements{}, parameters{}, preset{};
     entry_detour::ForwardPreCall beforeCreate{}, beforeEvaluate{};
-    Patch metadata{}, validation{}, availability{};
+    Patch availability{};
     std::array<ampere_policy::Feature, 16> features{};
     uint64_t nextFeatureLifetime = 0;
     struct OtherFeature
@@ -553,7 +511,7 @@ thread_local EvaluationInput gEvaluationInput{};
 
 NVSDK_NGX_Result InvokeCreate(Route& route, CreateFn original,
     ID3D12GraphicsCommandList* command, NVSDK_NGX_Feature feature,
-    const NVSDK_NGX_Parameter* parameters, NVSDK_NGX_Handle** output, bool& restored, Route*& provider,
+    const NVSDK_NGX_Parameter* parameters, NVSDK_NGX_Handle** output, Route*& provider,
     Route& wrapper, const ampere_wrapper::Capacity& capacity, uint64_t& createAttemptToken)
 {
     NVSDK_NGX_Result result = kRejected;
@@ -579,7 +537,6 @@ NVSDK_NGX_Result InvokeCreate(Route& route, CreateFn original,
         gCallingRuntime = nullptr; gCreatingProvider = nullptr;
         gCreatingDispatch = {};
         gCallingWrapper = nullptr; gCreatingCapacity = {};
-        restored = !route.runtime || route.validation.Set(false);
         // /EHsc does not unwind an outer C++ scope for a caught SEH exception.
         if (!completed) AbortCurrentCreateAttempt();
     }
@@ -604,7 +561,8 @@ NVSDK_NGX_Result InvokeEvaluate(Route& route, EvaluateFn original, ID3D12Graphic
     __finally
     {
         providerExecuted = gProviderEvaluated;
-        if (result != NVSDK_NGX_Result_Success || !providerExecuted) feature.batch.failed = true;
+        if (result != NVSDK_NGX_Result_Success || !providerExecuted)
+            feature.batch.Fail(gEvaluationInput.frame, gEvaluationInput.count, gEvaluationInput.index);
         gEvaluationInput = {};
         --gEvaluateDepth; gCallingRuntime = nullptr; gCallingFeature = nullptr;
     }
@@ -798,13 +756,15 @@ Route* ActiveWrapper() noexcept
 bool FeatureCapacityCurrent(const ampere_policy::Feature& feature) noexcept
 {
     auto* wrapper = ActiveWrapper();
-    return wrapper && reinterpret_cast<uintptr_t>(wrapper->module) == feature.wrapper
+    return wrapper && ampere_policy::CapacityValid(feature.createdGeneratedFrames)
+        && feature.capacity.maximumGeneratedFrames == feature.createdGeneratedFrames
+        && reinterpret_cast<uintptr_t>(wrapper->module) == feature.wrapper
         && wrapper->generation == feature.wrapperGeneration
         && ampere_wrapper::Matches(wrapper->wrapperLayout, feature.capacity);
 }
 
 bool ReadEvaluationInput(const NVSDK_NGX_Parameter* parameters, EvaluationInput& input,
-    EvaluationReads* observation = nullptr) noexcept
+    EvaluationReads* observation = nullptr, uint64_t legacySerial = 0) noexcept
 {
     input = {};
     EvaluationReads reads{};
@@ -823,9 +783,14 @@ bool ReadEvaluationInput(const NVSDK_NGX_Parameter* parameters, EvaluationInput&
         reads.output = parameters->Get("DLSSG.OutputInterpolated", &output);
         if (observation) *observation = reads;
         input.frame = reinterpret_cast<uintptr_t>(frame);
+        // The certified old pacer ABI predates BackbufferFrameID. Its fixed
+        // one-output calls use a feature-local ordinal for batch bookkeeping;
+        // NGX parameters and the provider's temporal inputs are not rewritten.
+        const bool legacyFrame = reads.frame != NVSDK_NGX_Result_Success && legacySerial != 0;
+        if (legacyFrame) input.frame = legacySerial;
         input.output = static_cast<ID3D12Resource*>(output);
         return reads.count == NVSDK_NGX_Result_Success && reads.index == NVSDK_NGX_Result_Success
-            && reads.frame == NVSDK_NGX_Result_Success && reads.output == NVSDK_NGX_Result_Success
+            && (reads.frame == NVSDK_NGX_Result_Success || legacyFrame) && reads.output == NVSDK_NGX_Result_Success
             && ampere_policy::EvaluationCountValid(input.count) && input.output != nullptr;
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
@@ -914,8 +879,7 @@ void ReportEvaluationSubmissionFailure(const Route& route, const ampere_policy::
     ID3D12GraphicsCommandList* command, const EvaluationInput& input, const EvaluationReads& reads,
     const D3D12_RESOURCE_DESC& outputDesc, NVSDK_NGX_Result result, bool providerEntered) noexcept
 {
-    // The caller poisons this exact feature after a failed native submission;
-    // later calls cannot reach this diagnostic again before a new Create.
+    // One snapshot per exact feature lifetime, even if later batches recover.
     // Keep all additional COM queries off the successful evaluation path.
     if (result == NVSDK_NGX_Result_Success && providerEntered) return;
     uint32_t commandType = UINT32_MAX;
@@ -943,11 +907,22 @@ void ReportEvaluationSubmissionFailure(const Route& route, const ampere_policy::
     __except (EXCEPTION_EXECUTE_HANDLER) { queryException = true; }
 
     wchar_t message[1024]{};
-    swprintf_s(message, L"Ampere first evaluation submission failure: result=0x%08X providerEntered=%u "
-        L"count=%d index=%d frame=%llu output=%p boundary=%u",
-        static_cast<uint32_t>(result), static_cast<unsigned>(providerEntered), input.count, input.index,
+    swprintf_s(message, L"Ampere first evaluation submission failure: call=NVSDK_NGX_D3D12_EvaluateFeature "
+        L"result=0x%08X platformError=%u providerEntered=%u count=%d index=%d frame=%llu output=%p boundary=%u",
+        static_cast<uint32_t>(result), static_cast<unsigned>(result == NVSDK_NGX_Result_FAIL_PlatformError),
+        static_cast<unsigned>(providerEntered), input.count, input.index,
         input.frame, input.output, FailureCode());
     Report(message);
+    for (HMODULE owner : {route.module, reinterpret_cast<HMODULE>(feature.provider), reinterpret_cast<HMODULE>(feature.wrapper)})
+    {
+        wchar_t path[2048]{};
+        dlssg_provider_policy::VersionTriplet version{};
+        const DWORD length = GetModuleFileNameW(owner, path, static_cast<DWORD>(std::size(path)));
+        const bool versionRead = length && length < std::size(path) && dlssg_provider_policy::ReadProviderVersion(path, version);
+        swprintf_s(message, L"Ampere evaluation failure module: owner=%p version=%u.%u.%u versionRead=%u path=%.800ls",
+            owner, version.major, version.minor, version.build, static_cast<unsigned>(versionRead), path);
+        Report(message);
+    }
     swprintf_s(message, L"Ampere evaluation failure device: command=%p type=%u getDevice=0x%08X "
         L"device=%p expectedDevice=%p matches=%u removedReasonRead=%u removedReason=0x%08X exception=%u "
         L"luid=0x%llX handle=%p lifetime=%llu runtime=%p/%llu provider=%p/%llu wrapper=%p/%llu publication=0x%llX",
@@ -1028,7 +1003,7 @@ template<size_t I> __declspec(noinline) bool Preset(uint32_t setting, uint32_t* 
 
     // Route metadata is no longer locked when the first read loads config or
     // calls the provider. Image ownership avoids acquiring the loader lock.
-    uint32_t observed = dlssg_preset::FreezeSelection();
+    uint32_t observed = dlssg_preset::EffectiveSelection(dlssg_preset::FreezeSelection(), provider);
     const bool overridden = observed != 0;
     bool result = false;
     if (overridden)
@@ -1165,13 +1140,13 @@ template<size_t I> NVSDK_NGX_Result NVSDK_CONV Create(ID3D12GraphicsCommandList*
     // MultiFrameCount is an evaluation input in the target wrapper, not its
     // creation/allocation contract. Observe it without rewriting or gating on it.
     ObserveCreationCount(parameters);
-    if (!Ready() || route.startupMaximum != ampere_policy::kMaximumGeneratedFrames
+    if (!Ready() || !ampere_policy::CapacityValid(route.startupMaximum)
         || !parameters) { Reject(122); return kRejected; }
     auto* wrapper = ActiveWrapper();
     ampere_wrapper::Capacity capacity{};
     const bool callerProven = wrapper && ampere_wrapper::CreationOnStack(wrapper->wrapperLayout);
     const bool buffersProven = wrapper && ampere_wrapper::Read(wrapper->wrapperLayout, capacity);
-    if (!callerProven || !buffersProven)
+    if (!callerProven || !buffersProven || capacity.maximumGeneratedFrames != route.startupMaximum)
     {
         wchar_t message[160]{};
         swprintf_s(message, L"Ampere MFG allocation rejected: wrapper=%p generation=%llu caller=%u buffers=%u",
@@ -1181,17 +1156,14 @@ template<size_t I> NVSDK_NGX_Result NVSDK_CONV Create(ID3D12GraphicsCommandList*
         gPresentationBuffers.store(0); Reject(171); return kRejected;
     }
     createAttempt.BindCapacity(*wrapper, capacity);
-    gPresentationBuffers.store(static_cast<uint32_t>(capacity.buffers.size()));
+    gPresentationBuffers.store(capacity.bufferCount);
     auto free = std::find_if(route.features.begin(), route.features.end(), [](const auto& f) { return !f.handle; });
     if (free == route.features.end()) { Reject(123); return kRejected; }
-    if (route.runtime && (!route.validation.address || !route.validation.Set(true)))
-    { Reject(152); return kRejected; }
-    bool restored = false;
     Route* provider = nullptr;
     attempt.forwarded = true;
     uint64_t createAttemptToken = 0;
     const NVSDK_NGX_Result result = InvokeCreate(route, original, command, feature, parameters, output,
-        restored, provider, *wrapper, capacity, createAttemptToken);
+        provider, *wrapper, capacity, createAttemptToken);
     FeatureLifetimeEvent createdEvent{};
     bool notifyCreated = false;
     if (result == NVSDK_NGX_Result_Success && *output)
@@ -1204,12 +1176,12 @@ template<size_t I> NVSDK_NGX_Result NVSDK_CONV Create(ID3D12GraphicsCommandList*
         free->provider = provider ? reinterpret_cast<uintptr_t>(provider->module) : 0;
         free->providerGeneration = provider ? provider->generation : 0;
         free->device = deviceIdentity;
-        free->createdGeneratedFrames = ampere_policy::kMaximumGeneratedFrames;
+        free->createdGeneratedFrames = capacity.maximumGeneratedFrames;
         free->wrapper = reinterpret_cast<uintptr_t>(wrapper->module);
         free->wrapperGeneration = wrapper->generation;
         free->capacity = capacity;
         free->createAttemptToken = createAttemptToken;
-        if (!restored || !provider || !createAttemptToken
+        if (!provider || !createAttemptToken
             || (!provider->legacyPresetReady && gPresetQueries.load() == 0)
             || !FeatureCapacityCurrent(*free))
         {
@@ -1229,8 +1201,11 @@ template<size_t I> NVSDK_NGX_Result NVSDK_CONV Create(ID3D12GraphicsCommandList*
             dlssg_preset::RecordProviderRead(provider->module, true, 1, false);
         gFailures.Recover();
         gFailure.store(0, std::memory_order_release);
-        gCertifiedMaximum.store(ampere_policy::kMaximumGeneratedFrames, std::memory_order_release);
-        Report(L"Ampere MFG Create accepted: active wrapper owns six presentation buffers; exact feature tracked");
+        gCertifiedMaximum.store(free->createdGeneratedFrames, std::memory_order_release);
+        wchar_t detail[192]{};
+        swprintf_s(detail, L"Ampere FG Create accepted: generatedCapacity=%u presentationBuffers=%u mode=%ls; exact feature tracked",
+            free->createdGeneratedFrames, capacity.bufferCount, free->createdGeneratedFrames == 1 ? L"legacy-2x" : L"MFG");
+        Report(detail);
         createdEvent = LifetimeEvent(FeatureLifetimePhase::eCreated, *free);
         notifyCreated = QueueFeatureLifetime(createdEvent, createAttempt.Read());
     }
@@ -1309,24 +1284,50 @@ template<size_t I> NVSDK_NGX_Result NVSDK_CONV Evaluate(ID3D12GraphicsCommandLis
     EvaluationInput input{};
     EvaluationReads reads{};
     const uint64_t publication = ampere_gpu::Publication(), adapter = ampere_gpu::AdapterLuid();
-    const bool inputsValid = ReadEvaluationInput(parameters, input, &reads);
+    const auto* wrapper = ActiveWrapper();
+    const bool legacyFrame = wrapper && !wrapper->wrapperLayout.frameIdAvailable
+        && found->createdGeneratedFrames == 1 && found->evaluationSerial != UINT64_MAX;
+    const uint64_t serial = found->evaluationSerial == UINT64_MAX ? 0 : ++found->evaluationSerial;
+    const bool inputsValid = ReadEvaluationInput(parameters, input, &reads, legacyFrame ? serial : 0);
     const uint32_t rejected = ((gCreateDepth || gEvaluateDepth || gReleaseDepth) ? 0x01u : 0)
         | (!Ready() ? 0x02u : 0)
         | (!inputsValid ? 0x04u : 0)
         | (!FeatureCapacityCurrent(*found) ? 0x08u : 0)
-        | (found->createdGeneratedFrames != ampere_policy::kMaximumGeneratedFrames ? 0x10u : 0)
+        | (!ampere_policy::CapacityValid(found->createdGeneratedFrames)
+            || input.count > static_cast<int>(found->createdGeneratedFrames) ? 0x10u : 0)
         | (!found->batch.Accepts(input.frame, input.count, input.index, reinterpret_cast<uintptr_t>(input.output)) ? 0x20u : 0)
         | (!found->Matches(reinterpret_cast<uintptr_t>(handle), reinterpret_cast<uintptr_t>(route.module),
             route.generation, publication, adapter) ? 0x40u : 0);
     if (rejected)
     {
         gCertifiedMaximum.store(0, std::memory_order_release);
-        if (!found->batch.failed) ReportEvaluationRejection(route, *found, input, reads, rejected, publication, adapter);
+        // A wrapper that shares one output across the batch cannot present
+        // distinct generated frames. Keep this feature at 2x instead of
+        // re-certifying MFG on the next 2x batch (a 2x/3x alternation).
+        if (rejected == 0x20u && !found->outputReuseLatched
+            && found->batch.DuplicateOutput(input.frame, input.count, input.index,
+                reinterpret_cast<uintptr_t>(input.output)))
+        {
+            found->outputReuseLatched = true;
+            gOutputReuseLatches.fetch_add(1, std::memory_order_relaxed);
+            wchar_t detail[224]{};
+            swprintf_s(detail, L"Ampere wrapper reused one output for generated frames 1..%d (count=%d frame=%llu); "
+                L"this feature stays at 2x until it is recreated", input.index, input.count,
+                static_cast<unsigned long long>(input.frame));
+            Report(detail);
+        }
+        if (!found->rejectionReported)
+        {
+            ReportEvaluationRejection(route, *found, input, reads, rejected, publication, adapter);
+            found->rejectionReported = true;
+        }
+        // Guard refusals do not consume a newer frame or erase the native
+        // failure. The next properly owned index-1 call can retry the batch.
         found->batch.failed = true; Reject(131); return kRejected;
     }
     ID3D12Device* device = nullptr;
     if (!command || FAILED(command->GetDevice(__uuidof(ID3D12Device), reinterpret_cast<void**>(&device))) || !device)
-    { found->batch.failed = true; Reject(132); return kRejected; }
+    { found->batch.Fail(input.frame, input.count, input.index); Reject(132); return kRejected; }
     const LUID luid = device->GetAdapterLuid();
     D3D12_RESOURCE_DESC desc{};
     const bool outputValid = reinterpret_cast<uintptr_t>(device) == found->device
@@ -1336,7 +1337,7 @@ template<size_t I> NVSDK_NGX_Result NVSDK_CONV Evaluate(ID3D12GraphicsCommandLis
     device->Release();
     uint64_t packed = 0; memcpy(&packed, &luid, sizeof(packed));
     if (packed != found->luid || !outputValid)
-    { found->batch.failed = true; Reject(132); return kRejected; }
+    { found->batch.Fail(input.frame, input.count, input.index); Reject(132); return kRejected; }
     found->outputWidth = desc.Width; found->outputHeight = desc.Height; found->outputFormat = desc.Format;
     if (route.beforeEvaluate) route.beforeEvaluate(command, reinterpret_cast<uintptr_t>(handle), parameters,
         reinterpret_cast<void*>(callback), 0, 0, route.evaluate, _ReturnAddress());
@@ -1347,10 +1348,16 @@ template<size_t I> NVSDK_NGX_Result NVSDK_CONV Evaluate(ID3D12GraphicsCommandLis
     {
         if (result != NVSDK_NGX_Result_Success)
             gFailures.Record(ampere_diagnostics::kEvaluationSubmissionFailure, static_cast<uint32_t>(result));
-        ReportEvaluationSubmissionFailure(route, *found, command, input, reads, desc, result, providerExecuted);
+        gFailedBatches.fetch_add(1, std::memory_order_relaxed);
+        found->recoveryPending = true;
+        if (!found->submissionFailureReported)
+        {
+            ReportEvaluationSubmissionFailure(route, *found, command, input, reads, desc, result, providerExecuted);
+            found->submissionFailureReported = true;
+        }
     }
     if (!FeatureCapacityCurrent(*found))
-    { found->batch.failed = true; Reject(171); return kRejected; }
+    { found->batch.Fail(input.frame, input.count, input.index); Reject(171); return kRejected; }
     found->batch.Complete(input.frame, input.count, input.index, reinterpret_cast<uintptr_t>(input.output),
         result == NVSDK_NGX_Result_Success && providerExecuted);
     if (result == NVSDK_NGX_Result_Success)
@@ -1358,8 +1365,18 @@ template<size_t I> NVSDK_NGX_Result NVSDK_CONV Evaluate(ID3D12GraphicsCommandLis
         if (!providerExecuted) { Reject(134); return kRejected; }
         if (found->batch.failed) { Reject(137); return kRejected; }
         found->evaluated = true; gEvaluations.fetch_add(1);
-        gCertifiedMaximum.store(ampere_policy::kMaximumGeneratedFrames, std::memory_order_release);
-        if (input.index == input.count) gSubmittedBatches.fetch_add(1);
+        gCertifiedMaximum.store(found->outputReuseLatched ? 1u : found->createdGeneratedFrames,
+            std::memory_order_release);
+        if (input.index == input.count)
+        {
+            gSubmittedBatches.fetch_add(1);
+            if (found->recoveryPending)
+            {
+                gRecoveredBatches.fetch_add(1, std::memory_order_relaxed);
+                found->recoveryPending = false;
+            }
+            gFailures.Recover(); gFailure.store(0, std::memory_order_release);
+        }
     }
     // Preserve genuine failures. There is no output copy, forged success, or
     // reuse of a possibly stale/black OutputReal surface in this build.
@@ -1370,6 +1387,15 @@ template<size_t I> NVSDK_NGX_Result NVSDK_CONV Release(NVSDK_NGX_Handle* handle)
 {
     std::unique_lock lock(gCalls);
     auto original = RouteOriginal<ReleaseFn>(gRoutes[I], gRoutes[I].release);
+#if MFG_UNLOCK_RUNTIME_GPU_SELECTION
+    // ReadSnapshot().current re-checks the entry's first bytes and can read stale while the hook is live; returning here would skip NVIDIA's release and leak the feature's VRAM.
+    if (!original && !gpu_dispatch::IsAmpere())
+    {
+        const auto state = entry_detour::ReadSnapshot(gRoutes[I].release);
+        if (state.installed && state.original && state.owner == gRoutes[I].module)
+            original = reinterpret_cast<ReleaseFn>(state.original);
+    }
+#endif
     if (!original) return NVSDK_NGX_Result_FAIL_NotInitialized;
     const uintptr_t handleValue = reinterpret_cast<uintptr_t>(handle);
 #if MFG_UNLOCK_RUNTIME_GPU_SELECTION
@@ -1536,7 +1562,9 @@ bool WINAPI ProviderGate(void* arg1, uintptr_t arg2, const void* arg3, void* arg
     {
         EvaluationInput input{};
         if (!gEvaluateDepth || !arg2 || !Ready() || gProviderEvaluated || !FeatureCapacityCurrent(*feature)
-            || !ReadEvaluationInput(static_cast<const NVSDK_NGX_Parameter*>(arg3), input)
+            || !ReadEvaluationInput(static_cast<const NVSDK_NGX_Parameter*>(arg3), input, nullptr,
+                feature->createdGeneratedFrames == 1 && ActiveWrapper()
+                    && !ActiveWrapper()->wrapperLayout.frameIdAvailable ? gEvaluationInput.frame : 0)
             || !(input == gEvaluationInput)
             || (feature->providerHandle && feature->providerHandle != arg2)) return Reject(164);
         // The inner alias is learned only inside an exact, successfully
@@ -1575,11 +1603,8 @@ template<size_t I> NVSDK_NGX_Result NVSDK_CONV Requirements(IDXGIAdapter* adapte
         lock.unlock();
         return original(adapter, discovery, requirements);
     }
-    auto& route = gRoutes[I];
-    if (scoped && route.metadata.address) route.metadata.Set(true);
     const auto result = original(adapter, discovery, requirements);
-    if (scoped && route.metadata.active) route.metadata.Set(false);
-    if (!scoped || gFatal.load()) return result;
+    if (gFatal.load()) return result;
     if (result == NVSDK_NGX_Result_Success
         && (requirements->FeatureSupported == NVSDK_NGX_FeatureSupportResult_AdapterUnsupported
             || requirements->FeatureSupported == NVSDK_NGX_FeatureSupportResult_Supported))
@@ -1607,10 +1632,31 @@ bool PublishStartupCapabilities(Route& route, NVSDK_NGX_Parameter* parameters) n
     // This is an early capability bootstrap, not permission to create FG.
     // A recognized wrapper must still be before swap-chain allocation; the
     // actual caller, generation and allocated buffers are checked at Create.
-    bool earlyWrapper = false;
+    uint32_t bootstrapMaximum = 0;
     for (const auto& candidate : gRoutes)
-        earlyWrapper |= candidate.wrapperLayout.module && ampere_wrapper::BeforeSwapchain(candidate.wrapperLayout);
-    if (!earlyWrapper) return Reject(170);
+        if (candidate.wrapperLayout.module && ampere_wrapper::BeforeSwapchain(candidate.wrapperLayout))
+            bootstrapMaximum = bootstrapMaximum ? std::min(bootstrapMaximum, candidate.wrapperLayout.maximumGeneratedFrames)
+                : candidate.wrapperLayout.maximumGeneratedFrames;
+    if (!ampere_policy::CapacityValid(bootstrapMaximum))
+    {
+        // Bounded startup evidence: distinguish an absent pacer from a late,
+        // unreadable or already allocated wrapper if the rig still refuses.
+        for (const auto& candidate : gRoutes)
+        {
+            if (!candidate.wrapperLayout.module) continue;
+            const auto observed = ampere_wrapper::InspectFailure(candidate.wrapperLayout);
+            wchar_t detail[320]{};
+            swprintf_s(detail, L"Ampere capability bootstrap refused: wrapper=%p profile=%u contextReadable=%u "
+                L"context=%p swapchain=%p ring=%p begin=%p end=%p buffers=%u maximum=%u",
+                candidate.wrapperLayout.module, static_cast<unsigned>(candidate.wrapperLayout.profile),
+                static_cast<unsigned>(observed.contextReadable), reinterpret_cast<void*>(observed.capacity.context),
+                reinterpret_cast<void*>(observed.capacity.swapchain), reinterpret_cast<void*>(observed.capacity.ringOwner),
+                reinterpret_cast<void*>(observed.capacity.buffersBegin), reinterpret_cast<void*>(observed.capacity.buffersEnd),
+                observed.bufferCount, observed.maximum);
+            Report(detail);
+        }
+        return Reject(170);
+    }
     __try
     {
         unsigned int maximum = 0, available = 0;
@@ -1625,10 +1671,10 @@ bool PublishStartupCapabilities(Route& route, NVSDK_NGX_Parameter* parameters) n
         // Ampere's one-frame (or absent, when unavailable) capability is the
         // reason for this bootstrap. It is not evidence of buffer allocation.
         parameters->Set("FrameGeneration.Available", 1u);
-        parameters->Set("DLSSG.MultiFrameCountMax", ampere_policy::kMaximumGeneratedFrames);
+        parameters->Set("DLSSG.MultiFrameCountMax", bootstrapMaximum);
         if (parameters->Get("FrameGeneration.Available", &available) != NVSDK_NGX_Result_Success
             || parameters->Get("DLSSG.MultiFrameCountMax", &maximum) != NVSDK_NGX_Result_Success
-            || available != 1 || maximum != ampere_policy::kMaximumGeneratedFrames) return Reject(154);
+            || available != 1 || maximum != bootstrapMaximum) return Reject(154);
         route.startupMaximum = maximum;
         gStartupMaximum.store(maximum);
         wchar_t message[180]{};
@@ -1825,15 +1871,26 @@ bool RoutePresetCurrent(const Route& route) noexcept
     return false;
 }
 
+// The settings reader called with the DLSS-FG preset ID. 310.9.16 reads it at
+// two decoded call sites (the setting and its report); several sites are
+// admitted only when every one calls the same reader, as on RTX 40.
+uintptr_t FindPresetReaderTarget(const Image& image, unsigned& matches) noexcept
+{
+    // mov ecx,DLSS-FG preset ID; call settings reader; test al,al; jz rel32.
+    constexpr uint8_t pattern[]{0xb9,0xf1,0x1d,0xe4,0x10,0xe8,0,0,0,0,0x84,0xc0,0x0f,0x84,0,0,0,0};
+    constexpr uint8_t mask[]{255,255,255,255,255,255,0,0,0,0,255,255,255,255,0,0,0,0};
+    const uintptr_t match = FindPattern(image, pattern, mask, sizeof(pattern), SIZE_MAX, 0, 0, &matches);
+    if (!match) return matches > 1 ? reinterpret_cast<uintptr_t>(dlssg_preset::FindPresetReader(image.module)) : 0;
+    int32_t displacement = 0; memcpy(&displacement, reinterpret_cast<void*>(match + 6), 4);
+    return match + 10 + displacement;
+}
+
 bool InstallPreset(Route& route, const Image& image) noexcept
 {
     if (route.preset) return entry_detour::ReadSnapshot(route.preset).current;
     if (route.legacyPresetReady) return true;
-    // mov ecx,DLSS-FG preset ID; call settings reader; test al,al; jz rel32.
-    constexpr uint8_t pattern[]{0xb9,0xf1,0x1d,0xe4,0x10,0xe8,0,0,0,0,0x84,0xc0,0x0f,0x84,0,0,0,0};
-    constexpr uint8_t mask[]{255,255,255,255,255,255,0,0,0,0,255,255,255,255,0,0,0,0};
     unsigned matches = 0;
-    const uintptr_t match = FindPattern(image, pattern, mask, sizeof(pattern), SIZE_MAX, 0, 0, &matches);
+    const uintptr_t target = FindPresetReaderTarget(image, matches);
     unsigned legacyMatches = 0;
     const bool legacy = LegacyPresetContract(image, legacyMatches);
     if (legacy && matches == 0 && Pin(image.module))
@@ -1843,7 +1900,7 @@ bool InstallPreset(Route& route, const Image& image) noexcept
         return true;
     }
     if (legacyMatches) return Reject(140);
-    if (!match)
+    if (!target)
     {
         wchar_t detail[192]{};
         swprintf_s(detail, L"Ampere FG preset discovery rejected: decoded call-site matches=%u (%s); module=%p generation=%llu",
@@ -1851,8 +1908,13 @@ bool InstallPreset(Route& route, const Image& image) noexcept
         Report(detail);
         return Reject(140);
     }
-    int32_t displacement = 0; memcpy(&displacement, reinterpret_cast<void*>(match + 6), 4);
-    const uintptr_t target = match + 10 + displacement;
+    if (matches > 1)
+    {
+        wchar_t detail[160]{};
+        swprintf_s(detail, L"Ampere FG preset discovery: %u decoded call sites share one reader at RVA 0x%llX",
+            matches, static_cast<unsigned long long>(target - image.base));
+        Report(detail);
+    }
     // The known reader takes uint32_t ID in ecx, uint32_t* in rdx and returns
     // bool in al. Require its complete argument-capture prologue, independently
     // of the eligibility version. This rejects different private ABIs.
@@ -2196,7 +2258,7 @@ FeatureCreatePendingState FeatureCreatePendingStatus(uint64_t token) noexcept
             if (!event.handle || !event.lifetime || !event.runtime || !event.runtimeGeneration
                 || !event.provider || !event.providerGeneration || !event.wrapper || !event.wrapperGeneration
                 || !event.publication || !event.adapterLuid
-                || event.generatedFrameCapacity != ampere_policy::kMaximumGeneratedFrames)
+                || !ampere_policy::CapacityValid(event.generatedFrameCapacity))
             { invalid = true; return false; }
             if (selected.handle)
             {
@@ -2225,7 +2287,7 @@ FeatureCreatePendingState FeatureCreatePendingStatus(uint64_t token) noexcept
                 || event.provider != candidate.provider || event.providerGeneration != candidate.providerGeneration
                 || event.wrapper != candidate.wrapper || event.wrapperGeneration != candidate.wrapperGeneration
                 || event.publication != candidate.publication || event.adapterLuid != candidate.luid
-                || event.generatedFrameCapacity != ampere_policy::kMaximumGeneratedFrames)
+                || event.generatedFrameCapacity != candidate.capacity.maximumGeneratedFrames)
             { invalid = true; return false; }
             selected = event;
             proof = candidate;
@@ -2326,6 +2388,9 @@ void ObserveActiveWrapper(HMODULE module, uint64_t generation) noexcept
 int32_t LastCreateCount() noexcept { return gLastCreateCount.load(); }
 uint64_t CreatedFeatures() noexcept { return gCreatedFeatures.load(); }
 uint64_t SubmittedBatches() noexcept { return gSubmittedBatches.load(); }
+uint64_t FailedBatches() noexcept { return gFailedBatches.load(); }
+uint64_t RecoveredBatches() noexcept { return gRecoveredBatches.load(); }
+uint64_t OutputReuseLatches() noexcept { return gOutputReuseLatches.load(); }
 
 bool PatchProvider(HMODULE module, const wchar_t* path) noexcept
 {
@@ -2365,10 +2430,7 @@ void EndInit() noexcept
     if (!gInitDepth) return;
     std::lock_guard lock(gCalls);
     for (auto& route : gRoutes)
-    {
         if (route.availability.active) route.availability.Set(false);
-        if (route.metadata.active) route.metadata.Set(false);
-    }
     if (gInitLockDepth == gInitDepth)
     {
         gInitLockDepth = 0;
@@ -2405,10 +2467,7 @@ void BeginStartup() noexcept
 void EndStartup(bool accepted) noexcept
 {
     for (auto& route : gRoutes)
-    {
         if (route.availability.active) route.availability.Set(false);
-        if (route.metadata.active) route.metadata.Set(false);
-    }
     bool runtimeCovered = false, providerCovered = false;
     for (const auto& route : gRoutes)
     {
@@ -2422,7 +2481,7 @@ void EndStartup(bool accepted) noexcept
     }
     const uint32_t missing = (!accepted ? 0x01u : 0)
         | (!runtimeCovered ? 0x02u : 0) | (!providerCovered ? 0x04u : 0)
-        | (gStartupMaximum.load() != ampere_policy::kMaximumGeneratedFrames ? 0x08u : 0)
+        | (!ampere_policy::CapacityValid(gStartupMaximum.load()) ? 0x08u : 0)
         | (!gD3D12Confirmed.load() ? 0x10u : 0) | (!AdapterVerified() ? 0x20u : 0)
         | (!ampere_gpu::Ready() ? 0x40u : 0) | (gFatal.load() ? 0x80u : 0);
     const bool ready = missing == 0;
@@ -2440,36 +2499,30 @@ void EndStartup(bool accepted) noexcept
             static_cast<unsigned>(ampere_gpu::Ready()), static_cast<unsigned>(gFatal.load()));
         Report(detail);
     }
-    Report(ready ? L"Ampere startup complete; temporary gates restored; MFG program prepared"
+    Report(ready ? (gStartupMaximum.load() == 1
+        ? L"Ampere startup complete; legacy wrapper restricted to 2x; program prepared"
+        : L"Ampere startup complete; temporary gates restored; MFG program prepared")
         : L"Ampere startup incomplete; temporary gates restored; MFG admission unavailable");
     --gStartupDepth; gCalls.unlock();
 }
 
-bool InspectRuntimeLayout(Route& route, const Image& image, const wchar_t* path) noexcept
+// The NGX core's own architecture gates read the DLSS-G provider's declared
+// architecture (see ampere_provider_arch), so no private branch of the driver's
+// runtime is patched. Ownership still distinguishes NVIDIA's installed runtime
+// from game-local NGX intermediaries, which keep their native forwarding.
+bool InspectRuntimeLayout(Route& route, const Image&, const wchar_t* path) noexcept
 {
     if (!route.runtimeInspected)
     {
         route.runtimeInspected = true;
-        const uintptr_t create = reinterpret_cast<uintptr_t>(GetProcAddress(route.module, "NVSDK_NGX_D3D12_CreateFeature"));
-        const uintptr_t metadata = FindPattern(image, kAmpereNgxMetadataPattern.data(), kAmpereNgxMetadataPatternMask.data(),
-            kAmpereNgxMetadataPattern.size(), kAmpereNgxMetadataBranchOffset);
-        const uintptr_t validation = FindCreateValidation(image, create);
-        const bool pinned = metadata && validation && Pin(route.module);
-        if (pinned)
-        {
-            route.metadata = {metadata + kAmpereNgxMetadataBranchOffset, kAmpereNgxMetadataOriginal};
-            route.validation = {validation + kAmpereNgxCreateValidationBranchOffset, kAmpereNgxCreateValidationOriginal};
-        }
+        route.runtimeDriverOwned = adapter_discovery::DriverNgxRuntimePath(path) && Pin(route.module);
         wchar_t detail[2048]{};
-        swprintf_s(detail, L"Ampere NGX interface: metadata=0x%X createValidation=0x%X modulePinned=%u role=%s; discovery=%s path=%.1500ls",
-            metadata ? static_cast<uint32_t>(metadata - image.base) : 0,
-            validation ? static_cast<uint32_t>(validation - image.base) : 0, static_cast<unsigned>(pinned),
-            pinned ? L"verified-runtime" : L"native-forwarding-unhooked",
-            !metadata ? L"metadata-signature-missing-or-ambiguous" : !validation ? L"create-call-path-unrecognized"
-                : !pinned ? L"module-pin-failed" : L"decoded-create-call-path", path ? path : L"");
+        swprintf_s(detail, L"Ampere NGX interface: driverOwned=%u role=%s; architecture gates follow the DLSS-G declaration path=%.1500ls",
+            static_cast<unsigned>(route.runtimeDriverOwned),
+            route.runtimeDriverOwned ? L"verified-runtime" : L"native-forwarding-unhooked", path ? path : L"");
         Report(detail);
     }
-    return route.metadata.address && route.validation.address;
+    return route.runtimeDriverOwned;
 }
 
 void ObserveModule(HMODULE module, const wchar_t* path, uint64_t generation,
@@ -2502,7 +2555,7 @@ void ObserveModule(HMODULE module, const wchar_t* path, uint64_t generation,
         wchar_t detail[2048]{};
         swprintf_s(detail, L"Ampere provider candidate: version=%u.%u.%u versionRead=%u eligible=%u generation=%llu path=%.1600ls",
             version.major, version.minor, version.build, static_cast<unsigned>(read),
-            static_cast<unsigned>(dlssg_provider_policy::IsSupportedProvider(module, path)), generation, path ? path : L"");
+            static_cast<unsigned>(dlssg_provider_policy::IsSupportedAmpereProvider(module, path)), generation, path ? path : L"");
         Report(detail);
     }
     if (runtime) InspectRuntimeLayout(*route, image, path);
@@ -2513,7 +2566,9 @@ void ObserveModule(HMODULE module, const wchar_t* path, uint64_t generation,
         if (ampere_wrapper::Discover(module, layout) && Pin(module))
         {
             route->wrapperLayout = layout;
-            Report(L"Ampere MFG wrapper allocation layout recognized; waiting for early capability bootstrap and actual buffers");
+            Report(layout.maximumGeneratedFrames == 1
+                ? L"Ampere legacy wrapper allocation layout recognized; 2x fallback requires early bootstrap and actual buffers"
+                : L"Ampere MFG wrapper allocation layout recognized; waiting for early capability bootstrap and actual buffers");
         }
         else
             Report(L"Ampere MFG wrapper allocation layout unrecognized; startup capability bootstrap remains blocked");
@@ -2522,7 +2577,12 @@ void ObserveModule(HMODULE module, const wchar_t* path, uint64_t generation,
         && BeforeFirstFeatureCreate()
         && gD3D12Confirmed.load() && AdapterVerified())
     {
-        if (!dlssg_provider_policy::IsSupportedProvider(module, path)) { Reject(3); return; }
+        if (!dlssg_provider_policy::IsSupportedAmpereProvider(module, path)) { Reject(3); return; }
+        // NGX validates the provider against the GPU when it maps the snippet.
+        // An undeclared provider is refused by NGX itself; fail closed here too.
+        if (const auto declared = ampere_provider_arch::Declare(module);
+            declared != ampere_provider_arch::Outcome::eDeclared
+            && declared != ampere_provider_arch::Outcome::eAlreadyDeclared) { Reject(157); return; }
         const auto resolveBoundary = gPreparationBoundaryResolver.load(std::memory_order_acquire);
         auto boundary = resolveBoundary ? resolveBoundary(module, generation) : ampere_gpu::PreparationBoundary{};
         // Prove the early owner before installing a preset reader or changing
@@ -2542,7 +2602,7 @@ void ObserveModule(HMODULE module, const wchar_t* path, uint64_t generation,
     {
         // Owned NGX exports also occur in game-local intermediaries. Discovery
         // of one is not a failed driver admission; leave its forwarding intact.
-        if (!route->metadata.address || !route->validation.address) return;
+        if (!route->runtimeDriverOwned) return;
         if (!InstallExport(*route, "NVSDK_NGX_D3D12_GetFeatureRequirements", entry_detour::Kind::eAmpereRequirements,
                 reinterpret_cast<void*>(kRequirements[index]), route->requirements)
             || !InstallExport(*route, "NVSDK_NGX_D3D12_GetCapabilityParameters", entry_detour::Kind::eAmpereParameters,
@@ -2562,11 +2622,8 @@ void ObserveModule(HMODULE module, const wchar_t* path, uint64_t generation,
                 : legacy + kAmpereSlDlssgAvailabilityLegacyBranchOffset), kAmpereSlDlssgAvailabilityOriginal};
         }
     }
-    if (gStartupDepth && gD3D12Confirmed.load() && AdapterVerified())
-    {
-        if (route->metadata.address) route->metadata.Set(true);
-        if (route->availability.address) route->availability.Set(true);
-    }
+    if (gStartupDepth && gD3D12Confirmed.load() && AdapterVerified() && route->availability.address)
+        route->availability.Set(true);
 }
 
 bool InstallRoute(HMODULE module, const wchar_t* path, uint64_t generation, bool runtime,
@@ -2576,7 +2633,11 @@ bool InstallRoute(HMODULE module, const wchar_t* path, uint64_t generation, bool
     std::lock_guard lock(gInstall);
     if (!module || !generation) return false;
 #if MFG_UNLOCK_RUNTIME_GPU_SELECTION
-    if (!runtime && !dlssg_provider_policy::IsSupportedProvider(module, path)) return false;
+    // Provider entry routes serve both GPUs: RTX 40 keeps the shared eligibility (310.9.16 included),
+    // RTX 30 its own (Ada-only builds excluded).
+    if (!runtime && !(gpu_dispatch::IsAda()
+            ? dlssg_provider_policy::IsSupportedProvider(module, path)
+            : dlssg_provider_policy::IsSupportedAmpereProvider(module, path))) return false;
 #endif
     auto* route = FindRoute(module, generation);
     if (!route) return false;

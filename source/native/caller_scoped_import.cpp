@@ -23,6 +23,14 @@ struct Entry {
 };
 std::array<Entry, 12> entries; // Resolver, five input APIs, three DXGI and three interposer factories.
 std::mutex mutex;
+// Second caller range read by a relay at each call. Empty (begin above end)
+// until published; every partially published state is empty or exact.
+struct HostScope {
+    alignas(8) std::atomic<uintptr_t> begin{UINTPTR_MAX};
+    alignas(8) std::atomic<uintptr_t> end{0};
+};
+HostScope interposerHost; // Shared by the three interposer factory relays.
+HostScope noHost;         // Never published: main-executable callers only.
 
 const wchar_t* OwnerName(const char* name) noexcept {
     if (!name) return nullptr;
@@ -33,8 +41,8 @@ const wchar_t* OwnerName(const char* name) noexcept {
         if (!strcmp(name,input)) return L"user32.dll";
     return nullptr;
 }
-bool ImageRange(HMODULE image, uintptr_t& begin, uintptr_t& end) noexcept {
-    if (!image || image!=GetModuleHandleW(nullptr)) return false;
+bool ModuleRange(HMODULE image, uintptr_t& begin, uintptr_t& end) noexcept {
+    if (!image) return false;
     const auto* dos=reinterpret_cast<const IMAGE_DOS_HEADER*>(image);
     if (dos->e_magic!=IMAGE_DOS_SIGNATURE || dos->e_lfanew<=0 || dos->e_lfanew>0x100000) return false;
     const auto* nt=reinterpret_cast<const IMAGE_NT_HEADERS64*>(reinterpret_cast<const char*>(image)+dos->e_lfanew);
@@ -44,6 +52,9 @@ bool ImageRange(HMODULE image, uintptr_t& begin, uintptr_t& end) noexcept {
     if (!size || begin>UINTPTR_MAX-size) return false;
     end=begin+size;
     return true;
+}
+bool ImageRange(HMODULE image, uintptr_t& begin, uintptr_t& end) noexcept {
+    return image && image==GetModuleHandleW(nullptr) && ModuleRange(image,begin,end);
 }
 // Some loaders make an entire .idata page executable after startup. We never
 // write these slots, so that page flag need not veto a public-entry fallback.
@@ -149,23 +160,26 @@ bool Current(const Entry& e) noexcept {
 }
 // Tail dispatch preserves RCX/RDX/R8/R9, all stack arguments and the original
 // caller return address. RAX/R10 and flags are volatile in the Windows x64 ABI.
-// Each relay and its aligned activation pointer have process lifetime.
-bool MakeRelay(Entry& entry, uintptr_t begin, uintptr_t end) noexcept {
+// Each relay, its aligned activation pointer and host scope have process lifetime.
+bool MakeRelay(Entry& entry, uintptr_t begin, uintptr_t end, const HostScope& host) noexcept {
     auto* code=static_cast<unsigned char*>(entry.relay);
     if (!code) return false;
     size_t at=0;
     auto bytes=[&](std::initializer_list<unsigned char> data){for(auto b:data)code[at++]=b;};
     auto qword=[&](uintptr_t value){memcpy(code+at,&value,8);at+=8;};
+    auto bind=[&](size_t displacement){code[displacement]=static_cast<unsigned char>(at-displacement-1);};
     bytes({0xf3,0x0f,0x1e,0xfa,0x48,0x8b,0x04,0x24}); // endbr64; mov rax,[rsp]
-    bytes({0x49,0xba});qword(begin);bytes({0x4c,0x39,0xd0,0x72});const auto below=at++;
-    bytes({0x49,0xba});qword(end);bytes({0x4c,0x39,0xd0,0x73});const auto above=at++;
+    bytes({0x49,0xba});qword(begin);bytes({0x4c,0x39,0xd0,0x72});const auto belowExecutable=at++; // jb host
+    bytes({0x49,0xba});qword(end);bytes({0x4c,0x39,0xd0,0x72});const auto insideExecutable=at++;  // jb scoped
+    bind(belowExecutable);
+    // cmp rax,[r10] against the published host scope; empty fails both ways.
+    bytes({0x49,0xba});qword(reinterpret_cast<uintptr_t>(&host.begin));bytes({0x49,0x3b,0x02,0x72});const auto belowHost=at++;
+    bytes({0x49,0xba});qword(reinterpret_cast<uintptr_t>(&host.end));bytes({0x49,0x3b,0x02,0x73});const auto aboveHost=at++;
+    bind(insideExecutable);
     bytes({0x49,0xba});qword(reinterpret_cast<uintptr_t>(&entry.active));
     bytes({0x49,0x8b,0x02,0x48,0x85,0xc0,0x74});const auto inactive=at++;
     bytes({0xff,0xe0});
-    const auto fallback=at;
-    code[below]=static_cast<unsigned char>(fallback-below-1);
-    code[above]=static_cast<unsigned char>(fallback-above-1);
-    code[inactive]=static_cast<unsigned char>(fallback-inactive-1);
+    bind(belowHost);bind(aboveHost);bind(inactive);
     bytes({0x48,0xb8});qword(reinterpret_cast<uintptr_t>(entry.trampoline));bytes({0xff,0xe0});
     DWORD previous=0,observed=0;
     return VirtualProtect(code,4096,PAGE_EXECUTE_READ,&previous)
@@ -173,9 +187,10 @@ bool MakeRelay(Entry& entry, uintptr_t begin, uintptr_t end) noexcept {
         && observed==PAGE_EXECUTE_READ && FlushInstructionCache(GetCurrentProcess(),code,at);
 }
 // Caller holds the mutex; the target's owner is pinned and the caller range
-// is the main executable. Returns the failed stage, or nullptr when the entry
-// is published, inactive, with its original protection.
-const wchar_t* Install(Entry& entry, void* expected, void* replacement, uintptr_t begin, uintptr_t end, unsigned& code) noexcept {
+// is the main executable plus the given host scope. Returns the failed stage,
+// or nullptr when the entry is published, inactive, with its original protection.
+const wchar_t* Install(Entry& entry, void* expected, void* replacement, uintptr_t begin, uintptr_t end,
+                       const HostScope& host, unsigned& code) noexcept {
     const auto init=MH_Initialize();
     if (init!=MH_OK && init!=MH_ERROR_ALREADY_INITIALIZED) { code=init; return L"initialize"; }
     entry.target=expected;
@@ -185,7 +200,7 @@ const wchar_t* Install(Entry& entry, void* expected, void* replacement, uintptr_
     entry.relay=VirtualAlloc(nullptr,4096,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE);
     if (!entry.relay) { code=GetLastError(); return L"relay-allocation"; }
     entry.trampoline=expected;
-    if (!MakeRelay(entry,begin,end)) { code=GetLastError(); return L"relay-preparation"; }
+    if (!MakeRelay(entry,begin,end,host)) { code=GetLastError(); return L"relay-preparation"; }
     const auto create=MH_CreateHook(expected,entry.relay,&entry.trampoline);
     if (create!=MH_OK || !entry.trampoline) { code=create; return L"decode"; }
     // Publish the complete pass-through trampoline before enabling the entry.
@@ -193,7 +208,7 @@ const wchar_t* Install(Entry& entry, void* expected, void* replacement, uintptr_
     if (!VirtualProtect(entry.relay,4096,PAGE_READWRITE,&relayProtection)) {
         code=GetLastError(); MH_RemoveHook(expected); return L"relay-finalization";
     }
-    if (!MakeRelay(entry,begin,end)) { code=GetLastError(); MH_RemoveHook(expected); return L"relay-publication"; }
+    if (!MakeRelay(entry,begin,end,host)) { code=GetLastError(); MH_RemoveHook(expected); return L"relay-publication"; }
     DWORD originalProtection=0;
     if (!protected_pointer::QueryProtection(reinterpret_cast<uintptr_t>(expected),originalProtection,8)) {
         MH_RemoveHook(expected); return L"protection";
@@ -259,7 +274,7 @@ bool Prepare(HMODULE importer, void** slot, void* expected, void* replacement, c
         || !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,
             reinterpret_cast<LPCWSTR>(expected),&pinned) || pinned!=owner) return false;
     unsigned code=0;
-    if (const auto stage=Install(*entry,expected,replacement,begin,end,code)) return fail(stage,code);
+    if (const auto stage=Install(*entry,expected,replacement,begin,end,noHost,code)) return fail(stage,code);
     if (!Eligible(importer,slot,expected,name)) return fail(L"verification");
     original=entry->trampoline;
     wchar_t line[256]{};
@@ -295,13 +310,23 @@ bool PrepareInterposerEntry(void* expected, void* replacement, const char* name,
     if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,
             reinterpret_cast<LPCWSTR>(expected),&pinned) || pinned!=owner) return fail(L"pin");
     unsigned code=0;
-    if (const auto stage=Install(*entry,expected,replacement,begin,end,code)) return fail(stage,code);
+    if (const auto stage=Install(*entry,expected,replacement,begin,end,interposerHost,code)) return fail(stage,code);
     if (!InterposerTarget(expected,name,owner) || owner!=pinned) return fail(L"verification");
     original=entry->trampoline;
     wchar_t line[256]{};
     swprintf_s(line,L"MFG_PROXY_UI interposer-entry prepared symbol=%hs caller=main-executable entryRva=0x%llX exportWrites=0 nativeTableWrites=0",name,
         static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(expected)-reinterpret_cast<uintptr_t>(owner)));
     single_module::Log(line);
+    return true;
+}
+bool SetInterposerHost(HMODULE host) noexcept {
+    uintptr_t begin=0,end=0;
+    if (!host || host==GetModuleHandleW(nullptr) || !ModuleRange(host,begin,end)) return false;
+    std::lock_guard lock(mutex);
+    const uintptr_t published=interposerHost.end.load(std::memory_order_acquire);
+    if (published) return published==end && interposerHost.begin.load(std::memory_order_acquire)==begin;
+    interposerHost.begin.store(begin,std::memory_order_release);
+    interposerHost.end.store(end,std::memory_order_release);
     return true;
 }
 bool Activate(void* expected, void* replacement) noexcept {

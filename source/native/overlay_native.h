@@ -29,14 +29,20 @@ inline bool SystemDxgiObject(IUnknown* object, size_t last) noexcept {
     auto** table = *reinterpret_cast<void***>(object);
     return slots::ImageSlot(dxgi, table) && slots::ImageSlot(dxgi, table + last) && PinInterface(object, last);
 }
-// NVIDIA and ReShade's public COM unwrapping contracts. No private object offsets,
-// no replacement of an application's interface, and bounded cycle detection.
+// NVIDIA, ReShade and Special K's public COM unwrapping contracts. No private
+// object offsets, no replacement of an application's interface, and bounded
+// cycle detection.
 template<class T> bool Unwrap(IUnknown* input, Microsoft::WRL::ComPtr<T>& output) noexcept {
     using Microsoft::WRL::ComPtr;
     constexpr GUID baseGuid = {0xadec44e2,0x61f0,0x45c3,{0xad,0x9f,0x1b,0x37,0x37,0x92,0x84,0xff}};
     // ReShade 6.8.0 source/com_utils.hpp: IID_UnwrappedObject. The returned
     // original owns an AddRef, as with any successful QueryInterface call.
     constexpr GUID reshadeGuid = {0x7f2c9a11,0x3b4e,0x4d6a,{0x81,0x2f,0x5e,0x9c,0xd3,0x7a,0x1b,0x42}};
+    // Special K 26.9.25 include/SpecialK/render/dxgi/dxgi_swapchain.h:
+    // IID_IUnwrappedDXGISwapChain. Only its swapchain wrapper answers, with its
+    // AddRef'd real swapchain; it refuses Streamline's base IID by design and
+    // passes other IIDs to that real swapchain.
+    constexpr GUID specialKGuid = {0xe8a33b4a,0x1405,0x424c,{0xae,0x88,0x0d,0x3e,0x9d,0x46,0xc9,0x14}};
     output.Reset();
     ComPtr<IUnknown> current = input;
     std::array<ComPtr<IUnknown>, 4> visited;
@@ -45,9 +51,10 @@ template<class T> bool Unwrap(IUnknown* input, Microsoft::WRL::ComPtr<T>& output
         for (size_t j = 0; j < i; ++j) if (visited[j].Get() == visited[i].Get()) return false;
         ComPtr<IUnknown> base;
         HRESULT hr = current->QueryInterface(baseGuid, reinterpret_cast<void**>(base.GetAddressOf()));
-        if (hr == E_NOINTERFACE) {
+        for (const GUID& next : {reshadeGuid, specialKGuid}) {
+            if (hr != E_NOINTERFACE) break;
             if (base) return false;
-            hr = current->QueryInterface(reshadeGuid, reinterpret_cast<void**>(base.GetAddressOf()));
+            hr = current->QueryInterface(next, reinterpret_cast<void**>(base.GetAddressOf()));
         }
         if (hr == E_NOINTERFACE && base) return false;
         if (hr == E_NOINTERFACE) return SUCCEEDED(current.As(&output)) && output;

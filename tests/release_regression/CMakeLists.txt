@@ -1,6 +1,16 @@
 cmake_minimum_required(VERSION 3.24)
 project(RTXMFGReleaseRegression LANGUAGES C CXX)
 set(NATIVE_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/../../source/native" CACHE PATH "Release native source")
+set(IMGUI_ROOT "" CACHE PATH "Pinned ImGui tree for factory proxy unit tests")
+if(EXISTS "${IMGUI_ROOT}/imgui.h")
+    add_executable(FactoryRevisionTests factory_revision_tests.cpp)
+    target_compile_features(FactoryRevisionTests PRIVATE cxx_std_20)
+    target_include_directories(FactoryRevisionTests PRIVATE "${NATIVE_SOURCE}" "${IMGUI_ROOT}")
+    target_compile_definitions(FactoryRevisionTests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+    set_target_properties(FactoryRevisionTests PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+else()
+    message(STATUS "FactoryRevisionTests omitted: set IMGUI_ROOT to the pinned ImGui tree")
+endif()
 add_executable(SmallStackResolverTests small_stack_resolver_tests.cpp)
 target_compile_features(SmallStackResolverTests PRIVATE cxx_std_20)
 target_include_directories(SmallStackResolverTests PRIVATE "${NATIVE_SOURCE}")
@@ -55,6 +65,21 @@ target_compile_features(StartupDefaultsTests PRIVATE cxx_std_20)
 target_include_directories(StartupDefaultsTests PRIVATE "${NATIVE_SOURCE}")
 target_compile_definitions(StartupDefaultsTests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 set_target_properties(StartupDefaultsTests PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+# OptiScaler stand-in (version-resource identity + NGX facade + plugin loader)
+# and a fakenvapi stand-in without that identity.
+add_library(OptiScalerHostFixture SHARED optiscaler_host_fixture.cpp optiscaler_host_fixture.rc)
+add_library(FakeNvapiFixture SHARED optiscaler_host_fixture.cpp)
+target_compile_definitions(FakeNvapiFixture PRIVATE OPTISCALER_FIXTURE_NO_IDENTITY=1)
+foreach(target OptiScalerHostFixture FakeNvapiFixture)
+    target_compile_definitions(${target} PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+    set_target_properties(${target} PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endforeach()
+add_executable(OptiScalerHostTests optiscaler_host_tests.cpp)
+target_compile_features(OptiScalerHostTests PRIVATE cxx_std_20)
+target_include_directories(OptiScalerHostTests PRIVATE "${NATIVE_SOURCE}")
+target_compile_definitions(OptiScalerHostTests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+set_target_properties(OptiScalerHostTests PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+add_dependencies(OptiScalerHostTests OptiScalerHostFixture FakeNvapiFixture)
 foreach(target VulkanMenuTests VulkanDynamicMenuTests VulkanStreamlineMenuTests VulkanMixedMenuTests)
     add_executable(${target} vulkan_menu_tests.cpp)
     target_compile_features(${target} PRIVATE cxx_std_20)
@@ -74,7 +99,8 @@ target_compile_definitions(ProviderGateTests PRIVATE UNICODE _UNICODE NOMINMAX W
 target_link_libraries(ProviderGateTests PRIVATE version d3d12 dxgi)
 set_target_properties(ProviderGateTests PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-add_executable(NvidiaPolicyTests nvidia_policy_tests.cpp "${NATIVE_SOURCE}/nvidia_mfg_policy.cpp")
+add_executable(NvidiaPolicyTests nvidia_policy_tests.cpp "${NATIVE_SOURCE}/nvidia_mfg_policy.cpp"
+    "${NATIVE_SOURCE}/optiscaler_host.cpp")
 target_compile_features(NvidiaPolicyTests PRIVATE cxx_std_20)
 target_include_directories(NvidiaPolicyTests PRIVATE "${NATIVE_SOURCE}")
 target_compile_definitions(NvidiaPolicyTests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
@@ -90,11 +116,46 @@ target_compile_definitions(ControlResolverTests PRIVATE UNICODE _UNICODE NOMINMA
 target_include_directories(ControlResolverTests PRIVATE "${NATIVE_SOURCE}" "${STREAMLINE_ROOT}/include")
 set_target_properties(ControlWrapperFixture ControlResolverTests PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
+add_executable(PluginProbeLifetimeTests plugin_probe_lifetime_tests.cpp
+    "${NATIVE_SOURCE}/ampere_wrapper_capacity.cpp"
+    "${NATIVE_SOURCE}/third_party/minhook/src/hde/hde64.c")
+target_compile_features(PluginProbeLifetimeTests PRIVATE cxx_std_20)
+target_compile_definitions(PluginProbeLifetimeTests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_include_directories(PluginProbeLifetimeTests PRIVATE "${NATIVE_SOURCE}")
+set_target_properties(PluginProbeLifetimeTests PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
 add_library(SlInitFixture SHARED slinit_fixture.cpp slinit_fixture.def)
 target_compile_features(SlInitFixture PRIVATE cxx_std_20)
 target_compile_definitions(SlInitFixture PRIVATE SL_INTERPOSER UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_include_directories(SlInitFixture PRIVATE "${STREAMLINE_ROOT}/include")
 set_target_properties(SlInitFixture PROPERTIES OUTPUT_NAME "sl.interposer" MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+# Same fixture with the real interposer's hotpatchable slInit entry, built into
+# a hotpatch/ subdirectory so both can be named sl.interposer.dll.
+enable_language(ASM_MASM)
+add_library(SlInitHotpatchFixture SHARED slinit_fixture.cpp slinit_fixture_hotpatch.asm slinit_fixture_hotpatch.def)
+target_compile_features(SlInitHotpatchFixture PRIVATE cxx_std_20)
+target_compile_definitions(SlInitHotpatchFixture PRIVATE SL_INTERPOSER FIXTURE_HOTPATCH_SLINIT UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_include_directories(SlInitHotpatchFixture PRIVATE "${STREAMLINE_ROOT}/include")
+set_target_properties(SlInitHotpatchFixture PROPERTIES OUTPUT_NAME "sl.interposer"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/hotpatch"
+    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/hotpatch"
+    PDB_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/hotpatch"
+    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
+# Dying Light 2 / The Beast renderer model: a DLL that statically imports slInit
+# and resolves the interposer factory exports itself (host), and the same model
+# resolving slInit dynamically (not a host).
+add_library(RendererHostFixture SHARED renderer_host_fixture.cpp)
+target_compile_definitions(RendererHostFixture PRIVATE FIXTURE_STATIC_SLINIT=1)
+target_link_libraries(RendererHostFixture PRIVATE SlInitFixture)
+add_library(RendererDynamicFixture SHARED renderer_host_fixture.cpp)
+target_compile_definitions(RendererDynamicFixture PRIVATE FIXTURE_STATIC_SLINIT=0)
+foreach(target RendererHostFixture RendererDynamicFixture)
+    target_compile_features(${target} PRIVATE cxx_std_20)
+    target_compile_definitions(${target} PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_include_directories(${target} PRIVATE "${STREAMLINE_ROOT}/include")
+    set_target_properties(${target} PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endforeach()
 
 add_executable(ReleaseLoadCheck loader_tests.cpp)
 target_compile_features(ReleaseLoadCheck PRIVATE cxx_std_20)
@@ -102,6 +163,20 @@ target_include_directories(ReleaseLoadCheck PRIVATE "${NATIVE_SOURCE}" "${CMAKE_
 target_compile_definitions(ReleaseLoadCheck PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN MFG_UNLOCK_RUNTIME_GPU_SELECTION=1)
 target_link_libraries(ReleaseLoadCheck PRIVATE dinput8 dxguid)
 set_target_properties(ReleaseLoadCheck PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
+# Gears of War E-Day model (Themida): import descriptors without
+# OriginalFirstThunk. The post-build step rewrites the linked executable.
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_executable(ThemidaImportHost themida_import_host.cpp)
+target_compile_features(ThemidaImportHost PRIVATE cxx_std_20)
+target_include_directories(ThemidaImportHost PRIVATE "${NATIVE_SOURCE}")
+target_compile_definitions(ThemidaImportHost PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_link_libraries(ThemidaImportHost PRIVATE version)
+set_target_properties(ThemidaImportHost PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+add_custom_command(TARGET ThemidaImportHost POST_BUILD
+    COMMAND "${Python3_EXECUTABLE}" -I "${CMAKE_CURRENT_SOURCE_DIR}/zero_import_names.py"
+        "$<TARGET_FILE:ThemidaImportHost>"
+    VERBATIM)
 
 add_library(ExistingOverlayFixture SHARED overlay_fixture.cpp
     "${NATIVE_SOURCE}/third_party/minhook/src/hook.c"
@@ -119,5 +194,5 @@ target_compile_features(WarpPresentHarness PRIVATE cxx_std_20)
 target_include_directories(WarpPresentHarness PRIVATE "${NATIVE_SOURCE}" "${CMAKE_CURRENT_SOURCE_DIR}")
 target_include_directories(WarpPresentHarness PRIVATE "${STREAMLINE_ROOT}/include")
 target_compile_definitions(WarpPresentHarness PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
-target_link_libraries(WarpPresentHarness PRIVATE d3d12 dxgi user32 dwmapi EngineFactoryFixture)
+target_link_libraries(WarpPresentHarness PRIVATE d3d12 dxgi user32 dwmapi dinput8 dxguid EngineFactoryFixture)
 set_target_properties(WarpPresentHarness PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")

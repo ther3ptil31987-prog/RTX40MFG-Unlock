@@ -11,7 +11,6 @@ namespace
 {
 #include "output_pull_mask_transform.inl"
 
-constexpr size_t kOutputPullMaskSlot = 14;
 constexpr size_t kOutputPullMaskAllocationBytes = kDescriptorBytes
     + kOutputCapacity + kScratchCapacity;
 
@@ -23,6 +22,9 @@ const OutputPullMaskProfile* MaskProfileForTemporal(
     const TemporalProviderProfile* profile) noexcept
 {
     if (profile == &k3109TemporalProfile)
+        return &kOutputPullMask3109;
+    // 310.9.16 keeps the exact 310.9 OutputPull payload, one slot later.
+    if (profile == &k310916TemporalProfile)
         return &kOutputPullMask3109;
     if (profile == &kLegacySlot9TemporalProfile)
         return &kOutputPullMaskLegacy;
@@ -220,13 +222,13 @@ bool PrepareOutputPullMaskForCreate(HMODULE module, const wchar_t* path,
         return fail(OutputPullMaskFailure::eDescriptor);
     const uintptr_t end = base + imageBytes;
     const uintptr_t table = gDescriptorEntry - temporal->temporalSlot * sizeof(uintptr_t);
-    if (table < base || table > end - kKernelCount * sizeof(uintptr_t))
+    if (table < base || table > end - temporal->kernelCount * sizeof(uintptr_t))
         return fail(OutputPullMaskFailure::eDescriptor);
-    const uintptr_t entry = table + kOutputPullMaskSlot * sizeof(uintptr_t);
+    const uintptr_t entry = table + temporal->outputPullSlot * sizeof(uintptr_t);
     uintptr_t original = 0;
     std::array<uint8_t, kDescriptorBytes> descriptor{};
     if (!IsReadOnlyImageAddress(module, entry) || !SafeRead(entry, original)
-        || !DescriptorMatches(base, end, original, kOutputPullMaskSlot, *temporal)
+        || !DescriptorMatches(base, end, original, temporal->outputPullSlot, *temporal)
         || !SafeCopy(descriptor.data(), reinterpret_cast<const void*>(original), descriptor.size())
         || ReadU64(descriptor.data() + 32) != 256
         || ReadU64(descriptor.data() + 40) != 1)

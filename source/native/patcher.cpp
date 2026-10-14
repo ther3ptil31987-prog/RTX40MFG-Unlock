@@ -13,7 +13,11 @@
 #include "ui_input_coherence.h"
 #include "hudless_probe.h"
 #include "hudless_visualizer.h"
+#if MFG_UNLOCK_XESS
+#include "xess/xess_mod.h"
+#endif
 #include "ampere_backend.h"
+#include "ampere_provider_arch.h"
 #include "adapter_discovery.h"
 #include "ngx_initialization.h"
 #include "ngx_runtime_dispatch.h"
@@ -30,11 +34,16 @@ namespace gpu_backend = gpu_dispatch;
 inline bool UseAmpere() noexcept { return gpu_dispatch::IsAmpere(); }
 
 #include "dlssg_provider_policy.h"
+#include "dlssg_provider_selection.h"
+#include "ampere_status_fields.h"
+#include "ampere_flip_metering.h"
 #include "ngx_mfg_gate.h"
 #include "reflex_control.h"
 #include "vsync_control.h"
+#include "optiscaler_host.h"
 #include "ngx_runtime_policy.h"
 #include "dlssg_preset.h"
+#include "dlssg_preset_policy.h"
 #include "present_counter.h"
 #include "entry_detour.h"
 #include "protected_pointer.h"
@@ -125,6 +134,8 @@ std::atomic<PFun_slSetD3DDevice*> gOriginalSlSetD3DDeviceEntry{nullptr};
 entry_detour::Handle gSlSetD3DDeviceEntryHandle{};
 std::atomic<bool> gSlInitInstalledAtLoad{false};
 std::atomic<uint64_t> gSlSetD3DDeviceCalls{0};
+// The game's sl.interposer.dll; the Streamline entry hooks serve only it.
+std::atomic<HMODULE> gHostInterposer{nullptr};
 using GetProcAddressFn = FARPROC (WINAPI*)(HMODULE, LPCSTR);
 using LoadLibraryAFn = HMODULE (WINAPI*)(LPCSTR);
 using LoadLibraryWFn = HMODULE (WINAPI*)(LPCWSTR);
@@ -201,6 +212,12 @@ std::atomic<uint64_t> gSetOptionsResolverFallbackCalls{0};
 std::atomic<uint64_t> gGetStateCalls{0};
 std::atomic<uint64_t> gGetStateResolverFallbackCalls{0};
 std::atomic<uint64_t> gLiveReapplyCount{0};
+// RTX 30 DLSS-G wrapper NVAPI view (AmpereWrapperNvapiView).
+using NvapiQueryInterfaceFn = void*(__cdecl*)(uint32_t);
+std::array<std::atomic<HMODULE>, 4> gAmpereFilteredWrappers{};
+std::atomic<NvapiQueryInterfaceFn> gWrapperNvapiQuery{nullptr};
+std::atomic<uint64_t> gWrapperNvapiFilters{0}, gFlipMeteringHidden{0};
+std::atomic<bool> gWrapperNvapiFilterInstalled{false}, gAmpereWrapperResolverRouted{false};
 std::atomic<uint64_t> gNotInitializedRetryCount{0};
 std::atomic<uint64_t> gNgxCreateCalls{0};
 std::atomic<uint64_t> gNgxFrameGenerationCreateCalls{0};
@@ -251,6 +268,15 @@ OutputPullMaskInitEvidence gOutputPullMaskVulkanInit;
 thread_local entry_detour::Snapshot gAmpereNativeInitBoundary{};
 thread_local uint64_t gAmpereNativeInitTicket = 0;
 std::atomic<bool> gModuleInventoryDirty{true};
+// A host can shut Streamline down and initialize it again before it has a
+// device (Cyberpunk 2077 calls slInit twice at startup). A plug-in we retain
+// across that slShutdown is never unloaded, so the next slInit reuses its
+// first-session state: NVIDIA's plug-ins skip slOnPluginLoad once loaded and
+// then start on the previous session's freed parameter interface. Work which
+// retains a Streamline plug-in (entry detours, pins) therefore waits until the
+// host's session has a device: slSetD3DDevice, slSetVulkanInfo or the first
+// slGetFeatureFunction, which Streamline only allows after the device is set.
+std::atomic<bool> gStreamlinePluginRetention{false};
 std::atomic<bool> gLiveHookInstalled{false};
 std::atomic<bool> gSetOptionsResolverFallbackActive{false};
 std::atomic<bool> gGetStateResolverFallbackActive{false};
@@ -343,10 +369,18 @@ struct ControlConfig
     uint32_t dlssgPreset = 2;
     uint32_t vsyncMode = 0;
     uint32_t reflexFrameLimitFps = 0;
+    // XeSS MFG runs under OptiScaler only (beta.8); its menu owns the frame count. The model
+    // XeFG's extra frames use: 0 our port of Intel's MFG model, 1 XeFG's own 2x model, read at
+    // OptiScaler's first XeFG creation (a restart applies a change). OptiScaler.ini [XeFG]
+    // XeFGModel (or the earlier RtxmfgModel) comes first. Older XeSS keys in a saved file are ignored.
+    uint32_t xessModel = 0;
     bool dynamicExperimental56 = false;
     bool generatedOnlyDebug = false;
     bool intervalLogging = gpu_dispatch::IsAda() || UseAmpere();
     bool selectiveOtaDlssgWrapper = false;
+    // When OptiScaler is detected: 0 = its menu owns the controls (RTXMFG UI
+    // hidden, Follow, no overrides); 1 = "rtxmfg" keeps RTXMFG's UI/controls.
+    uint32_t optiScalerUi = 0;
 };
 
 struct ControlSnapshot
@@ -553,6 +587,7 @@ bool InstallSlCommonResolverDiscovery(
     HMODULE module, const std::wstring& path);
 bool InstallStreamlineLoaderDiscovery(
     HMODULE module, const std::wstring& path);
+FARPROC AmpereWrapperNvapiView(HMODULE module, LPCSTR name, FARPROC resolved, const void* caller) noexcept;
 ModuleRecord InspectLoadedModule(HMODULE, const std::wstring&);
 void InspectAlreadyLoadedModules();
 ampere_gpu::PreparationBoundary ResolveAmperePreparationBoundary(HMODULE, uint64_t) noexcept;
@@ -619,6 +654,16 @@ void MidpointLog(const wchar_t* message)
     Log(L"%s", message ? message : L"");
 }
 
+void LogAmpereArchitectureDetection(bool armed) noexcept
+{
+    static std::atomic<bool> logged{false};
+    if (!gLogReady.load(std::memory_order_acquire) || logged.exchange(true, std::memory_order_acq_rel))
+        return;
+    const auto declaration = ampere_provider_arch::Read();
+    Log(L"RTX 30 DLSS-G declaration: armed=%d gpuArchitecture=0x%X implementation=0x%X",
+        armed, declaration.gpuArchitecture, declaration.gpuImplementation);
+}
+
 int32_t NvidiaProfileStatus(
     const nvidia_mfg_policy::ProfileQuery& query) noexcept
 {
@@ -681,6 +726,16 @@ uint32_t SafeMaximumMultiplier() noexcept
             gNvidiaCompatibilityTier.load(std::memory_order_acquire)), runtimeMaximum);
     gSafeMaximumMultiplier.store(maximum, std::memory_order_release);
     return maximum;
+}
+
+uint32_t AmpereAdvertisedMaximum() noexcept
+{
+    // Allocation evidence (certified maximum) arrives only after Create; the
+    // pre-Create maximum follows the wrapper's startup capacity and the title's
+    // NVIDIA ceiling, the same ceiling SafeMaximumMultiplier applies later.
+    return ampere_policy::AdvertisedGeneratedFrames(ampere_backend::StartupMaximumGeneratedFrames(),
+        nvidia_mfg_policy::LimitToPolicy(static_cast<nvidia_mfg_policy::Tier>(
+            gNvidiaCompatibilityTier.load(std::memory_order_acquire)), ampere_policy::kMaximumGeneratedFrames + 1u));
 }
 
 uint32_t EffectiveMultiplier(const ControlConfig& control) noexcept
@@ -1080,7 +1135,7 @@ void RecordDlssgStateResult(
     gDlssgStatus.store(static_cast<uint32_t>(state.status), std::memory_order_relaxed);
     if (state.structVersion >= sl::kStructVersion2)
         gNumFramesToGenerateMax.store(
-            UseAmpere() ? std::min(state.numFramesToGenerateMax, kMaximumMultiplier - 1u)
+            UseAmpere() ? std::min(state.numFramesToGenerateMax, AmpereAdvertisedMaximum())
                 : state.numFramesToGenerateMax, std::memory_order_relaxed);
     bool dynamicChanged = false;
     if (state.structVersion < sl::kStructVersion4)
@@ -1422,7 +1477,7 @@ bool TryParseControl(const char* data, size_t size, ControlConfig& control)
 
     size_t presetOffset = 0;
     if (FindJsonValue(content, "dlssgPreset", presetOffset)
-        && !TryParseUnsigned(content, "dlssgPreset", 0, 2, parsed.dlssgPreset))
+        && !TryParseUnsigned(content, "dlssgPreset", 0, 3, parsed.dlssgPreset))
         return false;
 
     size_t experimentalOffset = 0;
@@ -1433,6 +1488,10 @@ bool TryParseControl(const char* data, size_t size, ControlConfig& control)
     if (FindJsonValue(content, "reflexFrameLimitFps", pacingOffset)
         && !TryParseUnsigned(content, "reflexFrameLimitFps", 0, 1000,
             parsed.reflexFrameLimitFps))
+        return false;
+    size_t xessOffset = 0;
+    if (FindJsonValue(content, "xessModel", xessOffset)
+        && !TryParseUnsigned(content, "xessModel", 0, 1, parsed.xessModel))
         return false;
     if (FindJsonValue(content, "dynamicExperimental56", experimentalOffset)
         && !TryParseBoolean(content, "dynamicExperimental56",
@@ -1467,6 +1526,17 @@ bool TryParseControl(const char* data, size_t size, ControlConfig& control)
     // Protocol 18 retires single-wrapper redirection. Keep accepting the old
     // key so existing configs migrate without being rejected, but never arm it.
     parsed.selectiveOtaDlssgWrapper = false;
+
+    size_t optiScalerUiOffset = 0;
+    if (FindJsonValue(content, "optiScalerUi", optiScalerUiOffset))
+    {
+        if (content.compare(optiScalerUiOffset, 8, "\"rtxmfg\"") == 0)
+            parsed.optiScalerUi = 1;
+        else if (content.compare(optiScalerUiOffset, 12, "\"optiscaler\"") == 0)
+            parsed.optiScalerUi = 0;
+        else
+            return false;
+    }
 
     if (UseAmpere())
     {
@@ -1534,12 +1604,32 @@ ControlConfig ReadInitialControl()
     return control;
 }
 
+// OptiScaler mode: OptiScaler's menu owns the user controls. RTXMFG follows
+// the caller's frame-generation requests (OptiScaler's ratio/interpolation
+// count, or the game's own setting) and applies none of its own overrides.
+// The saved file is not rewritten, so standalone launches keep their choices.
+ControlConfig EffectiveControl(const ControlConfig& saved) noexcept
+{
+    if (!optiscaler_host::UiDelegated())
+        return saved;
+    ControlConfig effective = saved;
+    effective.followGame = true;
+    effective.dynamic = false;
+    effective.dynamicTargetFrameRate = 0;
+    effective.dlssgPreset = dlssg_preset::kGameOrDriver;
+    effective.vsyncMode = 0;
+    effective.reflexFrameLimitFps = 0;
+    effective.dynamicExperimental56 = false;
+    effective.generatedOnlyDebug = false;
+    return effective;
+}
+
 uint32_t ReadInitialDlssgPreset() noexcept
 {
     // Called at the first provider settings query if the worker has not yet
     // published control. Registering this callback in DllMain performs no I/O.
-    try { return ReadInitialControl().dlssgPreset; }
-    catch (...) { return 2; }
+    try { return EffectiveControl(ReadInitialControl()).dlssgPreset; }
+    catch (...) { return optiscaler_host::UiDelegated() ? dlssg_preset::kGameOrDriver : 2; }
 }
 
 std::wstring ResolveConfigPath(HMODULE instance, const std::wstring& executableDirectory)
@@ -1675,6 +1765,14 @@ ControlSnapshot ReadControlSnapshot()
         if (before == after)
         {
             snapshot.revision = after;
+            // A late OptiScaler detection applies before the worker republishes.
+            if (optiscaler_host::UiDelegated())
+            {
+                snapshot.control.followGame = true;
+                snapshot.control.dynamic = false;
+                snapshot.control.generatedOnlyDebug = false;
+                snapshot.control.dynamicExperimental56 = false;
+            }
             return snapshot;
         }
     }
@@ -1718,6 +1816,73 @@ uint64_t UnixTimeSeconds()
     ticks.HighPart = time.dwHighDateTime;
     constexpr uint64_t kWindowsToUnixEpoch = 116444736000000000ULL;
     return (ticks.QuadPart - kWindowsToUnixEpoch) / 10000000ULL;
+}
+
+std::string JsonEscapeUtf8(const std::string& source)
+{
+    std::string out;
+    out.reserve(source.size());
+    for (const unsigned char c : source)
+    {
+        if (c == '"' || c == '\\') { out += '\\'; out += static_cast<char>(c); }
+        else if (c == '\n') out += "\\n";
+        else if (c == '\r') out += "\\r";
+        else if (c == '\t') out += "\\t";
+        else if (c >= 32) out += static_cast<char>(c);
+    }
+    return out;
+}
+
+// The game's selected frame generation: XeSS-FG while its context is enabled
+// (or a native context reported activity within 2 s), else DLSS-G while the
+// game requests it. Only one is active per process.
+const char* ActiveFrameGeneration(bool xessActive) noexcept
+{
+    if (xessActive) return "xess";
+    if (gGameFrameGenerationOn.load(std::memory_order_acquire)) return "dlss";
+    return "none";
+}
+
+std::string XessStatusFragment(const ControlConfig& control)
+{
+#if MFG_UNLOCK_XESS
+    // beta.8: the XeSS route runs under OptiScaler only (xessHooksActive stays false without it).
+    const auto snapshot = xess_mod::ReadSnapshot();
+    if (!snapshot)
+        return std::string(",\"xessAvailable\":false,\"activeFrameGeneration\":\"")
+            + ActiveFrameGeneration(false) + "\"";
+    const uint64_t now = GetTickCount64();
+    const uint64_t nativeAge = snapshot->nativeActivityTick && now >= snapshot->nativeActivityTick
+        ? now - snapshot->nativeActivityTick : UINT64_MAX;
+    const bool nativeActive = snapshot->nativeEnabled && nativeAge <= 2000;
+    const bool xessActive = (snapshot->initialized && snapshot->enabled) || nativeActive;
+    char numbers[768]{};
+    sprintf_s(numbers, ",\"xessAvailable\":true,\"xessHooksActive\":%s,\"xessRuntimeSource\":%u,"
+        "\"xessProviderLoaded\":%s,\"xessPortReady\":%s,\"xessInitialized\":%s,"
+        "\"xessEnabled\":%s,\"xessGameEnabled\":%s,\"xessNativeEnabled\":%s,"
+        "\"xessApplied\":%u,\"xessCapacity\":%u,"
+        "\"xessFramesPresented\":%u,\"xessLastResult\":%d,\"xessLastFrameGenResult\":%d,"
+        "\"xessProviderEnabled\":%s,\"xessAppFrames\":%llu,\"xessAdapterVendor\":%u",
+        snapshot->importsInstalled ? "true" : "false", snapshot->runtimeSource,
+        snapshot->providerLoaded ? "true" : "false", snapshot->portReady ? "true" : "false",
+        snapshot->initialized ? "true" : "false", snapshot->enabled ? "true" : "false",
+        snapshot->gameEnabled ? "true" : "false", nativeActive ? "true" : "false",
+        snapshot->applied, snapshot->capacity,
+        snapshot->framesPresented, snapshot->lastResult, snapshot->lastFrameGenResult,
+        snapshot->providerEnabled ? "true" : "false",
+        static_cast<unsigned long long>(snapshot->appFrames), snapshot->adapterVendor);
+    return numbers
+        + std::string(",\"xessModel\":") + std::to_string(control.xessModel)
+        + ",\"xessModelActive\":" + std::to_string(snapshot->modelActive)
+        + ",\"xessRuntimeFailure\":\"" + JsonEscapeUtf8(snapshot->runtimeFailure)
+        + "\",\"xessStatus\":\"" + JsonEscapeUtf8(snapshot->status)
+        + "\",\"xessAdapter\":\"" + JsonEscapeUtf8(snapshot->adapter)
+        + "\",\"activeFrameGeneration\":\"" + ActiveFrameGeneration(xessActive) + "\"";
+#else
+    (void)control;
+    return std::string(",\"xessAvailable\":false,\"activeFrameGeneration\":\"")
+        + ActiveFrameGeneration(false) + "\"";
+#endif
 }
 
 std::string JsonEscapeWide(const std::wstring& source)
@@ -1764,6 +1929,23 @@ std::string JsonEscapeWide(const std::wstring& source)
         }
     }
     return escaped;
+}
+
+std::string OptiScalerStatusFragment()
+{
+    const auto host = optiscaler_host::Read();
+    const char* owner = !host.detected ? "none" : host.uiDelegated ? "optiscaler" : "rtxmfg";
+    return std::string(",\"integrationMode\":\"") + (host.detected ? "optiscaler" : "standalone")
+        + "\",\"optiScalerDetected\":" + (host.detected ? "true" : "false")
+        + ",\"optiScalerRoute\":\"" + optiscaler_host::RouteName(host.route)
+        + "\",\"optiScalerUiOwner\":\"" + owner
+        + "\",\"optiScalerMenuSuppressed\":" + (host.uiDelegated ? "true" : "false")
+        + ",\"optiScalerPluginCallerAccepted\":" + (host.pluginCallerAccepted ? "true" : "false")
+        + ",\"optiScalerPluginCallerRejected\":" + (host.pluginCallerRejected ? "true" : "false")
+        + ",\"optiScalerFileVersion\":\"" + JsonEscapeWide(host.fileVersion)
+        + "\",\"optiScalerProductVersion\":\"" + JsonEscapeWide(host.productVersion)
+        + "\",\"optiScalerPath\":\"" + JsonEscapeWide(host.path)
+        + "\",\"fakeNvapiObserved\":" + (optiscaler_host::FakeNvapiObserved() ? "true" : "false");
 }
 
 const char* ControlDetourMethod(const ControlRouteRecord* route,
@@ -1890,10 +2072,33 @@ void UpdatePresentationPolicy(const ControlConfig& control)
     vsync_control::Configure(control.vsyncMode);
 }
 
+// OptiScaler's model choice for its own XeFG: [XeFG] XeFGModel (or the earlier RtxmfgModel) in the
+// OptiScaler.ini beside its module. 0 auto (the control file's xessModel), 1 our port, 2 XeFG's 2x
+// model. xess_mod reads it again when the model is chosen; this copy only seeds ConfigureModel.
+uint32_t OptiScalerHostModel()
+{
+    std::wstring setting, path, key;
+    return optiscaler_host::ReadXefgModel(setting, path, key);
+}
+
+// Returns true for the call which opened plug-in retention (see the flag).
+bool AllowStreamlinePluginRetention(const wchar_t* boundary)
+{
+    if (gStreamlinePluginRetention.exchange(true, std::memory_order_acq_rel))
+        return false;
+    gModuleInventoryDirty.store(true, std::memory_order_release);
+    Log(L"Streamline plug-in retention allowed at %s (slInit calls=%llu)", boundary,
+        static_cast<unsigned long long>(gSlInitCalls.load(std::memory_order_relaxed)));
+    return true;
+}
+
 void DiscoverReflexModule()
 {
     // This function is called only by the normal worker, after loader discovery
     // has returned. Never install this transport from a LoadLibrary callback.
+    // Its entries pin sl.reflex, which a Streamline restart must still unload.
+    if (!gStreamlinePluginRetention.load(std::memory_order_acquire))
+        return;
     std::vector<ModuleRecord> modules;
     {
         std::lock_guard lock(gModuleMutex);
@@ -2467,19 +2672,22 @@ bool WriteBridgeStatus(const ControlConfig& control, DWORD pid)
     const size_t gpuClosing = serialized.rfind('}');
     if (gpuClosing == std::string::npos) return false;
     char gpu[192]{};
-    sprintf_s(gpu, ",\"product\":\"RTXMFG\",\"gpuFamily\":%u,\"gpuAdapterLuid\":%llu,\"gpuSelectionFailure\":%u",
+    sprintf_s(gpu, ",\"product\":\"RTXMFG\",\"gpuFamily\":%u,\"gpuAdapterLuid\":%llu,\"gpuSelectionFailure\":%u,"
+        "\"gpuVendorId\":%u",
         static_cast<uint32_t>(gpu_dispatch::Selected()),
-        static_cast<unsigned long long>(gpu_dispatch::AdapterLuid()), gpu_dispatch::FailureCode());
+        static_cast<unsigned long long>(gpu_dispatch::AdapterLuid()), gpu_dispatch::FailureCode(),
+        gpu_dispatch::AdapterVendor());
     serialized.insert(gpuClosing, gpu);
     char presetStatus[512]{};
     sprintf_s(presetStatus, ",\"dlssgPresetLatched\":%u,"
         "\"dlssgPresetSelectionFrozen\":%s,\"dlssgPresetRestartRequired\":%s,"
         "\"dlssgPresetObserved\":%u,\"dlssgPresetObservedValid\":%s,"
-        "\"dlssgPresetOverrideReadCount\":%llu",
+        "\"dlssgPresetOverrideReadCount\":%llu,\"dlssgPresetCAvailable\":%s",
         preset.latched, preset.selectionFrozen ? "true" : "false",
         preset.restartRequired ? "true" : "false", preset.observedPreset,
         preset.observedPresetValid ? "true" : "false",
-        static_cast<unsigned long long>(preset.overrideReads));
+        static_cast<unsigned long long>(preset.overrideReads),
+        preset.presetCAvailable ? "true" : "false");
     serialized.insert(serialized.rfind('}'), presetStatus);
     const auto vsync = vsync_control::ReadSnapshot();
     const auto reflex = reflex_control::ReadSnapshot();
@@ -2507,9 +2715,23 @@ bool WriteBridgeStatus(const ControlConfig& control, DWORD pid)
         reflex.currentHookMask, reflex.moduleVersionMajor, reflex.moduleVersionMinor,
         reflex.moduleVersionPatch, static_cast<unsigned long long>(reflex.moduleGeneration));
     serialized.insert(serialized.rfind('}'), pacing);
+    serialized.insert(serialized.rfind('}'), XessStatusFragment(control));
+    serialized.insert(serialized.rfind('}'), OptiScalerStatusFragment());
     serialized.insert(serialized.rfind('}'), hudless_probe::StatusFragment());
+    // Flat fields only (ampere_status_fields.h): nested objects made the menu
+    // reject every RTX 30 status snapshot.
+    if (const auto declaration = ampere_provider_arch::Read(); declaration.armed)
+        serialized.insert(serialized.rfind('}'), ampere_status_fields::Declaration(declaration));
     if (UseAmpere())
     {
+        // The filter runs inside the wrapper's startup; report it from here.
+        static std::atomic<bool> flipMeteringReported{false};
+        if (gFlipMeteringHidden.load(std::memory_order_relaxed)
+            && !flipMeteringReported.exchange(true, std::memory_order_acq_rel))
+            Log(L"Ampere flip metering withheld from the DLSS-G wrapper: dispatchers=%llu hidden=%llu; "
+                L"CPU-paced presentation keeps one output per generated frame",
+                static_cast<unsigned long long>(gWrapperNvapiFilters.load(std::memory_order_relaxed)),
+                static_cast<unsigned long long>(gFlipMeteringHidden.load(std::memory_order_relaxed)));
         const size_t closing = serialized.rfind('}');
         if (closing == std::string::npos) return false;
         const auto diagnostic = ampere_backend::Diagnostics();
@@ -2520,6 +2742,10 @@ bool WriteBridgeStatus(const ControlConfig& control, DWORD pid)
             "\"ampereNativeMaximum\":%u,\"ampereLastCreateCount\":%d,"
             "\"ampereNativeMaximumReadResult\":%u,\"ampereStartupMaximum\":%u,\"amperePresentationBuffers\":%u,"
             "\"ampereCreatedFeatures\":%llu,\"ampereSubmittedBatches\":%llu,"
+            "\"ampereFailedBatches\":%llu,\"ampereRecoveredBatches\":%llu,"
+            "\"ampereOutputReuseLatches\":%llu,\"ampereFlipMeteringFilterInstalled\":%s,"
+            "\"ampereFlipMeteringResolverRouted\":%s,"
+            "\"ampereWrapperNvapiFilters\":%llu,\"ampereFlipMeteringHidden\":%llu,"
             "\"ampereKernelImage\":%u,\"ampereNativeCacheStatus\":%u,\"ampereCertifiedMaximum\":%u,"
             "\"ampereFirstFailure\":%u,"
             "\"ampereFirstNgxResult\":%u,"
@@ -2542,6 +2768,13 @@ bool WriteBridgeStatus(const ControlConfig& control, DWORD pid)
             ampere_backend::NativeMaximumReadResult(), ampere_backend::StartupMaximumGeneratedFrames(), ampere_backend::PresentationBuffers(),
             static_cast<unsigned long long>(ampere_backend::CreatedFeatures()),
             static_cast<unsigned long long>(ampere_backend::SubmittedBatches()),
+            static_cast<unsigned long long>(ampere_backend::FailedBatches()),
+            static_cast<unsigned long long>(ampere_backend::RecoveredBatches()),
+            static_cast<unsigned long long>(ampere_backend::OutputReuseLatches()),
+            gWrapperNvapiFilterInstalled.load(std::memory_order_acquire) ? "true" : "false",
+            gAmpereWrapperResolverRouted.load(std::memory_order_acquire) ? "true" : "false",
+            static_cast<unsigned long long>(gWrapperNvapiFilters.load(std::memory_order_relaxed)),
+            static_cast<unsigned long long>(gFlipMeteringHidden.load(std::memory_order_relaxed)),
             ampere_gpu::KernelImage(), ampere_gpu::NativeCacheStatus(),
             ampere_backend::CertifiedMaximumGeneratedFrames(),
             diagnostic.first.code,
@@ -2560,6 +2793,9 @@ bool WriteBridgeStatus(const ControlConfig& control, DWORD pid)
             ampere_backend::LegacySinglePreset() ? "true" : "false");
         serialized.insert(closing, ampere);
     }
+    if (const auto selection = dlssg_provider_selection::Read(); selection.prepared)
+        serialized.insert(serialized.rfind('}'),
+            ampere_status_fields::ProviderSelection(selection, JsonEscapeWide(selection.selected.path)));
     const auto publication=status_transport::Publish(gStatusPath,serialized);
     static DWORD lastPrimaryError=ERROR_SUCCESS,lastFallbackError=ERROR_SUCCESS;
     static bool lastFallback=false;
@@ -2818,6 +3054,19 @@ bool ControlRequestsEnabled(const ControlSnapshot& snapshot,
         || snapshot.control.multiplier > 1;
 }
 
+// RTX 30 options from the control and the game's own request; see
+// ampere_policy::DecideOptions.
+ampere_policy::OptionsDecision AmpereOptions(
+    const sl::DLSSGOptions& source, const ControlSnapshot& snapshot) noexcept
+{
+    const auto gameMode = source.mode == sl::DLSSGMode::eOff ? ampere_policy::OptionsMode::eOff
+        : source.mode == sl::DLSSGMode::eDynamic ? ampere_policy::OptionsMode::eDynamic
+        : ampere_policy::OptionsMode::eOn;
+    return ampere_policy::DecideOptions(snapshot.control.followGame,
+        snapshot.control.multiplier, snapshot.control.dynamic, gameMode,
+        source.numFramesToGenerate, SafeMaximumMultiplier(), DynamicMfgSupported());
+}
+
 bool CanReenableRetainedFeatureLocked(ControlRouteRecord& route,
     const sl::ViewportHandle& viewport, const ControlSnapshot& snapshot,
     const sl::DLSSGOptions& source,
@@ -2850,9 +3099,8 @@ bool CanReenableRetainedFeatureLocked(ControlRouteRecord& route,
         if (!acceptedOff && !freshRecreation)
             return false;
     }
-    const uint32_t requiredMultiplier = snapshot.control.followGame
-        ? std::max(source.numFramesToGenerate + 1u, 2u)
-        : EffectiveMultiplier(snapshot.control);
+    const uint32_t requiredMultiplier =
+        AmpereOptions(source, snapshot).generatedFrames + 1u;
     if (gRetainedFrameGenerationFeature.generatedFrameCapacity + 1u
         < requiredMultiplier)
         return false;
@@ -3387,18 +3635,22 @@ sl::DLSSGOptions BuildAdjustedOptions(
     }
     if (UseAmpere())
     {
-        if (snapshot.control.multiplier == 1 || source.mode == sl::DLSSGMode::eOff)
+        const auto decision = AmpereOptions(source, snapshot);
+        if (decision.mode == ampere_policy::OptionsMode::eOff)
             adjusted.mode = sl::DLSSGMode::eOff;
-        else if (snapshot.control.dynamic && DynamicMfgSupported())
+        else if (decision.mode == ampere_policy::OptionsMode::eDynamic)
         {
-            adjusted.structVersion = sl::kStructVersion5;
+            // Follow game keeps the game's own structure and target.
+            if (!decision.gameDynamicTarget)
+                adjusted.structVersion = sl::kStructVersion5;
             adjusted.mode = sl::DLSSGMode::eDynamic;
         }
         else
             adjusted.mode = sl::DLSSGMode::eOn;
-        adjusted.numFramesToGenerate = std::max(EffectiveMultiplier(snapshot.control), 2u) - 1u;
-        adjusted.dynamicTargetFrameRate = adjusted.mode == sl::DLSSGMode::eDynamic
-            ? static_cast<float>(snapshot.control.dynamicTargetFrameRate) : 0.0f;
+        adjusted.numFramesToGenerate = decision.generatedFrames;
+        if (!decision.gameDynamicTarget)
+            adjusted.dynamicTargetFrameRate = adjusted.mode == sl::DLSSGMode::eDynamic
+                ? static_cast<float>(snapshot.control.dynamicTargetFrameRate) : 0.0f;
         adjusted.flags = static_cast<sl::DLSSGFlags>(static_cast<uint32_t>(adjusted.flags)
             & ~static_cast<uint32_t>(sl::DLSSGFlags::eShowOnlyInterpolatedFrame));
     }
@@ -3941,6 +4193,10 @@ bool ExportsNgxVulkanRoute(HMODULE module) noexcept
 
 bool IsNgxRuntimeModule(HMODULE module) noexcept
 {
+    // OptiScaler exports an NGX-compatible facade (D3D12/Vulkan CreateFeature,
+    // Init_ProjectID...). It is the caller of NVIDIA's runtime, not the runtime.
+    if (optiscaler_host::IsHostModule(module) || optiscaler_host::IsOptiScalerImage(module))
+        return false;
     return ngx_runtime_policy::IsRuntime(module);
 }
 
@@ -4074,7 +4330,10 @@ bool ResolveMidpointProvider(NgxDispatchRoute route, NgxGraphicsApi api,
         return false;
     }
 
-    if (UseAmpere() && api == NgxGraphicsApi::eD3D12)
+    // The runtime's own dispatch table names the provider NGX bound to Frame Generation. RTX 30 always
+    // used it; RTX 40 needs it when a game's own DLSS-G and an NVIDIA app override copy are both loaded
+    // (both fully covered: the unique-candidate fallback below must not choose between them).
+    if ((UseAmpere() || gpu_dispatch::IsAda()) && api == NgxGraphicsApi::eD3D12)
     {
         const auto create = detour.kind == entry_detour::Kind::eNgxRuntimeD3D12CreateFeature
             ? detour : entry_detour::ReadSnapshot(entry_detour::Kind::eNgxRuntimeD3D12CreateFeature, detour.owner);
@@ -4087,7 +4346,8 @@ bool ResolveMidpointProvider(NgxDispatchRoute route, NgxGraphicsApi api,
             if (!entry.current || entry.generation != ModuleGeneration(selected.provider)
                 || entry.target != reinterpret_cast<void*>(selected.target)
                 || !ngx_runtime_dispatch::StillCurrent(selected)
-                || !dlssg_provider_policy::IsSupportedRetainedProvider(selected.provider)) return false;
+                || !(UseAmpere() ? dlssg_provider_policy::IsSupportedRetainedAmpereProvider(selected.provider)
+                    : dlssg_provider_policy::IsSupportedRetainedProvider(selected.provider))) return false;
             provider = selected.provider;
             if (path) *path = LoadedModulePath(provider);
             source = NgxProviderSelectionSource::eRuntimeDispatchTable;
@@ -4457,12 +4717,18 @@ void BeforeNgxEvaluateFeatureForRoute(NgxDispatchRoute route,
         const bool callerIsSelectedProvider =
             reinterpret_cast<uintptr_t>(ModuleFromAddress(originalCaller))
             == gActiveNgxProviderBase.load(std::memory_order_acquire);
-        const bool selectedByUniqueCandidate =
-            gActiveNgxSelectionSource.load(std::memory_order_acquire)
-            == static_cast<uint32_t>(
-                NgxProviderSelectionSource::eRuntimeUniqueCandidate);
+        // Create resolved its provider through the runtime: the one covered provider, or (two
+        // DLSS-G copies loaded) the runtime's own dispatch table. Either way the runtime's FG
+        // Evaluates are admitted once they resolve to that provider and carry temporal parameters.
+        const uint32_t activeSource =
+            gActiveNgxSelectionSource.load(std::memory_order_acquire);
+        const bool selectedThroughRuntime =
+            activeSource == static_cast<uint32_t>(
+                NgxProviderSelectionSource::eRuntimeUniqueCandidate)
+            || activeSource == static_cast<uint32_t>(
+                NgxProviderSelectionSource::eRuntimeDispatchTable);
         if (route == NgxDispatchRoute::eRuntime
-            && !callerIsSelectedProvider && !selectedByUniqueCandidate)
+            && !callerIsSelectedProvider && !selectedThroughRuntime)
             return;
 
         const entry_detour::Snapshot detour =
@@ -4502,7 +4768,7 @@ void BeforeNgxEvaluateFeatureForRoute(NgxDispatchRoute route,
                 temporal_interval_trace::RecordIfValidTemporalSample(
                     handle, ngxParameters, gpu_backend::Ready());
             if (!universal_route_policy::CanInspectRuntimeEvaluate(false,
-                    selectedByUniqueCandidate, validTemporalSample))
+                    selectedThroughRuntime, validTemporalSample))
                 return;
         }
         else
@@ -5129,7 +5395,7 @@ sl::Result HandlePublicGetState(uint32_t routeSlot, ControlEntryPath path,
             const auto result = original(viewport, state, options ? &query : nullptr);
             if (DlssgStateAvailable(result) && state.structVersion >= sl::kStructVersion2)
             {
-                state.numFramesToGenerateMax = std::min(state.numFramesToGenerateMax, ampere_policy::kMaximumGeneratedFrames);
+                state.numFramesToGenerateMax = std::min(state.numFramesToGenerateMax, AmpereAdvertisedMaximum());
             }
             if (record) RecordDlssgStateResult(result, state);
             return result;
@@ -5350,7 +5616,7 @@ sl::Result HandleInternalGetData(uint32_t routeSlot,
             {
                 auto& state = *const_cast<sl::DLSSGState*>(known);
                 if (DlssgStateAvailable(result) && state.structVersion >= sl::kStructVersion2)
-                    state.numFramesToGenerateMax = std::min(state.numFramesToGenerateMax, ampere_policy::kMaximumGeneratedFrames);
+                    state.numFramesToGenerateMax = std::min(state.numFramesToGenerateMax, AmpereAdvertisedMaximum());
                 if (record) RecordDlssgStateResult(result, state);
             }
             return result;
@@ -6057,6 +6323,10 @@ sl::Result HookSlGetFeatureFunction(
     auto* original = gOriginalGetFeatureFunction.load(std::memory_order_acquire);
     if (!original)
         return sl::Result::eErrorNotInitialized;
+    // Hosts which let the interposer create the device never call
+    // slSetD3DDevice; feature functions are only available once it exists.
+    if (AllowStreamlinePluginRetention(L"slGetFeatureFunction"))
+        InspectAlreadyLoadedModules();
 
     const sl::Result result = original(feature, functionName, function);
     if (result == sl::Result::eOk && function && functionName)
@@ -6304,6 +6574,7 @@ sl::Result HookSlSetD3DDevice(void* device)
         ~Depth() { --depth; }
     } nested;
     gSlSetD3DDeviceCalls.fetch_add(1, std::memory_order_relaxed);
+    AllowStreamlinePluginRetention(L"slSetD3DDevice");
     InvalidateUiInputEvidence();
     const bool verifiedDevice = gpu_backend::ObserveD3D12Device(device);
     if (verifiedDevice)
@@ -6323,7 +6594,9 @@ sl::Result HookSlSetD3DDevice(void* device)
     const sl::Result result = UseAmpere()
         ? InvokeAmpereDeviceSetup(original, device) : original(device);
     if (result == sl::Result::eOk && verifiedDevice)
+    {
         hudless_probe::ObserveD3D12Device(device);
+    }
     return result;
 }
 
@@ -6332,6 +6605,7 @@ sl::Result HookSlSetVulkanInfo(const VulkanInfoPrefix& info)
     auto* original = gOriginalSetVulkanInfo.load(std::memory_order_acquire);
     if (!original)
         return sl::Result::eErrorNotInitialized;
+    AllowStreamlinePluginRetention(L"slSetVulkanInfo");
     InvalidateUiInputEvidence();
     void* physicalDevice = nullptr;
     __try
@@ -6378,6 +6652,7 @@ bool HookModuleImport(HMODULE module, const char* importedModule,
     if (!importDirectory.VirtualAddress || !importDirectory.Size)
         return false;
 
+    const DWORD imageSize = nt->OptionalHeader.SizeOfImage;
     auto* descriptor = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(
         base + importDirectory.VirtualAddress);
     for (; descriptor->Name; ++descriptor)
@@ -6386,14 +6661,20 @@ bool HookModuleImport(HMODULE module, const char* importedModule,
         if (_stricmp(moduleName, importedModule) != 0)
             continue;
 
-        const DWORD originalRva = descriptor->OriginalFirstThunk
-            ? descriptor->OriginalFirstThunk : descriptor->FirstThunk;
-        auto* originalThunk = reinterpret_cast<IMAGE_THUNK_DATA64*>(base + originalRva);
+        // Without a name table (Themida-packed executables such as Gears of
+        // War E-Day) the bound FirstThunk holds resolved addresses, not name
+        // RVAs, so no slot can be identified by name. Leave it untouched.
+        if (!descriptor->OriginalFirstThunk)
+            continue;
+        auto* originalThunk = reinterpret_cast<IMAGE_THUNK_DATA64*>(
+            base + descriptor->OriginalFirstThunk);
         auto* thunk = reinterpret_cast<IMAGE_THUNK_DATA64*>(base + descriptor->FirstThunk);
         for (; originalThunk->u1.AddressOfData; ++originalThunk, ++thunk)
         {
             if (IMAGE_SNAP_BY_ORDINAL64(originalThunk->u1.Ordinal))
                 continue;
+            if (originalThunk->u1.AddressOfData >= imageSize)
+                return false;
             const auto* import = reinterpret_cast<const IMAGE_IMPORT_BY_NAME*>(
                 base + originalThunk->u1.AddressOfData);
             if (strcmp(reinterpret_cast<const char*>(import->Name), importedFunction) != 0)
@@ -6422,6 +6703,40 @@ bool HookModuleImport(HMODULE module, const char* importedModule,
         }
     }
     return false;
+}
+
+// The current value of one named import slot (read only), or null.
+void* ReadModuleImport(HMODULE module, const char* importedModule,
+    const char* importedFunction) noexcept
+{
+    __try
+    {
+        auto* base = reinterpret_cast<uint8_t*>(module);
+        const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+        if (!base || dos->e_magic != IMAGE_DOS_SIGNATURE) return nullptr;
+        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+        if (nt->Signature != IMAGE_NT_SIGNATURE || nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC)
+            return nullptr;
+        const auto& directory = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+        if (!directory.VirtualAddress || !directory.Size) return nullptr;
+        for (auto* descriptor = reinterpret_cast<const IMAGE_IMPORT_DESCRIPTOR*>(base + directory.VirtualAddress);
+             descriptor->Name; ++descriptor)
+        {
+            if (_stricmp(reinterpret_cast<const char*>(base + descriptor->Name), importedModule) != 0) continue;
+            // As in HookModuleImport: a bound FirstThunk carries no names.
+            if (!descriptor->OriginalFirstThunk) continue;
+            const auto* name = reinterpret_cast<const IMAGE_THUNK_DATA64*>(base + descriptor->OriginalFirstThunk);
+            const auto* slot = reinterpret_cast<const IMAGE_THUNK_DATA64*>(base + descriptor->FirstThunk);
+            for (; name->u1.AddressOfData; ++name, ++slot)
+                if (!IMAGE_SNAP_BY_ORDINAL64(name->u1.Ordinal)
+                    && name->u1.AddressOfData < nt->OptionalHeader.SizeOfImage && strcmp(reinterpret_cast<const char*>(
+                        reinterpret_cast<const IMAGE_IMPORT_BY_NAME*>(base + name->u1.AddressOfData)->Name),
+                        importedFunction) == 0)
+                    return protected_pointer::ReadPointer(reinterpret_cast<uintptr_t>(&slot->u1.Function));
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return nullptr;
 }
 
 bool HookMainExecutableImport(const char* importedModule,
@@ -6508,6 +6823,42 @@ void InspectStreamlineLoadedModule(HMODULE module)
     InspectLoadedModule(module, LoadedModulePath(module));
 }
 
+dlssg_provider_selection::LoadPlan AmpereProviderLoadPlan(
+    const std::wstring& requested, HANDLE file = nullptr, DWORD flags = 0)
+{
+    return dlssg_provider_selection::Plan(requested, file, flags,
+        ampere_provider_arch::Armed() && ampere_backend::BeforeFirstFeatureCreate());
+}
+
+void VerifySelectedProviderLoad(const dlssg_provider_selection::LoadPlan& plan,
+    const std::wstring& requested, HMODULE& module)
+{
+    if (!plan) return;
+    const DWORD error = module ? ERROR_INVALID_DATA : GetLastError();
+    const bool verified = dlssg_provider_selection::Loaded(plan, module);
+    if (!verified && module) { FreeLibrary(module); module = nullptr; }
+    static std::atomic<bool> successReported{false}, failureReported{false};
+    if (!(verified ? successReported : failureReported).exchange(true))
+        Log(L"Ampere DLSS-G provider selection: verified=%u error=%lu requested=%s selected=%s",
+            static_cast<unsigned>(verified), verified ? ERROR_SUCCESS : error,
+            requested.c_str(), plan.path.c_str());
+    if (!verified) SetLastError(error);
+}
+
+void PrepareAmpereProviderSelection()
+{
+    if (!ampere_provider_arch::Armed() || !ampere_backend::BeforeFirstFeatureCreate()) return;
+    dlssg_provider_selection::Prepare(gExecutableDirectory);
+    static std::atomic<bool> reported{false};
+    const auto state = dlssg_provider_selection::Read();
+    if (state.prepared && !reported.exchange(true))
+        Log(L"Ampere DLSS-G OTA selection: version=%u.%u.%u nvidiaSigned=%u nativeProviderPinned=%u "
+            L"examined=%u signatureRejections=%u scanLimited=%u selected=%s; fallback=original native load",
+            state.selected.version.major, state.selected.version.minor, state.selected.version.build,
+            static_cast<unsigned>(state.selected.nvidiaSigned), static_cast<unsigned>(state.nativeProviderPinned),
+            state.examined, state.signatureRejections, static_cast<unsigned>(state.scanLimited), state.selected.path.c_str());
+}
+
 HMODULE WINAPI HookStreamlineLoadLibraryA(LPCSTR fileName)
 {
     auto* original = gOriginalStreamlineLoadLibraryA.load(
@@ -6515,18 +6866,21 @@ HMODULE WINAPI HookStreamlineLoadLibraryA(LPCSTR fileName)
     if (!original || original == &HookStreamlineLoadLibraryA)
         return nullptr;
     const std::wstring requested = WidePathFromAnsi(fileName);
-    const std::wstring redirect =
-        SelectiveOtaDlssgWrapperRedirectPath(requested);
+    const auto providerPlan = AmpereProviderLoadPlan(requested);
+    const std::wstring redirect = providerPlan ? providerPlan.path
+        : SelectiveOtaDlssgWrapperRedirectPath(requested);
     HMODULE module = nullptr;
     if (!redirect.empty())
     {
         const std::string redirected = AnsiPathFromWide(redirect);
         if (!redirected.empty())
             module = original(redirected.c_str());
+        else SetLastError(ERROR_NO_UNICODE_TRANSLATION);
+        VerifySelectedProviderLoad(providerPlan, requested, module);
         const DWORD redirectError = module ? ERROR_SUCCESS : GetLastError();
         if (!module)
             module = original(fileName);
-        RecordSelectiveOtaDlssgWrapperResult(requested, redirect, module,
+        if (!providerPlan) RecordSelectiveOtaDlssgWrapperResult(requested, redirect, module,
             redirectError, redirectError != ERROR_SUCCESS);
     }
     else
@@ -6544,16 +6898,18 @@ HMODULE WINAPI HookStreamlineLoadLibraryW(LPCWSTR fileName)
     if (!original || original == &HookStreamlineLoadLibraryW)
         return nullptr;
     const std::wstring requested = fileName ? fileName : L"";
-    const std::wstring redirect =
-        SelectiveOtaDlssgWrapperRedirectPath(requested);
+    const auto providerPlan = AmpereProviderLoadPlan(requested);
+    const std::wstring redirect = providerPlan ? providerPlan.path
+        : SelectiveOtaDlssgWrapperRedirectPath(requested);
     HMODULE module = redirect.empty() ? original(fileName)
         : original(redirect.c_str());
     if (!redirect.empty())
     {
+        VerifySelectedProviderLoad(providerPlan, requested, module);
         const DWORD redirectError = module ? ERROR_SUCCESS : GetLastError();
         if (!module)
             module = original(fileName);
-        RecordSelectiveOtaDlssgWrapperResult(requested, redirect, module,
+        if (!providerPlan) RecordSelectiveOtaDlssgWrapperResult(requested, redirect, module,
             redirectError, redirectError != ERROR_SUCCESS);
     }
     InspectStreamlineLoadedModule(module);
@@ -6568,18 +6924,21 @@ HMODULE WINAPI HookStreamlineLoadLibraryExA(
     if (!original || original == &HookStreamlineLoadLibraryExA)
         return nullptr;
     const std::wstring requested = WidePathFromAnsi(fileName);
-    const std::wstring redirect =
-        SelectiveOtaDlssgWrapperRedirectPath(requested);
+    const auto providerPlan = AmpereProviderLoadPlan(requested, file, flags);
+    const std::wstring redirect = providerPlan ? providerPlan.path
+        : SelectiveOtaDlssgWrapperRedirectPath(requested);
     HMODULE module = nullptr;
     if (!redirect.empty())
     {
         const std::string redirected = AnsiPathFromWide(redirect);
         if (!redirected.empty())
             module = original(redirected.c_str(), file, flags);
+        else SetLastError(ERROR_NO_UNICODE_TRANSLATION);
+        VerifySelectedProviderLoad(providerPlan, requested, module);
         const DWORD redirectError = module ? ERROR_SUCCESS : GetLastError();
         if (!module)
             module = original(fileName, file, flags);
-        RecordSelectiveOtaDlssgWrapperResult(requested, redirect, module,
+        if (!providerPlan) RecordSelectiveOtaDlssgWrapperResult(requested, redirect, module,
             redirectError, redirectError != ERROR_SUCCESS);
     }
     else
@@ -6598,16 +6957,18 @@ HMODULE WINAPI HookStreamlineLoadLibraryExW(
     if (!original || original == &HookStreamlineLoadLibraryExW)
         return nullptr;
     const std::wstring requested = fileName ? fileName : L"";
-    const std::wstring redirect =
-        SelectiveOtaDlssgWrapperRedirectPath(requested);
+    const auto providerPlan = AmpereProviderLoadPlan(requested, file, flags);
+    const std::wstring redirect = providerPlan ? providerPlan.path
+        : SelectiveOtaDlssgWrapperRedirectPath(requested);
     HMODULE module = redirect.empty() ? original(fileName, file, flags)
         : original(redirect.c_str(), file, flags);
     if (!redirect.empty())
     {
+        VerifySelectedProviderLoad(providerPlan, requested, module);
         const DWORD redirectError = module ? ERROR_SUCCESS : GetLastError();
         if (!module)
             module = original(fileName, file, flags);
-        RecordSelectiveOtaDlssgWrapperResult(requested, redirect, module,
+        if (!providerPlan) RecordSelectiveOtaDlssgWrapperResult(requested, redirect, module,
             redirectError, redirectError != ERROR_SUCCESS);
     }
     InspectStreamlineLoadedModule(module);
@@ -6711,7 +7072,8 @@ sl::Result HookSlInit(const sl::Preferences& preferences,
 #if defined(MFG_UNLOCK_SINGLE_MODULE_UI)
     // Recheck application factory imports at the existing early boundary.
     // The UI creates no graphics objects and modifies no native/Streamline tables.
-    single_overlay::BeforeStreamlineInit();
+    // The entry detour jumps here, so this is the game's slInit call site.
+    single_overlay::BeforeStreamlineInit(_ReturnAddress());
 #endif
     const auto maskInitEntry = entry_detour::ReadSnapshot(gSlInitEntryHandle);
     {
@@ -6724,6 +7086,10 @@ sl::Result HookSlInit(const sl::Preferences& preferences,
     gAppliedUiRecompositionEnabled.store(false, std::memory_order_release);
     gAppliedUiRecompositionForced.store(false, std::memory_order_release);
     ampere_backend::ObserveEarlyInit();
+    // Before slInit asks NGX for FG requirements, which maps the DLSS-G
+    // provider. Its architecture declaration is applied as it is mapped.
+    LogAmpereArchitectureDetection(ampere_provider_arch::DetectAndArm());
+    PrepareAmpereProviderSelection();
 
     sl::Preferences adjusted = preferences;
     const uint64_t before = static_cast<uint64_t>(adjusted.flags);
@@ -6737,7 +7103,10 @@ sl::Result HookSlInit(const sl::Preferences& preferences,
     const bool providerPreflight =
         dlssg_provider_policy::SupportedProviderVersionMatches(
             providerPath.c_str());
-    HMODULE interposer = GetModuleHandleW(L"sl.interposer.dll");
+    // The game's interposer, even when another instance was loaded first.
+    HMODULE interposer = gHostInterposer.load(std::memory_order_acquire);
+    if (!interposer)
+        interposer = GetModuleHandleW(L"sl.interposer.dll");
     const std::wstring interposerPath = interposer
         ? LoadedModulePath(interposer) : std::wstring{};
 #if defined(MFG_UNLOCK_SINGLE_MODULE_UI)
@@ -6787,9 +7156,29 @@ sl::Result HookSlInit(const sl::Preferences& preferences,
     // into Streamline's coherent full-set OTA selection instead.
     ConfigureSelectiveOtaDlssgWrapper(false,
         providerPreflight, loaderDiscovery);
-    const streamline_ota_policy::Result policy =
-        streamline_ota_policy::Apply(
-            before, gpu_dispatch::IsAda() && officialSixX, coherentHost, loaderDiscovery);
+    // slSetD3DDevice normally follows slInit. Trusted NVAPI inventory may
+    // request the coherent downloaded plugin set before that boundary, but
+    // does not select gpu_dispatch or relax its later adapter/LUID checks.
+    using OtaGpu = streamline_ota_policy::Gpu;
+    static_assert(static_cast<uint32_t>(OtaGpu::eUnknown) == static_cast<uint32_t>(gpu_dispatch::Family::eUnknown)
+        && static_cast<uint32_t>(OtaGpu::eAda) == static_cast<uint32_t>(gpu_dispatch::Family::eAda)
+        && static_cast<uint32_t>(OtaGpu::eAmpere) == static_cast<uint32_t>(gpu_dispatch::Family::eAmpere)
+        && static_cast<uint32_t>(OtaGpu::eConflict) == static_cast<uint32_t>(gpu_dispatch::Family::eConflict));
+    const auto earlyHardware = ampere_provider_arch::Read();
+    const OtaGpu inventoryGpu = streamline_ota_policy::InventoryGpu(earlyHardware.detected,
+        earlyHardware.physicalGpuCount, earlyHardware.singleGpuArchitecture,
+        ampere_provider_arch::IsAmpereRtx(earlyHardware.singleGpuArchitecture, earlyHardware.singleGpuImplementation));
+    // V1.5: only RTX 30 uses the early inventory. Ada keeps beta.7's rule
+    // (full OTA once gpu_dispatch has selected Ada), so an RTX 40 title's
+    // plugin set does not change with this port.
+    const OtaGpu earlyGpu = inventoryGpu == OtaGpu::eAmpere ? inventoryGpu : OtaGpu::eUnknown;
+    const auto selectedGpu = static_cast<OtaGpu>(gpu_dispatch::Selected());
+    static const bool nativeStreamlinePinned = [] {
+        wchar_t value[2]{};
+        return GetEnvironmentVariableW(L"RTXMFG_DIAGNOSTIC_NATIVE_STREAMLINE", value, 2) == 1 && value[0] == L'1';
+    }();
+    const streamline_ota_policy::Result policy = streamline_ota_policy::Apply(
+        before, officialSixX, coherentHost, loaderDiscovery, selectedGpu, earlyGpu, nativeStreamlinePinned);
     const uint64_t after = policy.flags;
     adjusted.flags = static_cast<sl::PreferenceFlags>(after);
     gSlInitFlagsBefore.store(before, std::memory_order_release);
@@ -6816,7 +7205,8 @@ sl::Result HookSlInit(const sl::Preferences& preferences,
         L"downloadedStreamlinePlugins=%d "
         L"loaderDiscovery=%d fullOtaRequested=%d fullOtaEligible=%d "
         L"profile=%hs nvidiaTier=%hs hostVersion=%u.%u.%u.%u "
-        L"providerPreflight=%d",
+        L"providerPreflight=%d fullOtaReason=%hs selectedGpu=%u earlyGpu=%u "
+        L"nvapiGpuCount=%u nvapiArchitecture=0x%X nativeStreamlinePinned=%d",
         static_cast<unsigned long long>(call),
         static_cast<unsigned long long>(sdkVersion),
         static_cast<unsigned long long>(before),
@@ -6828,7 +7218,9 @@ sl::Result HookSlInit(const sl::Preferences& preferences,
         policy.fullOtaRequested && !policy.fullOtaSuppressed,
         gNvidiaProfileName.c_str(), nvidia_mfg_policy::TierName(tier),
         hostVersion.major, hostVersion.minor, hostVersion.build,
-        hostVersion.privatePart, providerPreflight);
+        hostVersion.privatePart, providerPreflight, streamline_ota_policy::ReasonName(policy.reason),
+        static_cast<unsigned>(selectedGpu), static_cast<unsigned>(earlyGpu), earlyHardware.physicalGpuCount,
+        earlyHardware.singleGpuArchitecture, nativeStreamlinePinned);
     const sl::Result result = InvokeAmpereInit(original, adjusted, sdkVersion);
     Log(L"Streamline slInit original result=%u call=%llu", static_cast<unsigned>(result),
         static_cast<unsigned long long>(call));
@@ -6847,6 +7239,41 @@ sl::Result HookSlInit(const sl::Preferences& preferences,
         InspectAlreadyLoadedModules();
     }
     return result;
+}
+
+// The Streamline entry hooks keep one original per entry, so they serve one
+// interposer: the game's. Any other instance keeps its entries untouched, or a
+// call could be forwarded into the wrong instance or re-enter the hooks. That
+// includes the private Streamline OptiScaler loads from its OptiScaler\streamline
+// folder for its own DLSS-G output, even when it loads before the game's.
+bool OptiScalerPrivateStreamline(const wchar_t* path, size_t length) noexcept
+{
+    if (!path || !optiscaler_host::Detected())
+        return false;
+    const optiscaler_host::Snapshot host = optiscaler_host::Read();
+    const wchar_t* name = wcsrchr(host.path, L'\\');
+    if (!name)
+        return false;
+    const wchar_t* folder = L"OptiScaler\\streamline\\";
+    const size_t base = static_cast<size_t>(name - host.path) + 1;
+    const size_t folderLength = wcslen(folder);
+    return length > base + folderLength && _wcsnicmp(path, host.path, base) == 0
+        && _wcsnicmp(path + base, folder, folderLength) == 0;
+}
+
+// Binds the first eligible interposer. Loader-lock safe given the mapped path.
+bool HostInterposer(HMODULE interposer, const wchar_t* path, size_t length) noexcept
+{
+    if (!interposer || OptiScalerPrivateStreamline(path, length))
+        return false;
+    HMODULE expected = nullptr;
+    return gHostInterposer.compare_exchange_strong(expected, interposer,
+        std::memory_order_acq_rel) || expected == interposer;
+}
+
+bool HostInterposer(HMODULE interposer, const std::wstring& path) noexcept
+{
+    return HostInterposer(interposer, path.c_str(), path.size());
 }
 
 #if defined(MFG_UNLOCK_SINGLE_MODULE_UI)
@@ -6884,7 +7311,8 @@ bool TryInstallSlUpgradeInterfaceEntryDetour(HMODULE interposer,
     if (!interposer)
         return false;
     const std::wstring path = LoadedModulePath(interposer);
-    if (!ModuleFileNameEquals(path, L"sl.interposer.dll"))
+    if (!ModuleFileNameEquals(path, L"sl.interposer.dll")
+        || !HostInterposer(interposer, path))
         return false;
     void* target = resolvedTarget ? resolvedTarget
         : reinterpret_cast<void*>(
@@ -6926,7 +7354,8 @@ bool TryInstallSlSetD3DDeviceEntryDetour(HMODULE interposer)
     if (!interposer)
         return false;
     const std::wstring path = LoadedModulePath(interposer);
-    if (!ModuleFileNameEquals(path, L"sl.interposer.dll"))
+    if (!ModuleFileNameEquals(path, L"sl.interposer.dll")
+        || !HostInterposer(interposer, path))
         return false;
     void* target = reinterpret_cast<void*>(
         GetProcAddress(interposer, "slSetD3DDevice"));
@@ -6980,6 +7409,14 @@ bool TryInstallSlInitEntryDetour(HMODULE interposer, void* resolvedTarget)
     const std::wstring path = LoadedModulePath(interposer);
     if (!ModuleFileNameEquals(path, L"sl.interposer.dll"))
         return false;
+    if (!HostInterposer(interposer, path))
+    {
+        static std::atomic<HMODULE> logged{nullptr};
+        if (logged.exchange(interposer, std::memory_order_acq_rel) != interposer)
+            Log(L"Streamline interposer left untouched (not the game's instance): path=%s",
+                path.c_str());
+        return false;
+    }
     TryInstallSlUpgradeInterfaceEntryDetour(interposer, nullptr);
     TryInstallSlSetD3DDeviceEntryDetour(interposer);
     void* target = resolvedTarget ? resolvedTarget
@@ -7024,9 +7461,14 @@ FARPROC WINAPI HookMainGetProcAddress(HMODULE module, LPCSTR functionName)
     resolved = single_overlay::ResolveProc(module, functionName, resolved);
 #endif
     if (!resolved || !functionName
-        || reinterpret_cast<uintptr_t>(functionName) <= 0xFFFFu
-        || !ModuleFileNameEquals(LoadedModulePath(module),
-            L"sl.interposer.dll"))
+        || reinterpret_cast<uintptr_t>(functionName) <= 0xFFFFu)
+    {
+        return resolved;
+    }
+    // Only the game's Streamline instance is routed (see HostInterposer).
+    const std::wstring interposerPath = LoadedModulePath(module);
+    if (!ModuleFileNameEquals(interposerPath, L"sl.interposer.dll")
+        || !HostInterposer(module, interposerPath))
     {
         return resolved;
     }
@@ -7204,6 +7646,8 @@ FARPROC WINAPI HookSlCommonGetProcAddress(
     if (!original)
         return nullptr;
     FARPROC resolved = original(module, functionName);
+    // RTX 30: the DLSS-G wrapper's flip-metering probe (no-op otherwise).
+    resolved = AmpereWrapperNvapiView(module, functionName, resolved, _ReturnAddress());
 #if defined(MFG_UNLOCK_SINGLE_MODULE_UI)
     // Vulkan is often resolved inside Streamline rather than the executable.
     // Reuse its established resolver boundary without wrapping internal DXGI
@@ -7468,6 +7912,86 @@ PatternPatchResult PatchNgxMfgGate(HMODULE module, const std::wstring& path)
     return {result.candidate, result.patched, result.match};
 }
 
+// The RTX 30 legacy-wrapper (2x) audit runs on the selected Ampere adapter, or
+// before adapter selection when NVAPI found an RTX 30 GPU. Ada and systems
+// without an RTX 30 GPU keep beta.7's wrapper handling.
+bool AmpereWrapperAuditApplies() noexcept
+{
+    return UseAmpere() || (gpu_dispatch::Selected() == gpu_dispatch::Family::eUnknown
+        && ampere_provider_arch::Armed());
+}
+
+// RTX 30: the DLSS-G wrapper's view of NVAPI hides flip metering
+// (ampere_flip_metering.h). The wrapper's GetProcAddress import already runs
+// through HookSlCommonGetProcAddress (resolver discovery covers every
+// Streamline plug-in), so the view is applied there, not by a second hook on
+// the same import slot: rtx30.2's separate hook was replaced by resolver
+// discovery on the same loader return and never ran. Only calls from a
+// registered DLSS-G wrapper, only nvapi_QueryInterface of NVIDIA's dispatcher,
+// and only the two flip-metering interfaces are affected.
+bool AmpereFilteredWrapper(HMODULE module) noexcept
+{
+    if (!module) return false;
+    for (const auto& wrapper : gAmpereFilteredWrappers)
+        if (wrapper.load(std::memory_order_acquire) == module) return true;
+    return false;
+}
+
+void RegisterAmpereFilteredWrapper(HMODULE module, const std::wstring& path)
+{
+    if (AmpereFilteredWrapper(module)) return;
+    for (auto& wrapper : gAmpereFilteredWrappers)
+    {
+        HMODULE expected = nullptr;
+        if (wrapper.compare_exchange_strong(expected, module, std::memory_order_acq_rel))
+        {
+            gWrapperNvapiFilterInstalled.store(true, std::memory_order_release);
+            Log(L"Ampere DLSS-G wrapper NVAPI view: flip metering withheld (SetFlipConfig, caps) "
+                L"through resolver discovery: %s", path.c_str());
+            return;
+        }
+    }
+    Log(L"Ampere DLSS-G wrapper NVAPI view unavailable: wrapper slots full: %s", path.c_str());
+}
+
+void* __cdecl FilteredWrapperNvapiQuery(uint32_t id)
+{
+    const auto query = gWrapperNvapiQuery.load(std::memory_order_acquire);
+    if (!query)
+        return nullptr;
+    if (ampere_flip_metering::Hidden(id) && AmpereWrapperAuditApplies())
+    {
+        gFlipMeteringHidden.fetch_add(1, std::memory_order_relaxed);
+        return nullptr;
+    }
+    return query(id);
+}
+
+// Called by HookSlCommonGetProcAddress with the address its caller returns to.
+FARPROC AmpereWrapperNvapiView(HMODULE module, LPCSTR name, FARPROC resolved, const void* caller) noexcept
+{
+    if (!resolved || !name || IS_INTRESOURCE(name) || strcmp(name, "nvapi_QueryInterface") != 0
+        || !gWrapperNvapiFilterInstalled.load(std::memory_order_acquire) || !AmpereWrapperAuditApplies())
+        return resolved;
+    HMODULE owner = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            static_cast<LPCWSTR>(caller), &owner) || !AmpereFilteredWrapper(owner))
+        return resolved;
+    // The wrapper loads NVAPI from System32 (LOAD_LIBRARY_SEARCH_SYSTEM32).
+    wchar_t path[MAX_PATH]{};
+    const DWORD length = GetModuleFileNameW(module, path, MAX_PATH);
+    const wchar_t* leaf = length && length < MAX_PATH ? wcsrchr(path, L'\\') : nullptr;
+    if (!leaf || _wcsicmp(leaf + 1, L"nvapi64.dll") != 0)
+        return resolved;
+    auto* query = reinterpret_cast<NvapiQueryInterfaceFn>(resolved);
+    NvapiQueryInterfaceFn expected = nullptr;
+    if (!gWrapperNvapiQuery.compare_exchange_strong(expected, query,
+            std::memory_order_acq_rel, std::memory_order_acquire) && expected != query)
+        return resolved; // A different dispatcher than the one already wrapped stays native.
+    gWrapperNvapiFilters.fetch_add(1, std::memory_order_relaxed);
+    return reinterpret_cast<FARPROC>(&FilteredWrapperNvapiQuery);
+}
+
 PatternPatchResult PatchUniqueWrapperMaximumPattern(
     HMODULE module, const std::wstring& path)
 {
@@ -7509,7 +8033,16 @@ PatternPatchResult PatchUniqueWrapperMaximumPattern(
     }
 
     if (matchCount == 0)
+    {
+        // Older pacer wrappers use a different clamp instruction. Admit their
+        // control route only after all independent allocation contracts match.
+        // No native clamp is rewritten for the 2x Ampere fallback.
+        ampere_wrapper::Layout legacy{};
+        if (AmpereWrapperAuditApplies() && ampere_wrapper::Discover(module, legacy)
+            && legacy.maximumGeneratedFrames == 1)
+            return {true, UseAmpere(), nullptr, 1};
         return {};
+    }
     if (matchCount != 1 || !match)
     {
         Log(L"Streamline maximum: expected one 1/3/5 profile, found %zu: %s",
@@ -7530,6 +8063,10 @@ PatternPatchResult PatchUniqueWrapperMaximumPattern(
 
     if (!gpu_dispatch::IsAda())
     {
+        ampere_wrapper::Layout audited{};
+        if (AmpereWrapperAuditApplies() && ampere_wrapper::Discover(module, audited)
+            && audited.maximumGeneratedFrames == 1)
+            return {true, UseAmpere(), nullptr, 1};
         return {true, UseAmpere() && memcmp(match + universal_wrapper_profile::kPatchOffset,
             kWrapperOriginal.data(), kWrapperOriginal.size()) == 0, match, compiledMaximum};
     }
@@ -7677,6 +8214,8 @@ void PrepareNgxInitialization(void* device, const entry_detour::Snapshot& entry,
         {
             gAmpereNativeInitBoundary = entry;
             gAmpereNativeInitTicket = ticket;
+            LogAmpereArchitectureDetection(ampere_provider_arch::DetectAndArm());
+            PrepareAmpereProviderSelection();
             gModuleInventoryDirty.store(true, std::memory_order_release);
             InspectAlreadyLoadedModules();
         }
@@ -8312,6 +8851,16 @@ ModuleRecord InspectLoadedModule(HMODULE module, const std::wstring& suppliedPat
                         record.wrapperPatched,
                         record.wrapperCompiledMaximumGeneratedFrames);
                 }
+                // Before the plugin's startup probes flip metering; resolver
+                // discovery below covers this plug-in's GetProcAddress import.
+                if (record.wrapperCandidate && ampere_provider_arch::Armed())
+                    RegisterAmpereFilteredWrapper(module, path);
+            }
+            if (record.ngxExport && ampere_provider_arch::Armed())
+            {
+                const auto declared = ampere_provider_arch::Declare(module);
+                Log(L"Ampere DLSS-G architecture declaration: outcome=%hs path=%s",
+                    ampere_provider_arch::OutcomeName(declared), path.c_str());
             }
             if (record.ngxExport)
             {
@@ -8333,7 +8882,12 @@ ModuleRecord InspectLoadedModule(HMODULE module, const std::wstring& suppliedPat
     // is safe to pin and detour during passive discovery. The generic
     // slGetPluginFunction export is shared by inactive feature modules and is
     // not proof that their returned DLSS-G entry belongs to the active route.
-    ngx_initialization::ObserveModule(snapshot.module, snapshot.generation, &PrepareNgxInitialization);
+    // A Streamline plug-in is retained only once the host's session has a
+    // device; until then the host may still unload and reload it.
+    const bool retainable = !snapshot.wrapperExport
+        || gStreamlinePluginRetention.load(std::memory_order_acquire);
+    if (retainable)
+        ngx_initialization::ObserveModule(snapshot.module, snapshot.generation, &PrepareNgxInitialization);
     ampere_backend::SetPreparationBoundaryResolver(&ResolveAmperePreparationBoundary);
     ampere_backend::ObserveModule(snapshot.module, snapshot.path.c_str(), snapshot.generation,
         snapshot.wrapperCandidate, snapshot.ngxExport, snapshot.ngxRuntimeExport);
@@ -8346,12 +8900,22 @@ ModuleRecord InspectLoadedModule(HMODULE module, const std::wstring& suppliedPat
         // before that plugin can resolve and cache its NGX entry points.
         InstallStreamlineLoaderDiscovery(snapshot.module, snapshot.path);
         InstallSlCommonResolverDiscovery(snapshot.module, snapshot.path);
+        // RTX 30 flip-metering view: prove the wrapper's GetProcAddress import
+        // now runs through HookSlCommonGetProcAddress.
+        if (AmpereFilteredWrapper(snapshot.module))
+        {
+            const bool routed = ReadModuleImport(snapshot.module, "KERNEL32.dll", "GetProcAddress")
+                == reinterpret_cast<void*>(&HookSlCommonGetProcAddress);
+            gAmpereWrapperResolverRouted.store(routed, std::memory_order_release);
+            Log(L"Ampere DLSS-G wrapper NVAPI view route: resolverHook=%d path=%s",
+                static_cast<int>(routed), snapshot.path.c_str());
+        }
     }
-    if (snapshot.wrapperCandidate)
+    if (snapshot.wrapperCandidate && retainable)
     {
         InstallControlRouteEntries(snapshot.controlRouteSlot);
     }
-    if (snapshot.ngxExport)
+    if (snapshot.ngxExport && retainable)
     {
         TryInstallNgxCreateEntryDetour(
             snapshot.module, snapshot.path, snapshot.generation);
@@ -8378,6 +8942,9 @@ ModuleRecord InspectLoadedModule(HMODULE module, const std::wstring& suppliedPat
         // return and resolver boundary before they cache provider functions.
         InstallStreamlineLoaderDiscovery(snapshot.module, snapshot.path);
         InstallSlCommonResolverDiscovery(snapshot.module, snapshot.path);
+    }
+    if (snapshot.ngxRuntimeExport && retainable)
+    {
         if (ngx_runtime_policy::IsRemixRuntime(snapshot.module))
         {
             HMODULE pinned = nullptr;
@@ -8592,8 +9159,11 @@ void* MappedExportAddress(HMODULE module, const char* expected) noexcept
 // LoadLibrary returns, before module discovery sees the interposer; HookSlInit
 // then installs the remaining Streamline entries in time. Hotpatch only, never
 // waits for the detour registry and never logs; discovery logs it later.
-void InstallSlInitEntryAtLoad(HMODULE interposer) noexcept
+void InstallSlInitEntryAtLoad(HMODULE interposer, const UNICODE_STRING* path) noexcept
 {
+    if (!path || !path->Buffer
+        || !HostInterposer(interposer, path->Buffer, path->Length / sizeof(wchar_t)))
+        return;
     void* target = MappedExportAddress(interposer, "slInit");
     if (!target)
         return;
@@ -8639,8 +9209,23 @@ void CALLBACK OnDllNotification(
 #if defined(MFG_UNLOCK_SINGLE_MODULE_UI)
     if (data && reason == kDllLoaded && data->loaded.dllBase
         && UnicodeNameEquals(data->loaded.baseDllName, L"sl.interposer.dll"))
-        InstallSlInitEntryAtLoad(static_cast<HMODULE>(data->loaded.dllBase));
+        InstallSlInitEntryAtLoad(static_cast<HMODULE>(data->loaded.dllBase),
+            data->loaded.fullDllName);
 #endif
+    // NGX validates a DLSS-G snippet against the GPU right after mapping it.
+    // Declare RTX 30 support before LoadLibrary returns (no waits or logging).
+    if (data && reason == kDllLoaded && data->loaded.dllBase && ampere_provider_arch::Armed())
+        ampere_provider_arch::Declare(static_cast<HMODULE>(data->loaded.dllBase));
+    // A reloaded game interposer binds again.
+    if (data && reason == kDllUnloaded)
+    {
+        HMODULE unloaded = static_cast<HMODULE>(data->unloaded.dllBase);
+        gHostInterposer.compare_exchange_strong(unloaded, nullptr, std::memory_order_acq_rel);
+    }
+    // Loader lock held: resource-directory read only, no logging. The worker
+    // reports the transition and applies the OptiScaler-mode policy.
+    if (data && reason == kDllLoaded && data->loaded.dllBase)
+        optiscaler_host::ObserveMappedModule(static_cast<HMODULE>(data->loaded.dllBase));
     if (data && (reason == kDllLoaded || reason == kDllUnloaded))
     {
 #if MFG_UNLOCK_OUTPUT_PULL_MASK_ONLY || MFG_UNLOCK_RUNTIME_GPU_SELECTION || MFG_UNLOCK_AMPERE_MFG
@@ -8722,8 +9307,18 @@ DWORD WINAPI PatchWorker(void* context)
 #if MFG_UNLOCK_OUTPUT_PULL_TELEMETRY
     output_pull_telemetry::Initialize(tempDirectory, pid);
 #endif
-    const ControlConfig initialControl = ReadInitialControl();
+    ControlConfig savedControl = ReadInitialControl();
+    optiscaler_host::SetUiOptIn(savedControl.optiScalerUi == 1);
+    bool uiDelegated = optiscaler_host::UiDelegated();
+    const ControlConfig initialControl = EffectiveControl(savedControl);
     StoreControl(initialControl);
+    {
+        const auto host = optiscaler_host::Read();
+        if (host.detected)
+            Log(L"OptiScaler: route=%hs uiOwner=%s version=%s (%s) path=%s pluginCaller=%d",
+                optiscaler_host::RouteName(host.route), uiDelegated ? L"optiscaler" : L"rtxmfg",
+                host.productVersion, host.fileVersion, host.path, host.pluginCallerAccepted);
+    }
     FILETIME configWriteTime{};
     ReadLastWriteTime(gConfigPath, configWriteTime);
     Log(L"Initial control: mode=%s multiplier=%ux dynamicTarget=%u FPS "
@@ -8743,12 +9338,13 @@ DWORD WINAPI PatchWorker(void* context)
     }
 
     Log(L"Patch worker started for PID %lu", static_cast<unsigned long>(pid));
+    LogAmpereArchitectureDetection(ampere_provider_arch::DetectAndArm());
     Log(L"Diagnostics reused per executable: log=%s status=%s processBirth=%llu executable=%s",
         logPath.c_str(),gStatusPath.c_str(),static_cast<unsigned long long>(diagnostic_paths::ProcessBirth()),executablePath.c_str());
     hudless_probe::SetLogSink(&MidpointLog);
     hudless_visualizer::SetUiTagger(&TagSynthesizedUi);
 #if defined(MFG_UNLOCK_SINGLE_MODULE_UI)
-    Log(L"RTXMFG build=1.4.2 source=dev.46 outputPullMask=%d occupancyHint=%d "
+    Log(L"RTXMFG build=1.5.0 source=v1.5-flipmeter-20261006 base=intel6.6+optiscaler.1+ring2.3+dltb.2+slhost.1+flipmeter.18+hairdiscovery.1.4.2+reflexfg.2+capture.2+optixell.1+optiout.1+optipace.1+model2x.1+mvfill.1+uioff.1+uistable.1+mfgport.1+hudmatch.1+optiport.1+optcapture.1+optiportdefault.1+xefgdiscovery.1+slrestart.1+nvapipin.1+modeltoggle.1+uirefresh.1+noport.1+optiredirect.1+reflexport.1+portback.1+optionly.1+delayload.1+rtx30.3+xellungated.1+specialk.1a+themidaimports.1+modelchoice.1+xefgmodel.1+splat.2+scenechange.1+xellinput.1+rtx30sl2732.1+mfgunlocker.1+presetc.3+rtx30presetc.1+rtx30stable.1+rtx30ota.1 outputPullMask=%d occupancyHint=%d "
         L"uiInputs=framed-observations uiRecomposition=game-managed "
         L"hudlessDetection=tile-probe",
         MFG_UNLOCK_OUTPUT_PULL_MASK_ONLY,
@@ -8835,6 +9431,16 @@ DWORD WINAPI PatchWorker(void* context)
     PublishPatchRoute();
     PublishLiveBridge(initialControl);
     ControlConfig activeControl = initialControl;
+#if MFG_UNLOCK_XESS
+    const bool xessImportsReady = xess_mod::InstallImports(static_cast<HMODULE>(context));
+    if (!xessImportsReady)
+        Log(L"XESS SDK discovery disabled: backend module ownership/pin verification failed.");
+    xess_mod::InitializeOutsideLoaderLock();
+    xess_mod::ConfigureModel(initialControl.xessModel, OptiScalerHostModel());
+    if (xessImportsReady)
+        xess_mod::DiscoverSdkModules();
+    uint32_t xessDiscoveryTicks = 0;
+#endif
     reflex_control::SetRuntimeValidator(&ReflexRuntimeCurrent);
     DiscoverReflexModule();
     UpdatePresentationPolicy(activeControl);
@@ -8861,7 +9467,19 @@ DWORD WINAPI PatchWorker(void* context)
             inventoryTicks = 0;
             InspectAlreadyLoadedModules();
             DiscoverReflexModule();
+#if MFG_UNLOCK_XESS
+            xess_mod::DiscoverSdkModules();
+            xessDiscoveryTicks = 0;
+#endif
         }
+#if MFG_UNLOCK_XESS
+        // A missed load notification still finds the SDK pair within 5 s.
+        if (++xessDiscoveryTicks >= 50)
+        {
+            xessDiscoveryTicks = 0;
+            xess_mod::DiscoverSdkModules();
+        }
+#endif
         FILETIME latestWriteTime{};
         if (ReadLastWriteTime(gConfigPath, latestWriteTime)
             && CompareFileTime(&latestWriteTime, &configWriteTime) != 0)
@@ -8874,8 +9492,15 @@ DWORD WINAPI PatchWorker(void* context)
             }
             else
             {
+                savedControl = control;
+                optiscaler_host::SetUiOptIn(control.optiScalerUi == 1);
+                uiDelegated = optiscaler_host::UiDelegated();
+                control = EffectiveControl(control);
                 const bool mfgChanged = !SameMfgControl(activeControl, control);
                 activeControl = control;
+#if MFG_UNLOCK_XESS
+                xess_mod::ConfigureModel(control.xessModel, OptiScalerHostModel());
+#endif
                 if (mfgChanged)
                     StoreControl(activeControl);
                 else
@@ -8894,6 +9519,27 @@ DWORD WINAPI PatchWorker(void* context)
                     activeControl.generatedOnlyDebug,
                     activeControl.intervalLogging, mfgChanged);
             }
+        }
+
+        // OptiScaler mapped after startup (late route) or the UI opt-in changed
+        // through another writer: republish the effective control once.
+        if (optiscaler_host::UiDelegated() != uiDelegated)
+        {
+            uiDelegated = !uiDelegated;
+            const ControlConfig control = EffectiveControl(savedControl);
+            const bool mfgChanged = !SameMfgControl(activeControl, control);
+            activeControl = control;
+#if MFG_UNLOCK_XESS
+            xess_mod::ConfigureModel(control.xessModel, OptiScalerHostModel());
+#endif
+            if (mfgChanged)
+                StoreControl(activeControl);
+            PublishLiveBridge(activeControl);
+            WriteBridgeStatus(activeControl, pid);
+            const auto host = optiscaler_host::Read();
+            Log(L"OptiScaler mode %s: route=%hs version=%s path=%s",
+                uiDelegated ? L"on (OptiScaler's menu owns the controls)" : L"off",
+                optiscaler_host::RouteName(host.route), host.productVersion, host.path);
         }
 
         UpdatePresentationPolicy(activeControl);
@@ -9020,6 +9666,14 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID)
         // Resolve the startup-only wrapper policy now so HookSlInit can read
         // the same control file before Streamline selects its plugins.
         gConfigPath = ResolveConfigPath(instance, gExecutableDirectory);
+        // The OptiScaler UI opt-in decides which install steps run below and
+        // in DllMain; read it before them (one bounded file read).
+        if (optiscaler_host::Detected())
+        {
+            ControlConfig saved{};
+            if (ReadControlFile(gConfigPath, saved))
+                optiscaler_host::SetUiOptIn(saved.optiScalerUi == 1);
+        }
         dlssg_preset::SetInitialSelectionLoader(&ReadInitialDlssgPreset);
         if (HMODULE interposer = GetModuleHandleW(L"sl.interposer.dll"))
         {

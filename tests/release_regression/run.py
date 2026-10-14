@@ -35,6 +35,8 @@ def main():
     parser.add_argument('--harness-dir', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--provider', type=Path)
+    parser.add_argument('--probe-wrapper', type=Path,
+                        help='Exact local Streamline DLSS-G wrapper for the unload/reload regression')
     parser.add_argument('--only', nargs='*')
     args = parser.parse_args()
     dll = args.dll.resolve(strict=True)
@@ -48,11 +50,15 @@ def main():
               ('adapter-parent-coexist-menu','WarpPresentHarness','adapter-parent-coexist-menu','winmm.dll'),
               ('adapter-parent-unaligned-menu','WarpPresentHarness','adapter-parent-unaligned-menu','winmm.dll'),
               ('loader-winmm', 'ReleaseLoadCheck', 'loader', 'winmm.dll'),
+              ('themida-imports', 'ThemidaImportHost', '', 'version.dll'),
               ('control', 'ControlResolverTests', 'control', 'winmm.dll'),
               ('control-locked', 'ControlResolverTests', 'control-locked', 'winmm.dll'),
               ('status-transport', 'StatusTransportTests', '', 'winmm.dll'),
               ('scoped-import', 'ScopedImportTests', '', 'winmm.dll'),
               ('scoped-factory', 'ScopedFactoryTests', '', 'winmm.dll'),
+              ('factory-revision-menu', 'WarpPresentHarness', 'factory-revision-menu', 'winmm.dll'),
+              ('factory-revision-present', 'WarpPresentHarness', 'factory-revision-present', 'winmm.dll'),
+              ('factory-revision-unsupported', 'WarpPresentHarness', 'factory-revision-unsupported', 'winmm.dll'),
               ('unaligned-graphics-menu', 'WarpPresentHarness', 'unaligned-graphics-menu', 'winmm.dll'),
               ('rwx-unaligned-graphics-menu', 'WarpPresentHarness', 'rwx-unaligned-graphics-menu', 'winmm.dll'),
               ('unaligned-graphics-coexist-menu', 'WarpPresentHarness', 'unaligned-graphics-coexist-menu', 'winmm.dll'),
@@ -62,12 +68,24 @@ def main():
               ('startup-menu', 'WarpPresentHarness', 'startup-menu', 'winmm.dll'),
               ('unaligned-menu', 'WarpPresentHarness', 'unaligned-menu', 'winmm.dll'),
               ('rwx-unaligned-menu', 'WarpPresentHarness', 'rwx-unaligned-menu', 'winmm.dll'),
+              ('rwx-aligned-menu', 'WarpPresentHarness', 'rwx-aligned-menu', 'winmm.dll'),
               ('hdr-startup-menu', 'WarpPresentHarness', 'hdr-startup-menu', 'winmm.dll'),
               ('hdr-unsupported-menu', 'WarpPresentHarness', 'hdr-unsupported-menu', 'winmm.dll'),
-              ('layered-menu', 'WarpPresentHarness', 'layered-slinit-menu', 'winmm.dll')]
+              ('layered-menu', 'WarpPresentHarness', 'layered-slinit-menu', 'winmm.dll'),
+              ('manual-upgrade-factory-menu', 'WarpPresentHarness', 'manual-upgrade-factory-menu', 'winmm.dll'),
+              ('manual-upgrade-swapchain-passthrough', 'WarpPresentHarness', 'manual-upgrade-swapchain-passthrough', 'winmm.dll'),
+              ('manual-upgrade-immediate-menu', 'WarpPresentHarness', 'manual-upgrade-immediate-menu', 'winmm.dll'),
+              ('interposer-entry-menu', 'WarpPresentHarness', 'interposer-entry-menu', 'winmm.dll'),
+              ('interposer-host-menu', 'WarpPresentHarness', 'interposer-host-menu', 'winmm.dll'),
+              ('interposer-host-dynamic', 'WarpPresentHarness', 'interposer-host-dynamic', 'winmm.dll'),
+              ('vsync-override-menu', 'WarpPresentHarness', 'vsync-override-menu', 'winmm.dll'),
+              ('directinput-menu', 'WarpPresentHarness', 'directinput-menu', 'winmm.dll')]
     cases += [(name, 'EngineFactoryTests', name, 'winmm.dll') for name in
               ('engine-direct', 'engine-dynamic', 'engine-late', 'engine-middleware', 'engine-external', 'engine-conflict')]
     cases += [('engine-menu', 'WarpPresentHarness', 'engine-menu', 'winmm.dll')]
+    cases += [(f'optiscaler-{mode}', 'OptiScalerHostTests', mode, 'winmm.dll') for mode in
+              ('standalone', 'proxy', 'plugin', 'late', 'optin', 'impostor', 'fakenvapi',
+               'streamline', 'second-streamline')]
     cases += [('small-stack-resolver', 'SmallStackResolverTests', 'small-stack', 'winmm.dll')]
     cases += [('log-retention', 'LogRetentionTests', 'retention', 'winmm.dll')]
     cases += [('interval-retention', 'LogRetentionTests', 'interval-retention', 'winmm.dll')]
@@ -76,6 +94,9 @@ def main():
         ('vulkan-streamline', 'VulkanStreamlineMenuTests'), ('vulkan-mixed', 'VulkanMixedMenuTests'))]
     if args.provider:
         cases.append(('provider-gate', 'ProviderGateTests', 'provider', 'winmm.dll'))
+    if args.probe_wrapper:
+        args.probe_wrapper = args.probe_wrapper.resolve(strict=True)
+        cases.append(('plugin-probe-lifetime', 'PluginProbeLifetimeTests', 'probe', 'winmm.dll'))
     if args.only:
         unknown = set(args.only) - {case[0] for case in cases}
         if unknown:
@@ -85,10 +106,15 @@ def main():
     for name, executable, mode, proxy in cases:
         destination = Path(tempfile.mkdtemp(prefix=name+'-', dir=output))
         for filename in (executable+'.exe', 'sl.interposer.dll',
-                         'ControlWrapperFixture.dll', 'ExistingOverlayFixture.dll', 'ScopedCallerFixture.dll', 'EngineFactoryFixture.dll'):
+                         'ControlWrapperFixture.dll', 'ExistingOverlayFixture.dll', 'ScopedCallerFixture.dll', 'EngineFactoryFixture.dll',
+                         'OptiScalerHostFixture.dll', 'FakeNvapiFixture.dll',
+                         'RendererHostFixture.dll', 'RendererDynamicFixture.dll'):
             shutil.copy2(harness/filename, destination/filename)
         for filename in ('LateEngineFixture.dll', 'sl.enginefixture.dll'):
             shutil.copy2(harness/'EngineFactoryFixture.dll', destination/filename)
+        if (harness/'hotpatch'/'sl.interposer.dll').is_file():
+            (destination/'hotpatch').mkdir()
+            shutil.copy2(harness/'hotpatch'/'sl.interposer.dll', destination/'hotpatch'/'sl.interposer.dll')
         shutil.copy2(harness/'EngineFactoryFixture.dll', output/'ExternalEngineFixture.dll')
         candidate = destination/proxy
         shutil.copy2(dll, candidate)
@@ -96,11 +122,14 @@ def main():
             (destination/'RTX40MFG-UI.ini').write_text(
                 '[Overlay]\nFirstLaunchMenuShown=1\n', encoding='utf-8')
         provider_hash = sha(args.provider) if mode == 'provider' else None
+        probe_hash = sha(args.probe_wrapper) if mode == 'probe' else None
         command = [str(destination/(executable+'.exe'))]
         if mode == 'vulkan':
             command += [str(candidate), str(destination)]
         elif mode == 'provider':
             command += [str(args.provider.resolve()), 'dll', str(candidate)]
+        elif mode == 'probe':
+            command += [str(candidate), str(args.probe_wrapper)]
         elif mode:
             command += [mode, str(candidate)]
         environment = dict(os.environ)
@@ -130,6 +159,11 @@ def main():
                 row['providerSHA256'] = provider_hash
                 row['providerUnchanged'] = sha(args.provider) == provider_hash
                 row['passed'] &= row['providerUnchanged']
+            if probe_hash:
+                row['probeWrapperPath'] = str(args.probe_wrapper)
+                row['probeWrapperSHA256'] = probe_hash
+                row['probeWrapperUnchanged'] = sha(args.probe_wrapper) == probe_hash
+                row['passed'] &= row['probeWrapperUnchanged']
             rows.append(row)
             print(json.dumps(row), flush=True)
             (output/'results.json').write_text(json.dumps(rows, indent=2), encoding='utf-8')

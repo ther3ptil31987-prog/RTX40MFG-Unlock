@@ -52,6 +52,11 @@ struct TemporalProviderProfile
     const char* currentScale = nullptr;
     const char* previousScale = nullptr;
     bool extraRegisters = false;
+    // Named table with its own names and length (0/null: k3109KernelNames, the registration rules
+    // below), and its OutputPull slot (0: the 310.7-310.9 rule, slot 14 when the midpoint is slot 9).
+    size_t kernelCount = 0;
+    const char* const* kernelNames = nullptr;
+    size_t outputPullSlot = 0;
 };
 constexpr TemporalProviderProfile kEarlyTemporalProfile{
     12, false, 197560,
@@ -115,6 +120,68 @@ constexpr std::array<const char*, kMaximumKernelCount> k3109KernelNames{{
     "Vis_DrawVectors",
 }};
 
+// DLSS-G 310.9.16 (Frame Generation Preset C): the 310.9 release table with BlendCandidatesFGLite at
+// slot 1, 26 kernels. The midpoint (slot 10) and OutputPull (slot 15) keep their exact 310.9 payloads.
+constexpr size_t k310916KernelCount = 26;
+constexpr std::array<const char*, k310916KernelCount> k310916KernelNames{{
+    "BlendCandidatesFused",
+    "BlendCandidatesFGLite",
+    "Copy4Channel",
+    "DL1Net_Input",
+    "DL1Net_Output",
+    "DetectMenus",
+    "DetectMenusHudless",
+    "Distortion",
+    "DownsampleDistortion",
+    "DownsampleRGBAndEstimateUIFused",
+    "EstimateIntermMvecsScatter",
+    "EstimatePrev2CurrScatter",
+    "InitMvecQualityMask",
+    "InputMvecProcessing",
+    "MenuDetectionOutput",
+    "OutputPull",
+    "OutputPullMiddle",
+    "OutputPush",
+    "OutputPushFine",
+    "Prev2CurrUnpackPull",
+    "Prev2CurrPullMiddle",
+    "Prev2CurrPush",
+    "Prev2CurrPushFine",
+    "Scatter3d",
+    "WarpBlendingWeights",
+    "ZeroBuffer",
+}};
+constexpr TemporalProviderProfile k310916TemporalProfile{
+    10, true, 98704,
+    "FBA7599CC9CDC1EED947AD5ADB94436052E8C17AD7FD268C2590AB36A0C731E9",
+    "D1EB7A60C57915238AA228511DA16386F95AAAA5A0D1C1B7903F1DA8FB9519B4",
+    "Kernel_EstimateIntermMvecsScatter_param_0+32", "%f136", "%f134", false,
+    k310916KernelCount, k310916KernelNames.data(), 15};
+
+// The slot whose OutputPull kernel gets the equivalent-mask transform: the profile's own slot (310.9.16),
+// else slot 14 when the midpoint is slot 9 (310.7-310.9.1).
+constexpr bool OutputPullMaskSlot(const TemporalProviderProfile& profile, size_t slot) noexcept
+{
+    return profile.outputPullSlot ? slot == profile.outputPullSlot : slot == 14 && profile.temporalSlot == 9;
+}
+
+constexpr bool SameName(const char* a, const char* b) noexcept
+{
+    if (!a || !b) return false;
+    for (; *a || *b; ++a, ++b)
+        if (*a != *b) return false;
+    return true;
+}
+static_assert([] {
+    if (!SameName(k310916KernelNames[0], k3109KernelNames[0])
+        || !SameName(k310916KernelNames[1], "BlendCandidatesFGLite")) return false;
+    for (size_t slot = 2; slot < k310916KernelCount; ++slot)
+        if (!SameName(k310916KernelNames[slot], k3109KernelNames[slot - 1])) return false;
+    return SameName(k310916KernelNames[k310916TemporalProfile.temporalSlot], "EstimateIntermMvecsScatter")
+        && SameName(k310916KernelNames[k310916TemporalProfile.outputPullSlot], "OutputPull")
+        && SameName(k3109KernelNames[14], "OutputPull");
+}(), "310.9.16 is the 310.9 release table with BlendCandidatesFGLite at slot 1");
+
 constexpr const TemporalProviderProfile* ProfileForVersion(
     dlssg_provider_policy::VersionTriplet version) noexcept
 {
@@ -136,6 +203,9 @@ constexpr const TemporalProviderProfile* ProfileForVersion(
     if (version.major == 310 && version.minor == 9
         && (version.build == 0 || version.build == 1))
         return &k3109TemporalProfile;
+    // 310.9.16 (Preset C) keeps the exact 310.9 midpoint payload behind a 26-name table.
+    if (version.major == 310 && version.minor == 9 && version.build == 16)
+        return &k310916TemporalProfile;
     if (version.major == 310
         && ((version.minor == 7
                 && (version.build == 0 || version.build == 128
@@ -147,10 +217,12 @@ constexpr const TemporalProviderProfile* ProfileForVersion(
 
 static_assert([] {
     for (const auto version : dlssg_provider_policy::kSupportedVersions)
-        if (!ProfileForVersion(version)) return false;
+        if (dlssg_provider_policy::IsSupportedAmpereVersion(version) != (ProfileForVersion(version) != nullptr))
+            return false;
     return ProfileForVersion({0, 0, 0}) == nullptr
-        && ProfileForVersion({310, 9, 2}) == nullptr;
-}(), "Every eligible DLSS-G version needs an explicit Ampere temporal profile");
+        && ProfileForVersion({310, 9, 2}) == nullptr
+        && ProfileForVersion({310, 9, 16}) == &k310916TemporalProfile;
+}(), "Every RTX 30 eligible DLSS-G version, and only those, needs an explicit Ampere temporal profile");
 
 static_assert(kEarlyTemporalProfile.temporalSlot == 12);
 static_assert(kLegacySlot11TemporalProfile.temporalSlot == 11);
@@ -432,8 +504,10 @@ bool KernelIdentityMatches(const TemporalProviderProfile& profile, size_t slot,
             && std::strcmp(entryName, "main_kernel") == 0;
     }
 
+    if (profile.kernelNames && slot >= profile.kernelCount)
+        return false;
     constexpr char kEntryPrefix[] = "Kernel_";
-    const char* const expected = k3109KernelNames[slot];
+    const char* const expected = profile.kernelNames ? profile.kernelNames[slot] : k3109KernelNames[slot];
     return expected && std::strcmp(descriptorName, expected) == 0
         && std::strncmp(entryName, kEntryPrefix,
             sizeof(kEntryPrefix) - 1) == 0
@@ -573,6 +647,7 @@ bool DescriptorTableMatches(uintptr_t moduleBase, uintptr_t moduleEnd,
 
 bool RegistrationCountMatches(const TemporalProviderProfile& profile, size_t count) noexcept
 {
+    if (profile.kernelNames) return count == profile.kernelCount;
     if (profile.temporalSlot == 12) return count == 28 || count == 33;
     if (profile.temporalSlot == 11) return count == 27 || count == 38;
     if (profile.temporalSlot == 10) return count == 26;
@@ -1427,7 +1502,7 @@ bool PatchProvider(HMODULE module, const wchar_t* path, const PreparationBoundar
         return fail(Failure::eRestartRequired);
     if (!boundary.Current(module)) return fail(Failure::eEarlyPreparation);
     gPreparation.store(Preparation::eEligibility);
-    if (!dlssg_provider_policy::IsSupportedProvider(module, path)) return fail(Failure::eProviderVersion);
+    if (!dlssg_provider_policy::IsSupportedAmpereProvider(module, path)) return fail(Failure::eProviderVersion);
     dlssg_provider_policy::VersionTriplet version{};
     gPreparation.store(Preparation::eVersion);
     if (!dlssg_provider_policy::ReadProviderVersion(path, version)) return fail(Failure::eProviderVersion);
@@ -1514,7 +1589,7 @@ bool PatchProvider(HMODULE module, const wchar_t* path, const PreparationBoundar
             gPreparation.store(Preparation::ePtxTransform);
             if (!BuildAmpereSm86Fatbin(fatbin, supplied, meta, ptxProgram[i].data(),
                     capacity, scratch.data(), scratch.size(), outputSize, reason, temporal,
-                    i == 14 && profile->temporalSlot == 9))
+                    OutputPullMaskSlot(*profile, i)))
             { discard(); return fail(Failure::eDecompression); }
             ptxProgram[i].resize(outputSize);
         }

@@ -389,6 +389,8 @@ struct State
 struct Session : State
 {
     ComPtr<IDXGISwapChain3> renderingChain;
+    bool providerSession = false;
+    std::atomic<bool> providerPresented{false};
     bool resizing = false;
     bool wasStillDrawing = false;
     uint32_t presents = 0;
@@ -405,7 +407,14 @@ bool Principal(Session* session) noexcept
     };
     std::lock_guard lock(gSessionsMutex);
     for (auto* other : gSessions)
+    {
+        // XeSS's application layer owns FG input preparation and the paired
+        // queue. Once used, it supersedes its underlying native window layer.
+        if (other && other != session && !session->providerSession
+            && other->presentationWindow == session->presentationWindow
+            && other->providerSession && other->providerPresented.load(std::memory_order_acquire)) return false;
         if (other && other != session && score(other) > score(session)) return false;
+    }
     return true;
 }
 
@@ -445,7 +454,7 @@ void SynthesizeHudlessUi(Session* session, bool partialUpdate) noexcept
 }
 }
 
-Session* CreateSession(IDXGISwapChain* chain, IUnknown* presentedQueue) noexcept
+Session* CreateSession(IDXGISwapChain* chain, IUnknown* presentedQueue, HMODULE provider) noexcept
 {
     if (!chain || !presentedQueue || native::InsideLoader()) return nullptr;
     InternalScope internal;
@@ -456,7 +465,10 @@ Session* CreateSession(IDXGISwapChain* chain, IUnknown* presentedQueue) noexcept
         ComPtr<IUnknown> queueIdentity, swapIdentity;
         if (FAILED(chain->QueryInterface(IID_PPV_ARGS(&renderingChain)))
             || !native::PinInterface(renderingChain.Get(), 39)
-            || !native::Unwrap(chain, nativeChain) || !native::SystemDxgiObject(nativeChain.Get(), 39)
+            || !(provider
+                ? (slots::ImageSlot(provider, *reinterpret_cast<void***>(renderingChain.Get()))
+                    && slots::ImageEntry(provider, (*reinterpret_cast<void***>(renderingChain.Get()))[8]))
+                : (native::Unwrap(chain, nativeChain) && native::SystemDxgiObject(nativeChain.Get(), 39)))
             || !native::Unwrap(presentedQueue, queue)
             || !native::PinInterface(queue.Get(), 18)
             || queue->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_DIRECT
@@ -473,6 +485,7 @@ Session* CreateSession(IDXGISwapChain* chain, IUnknown* presentedQueue) noexcept
         const LUID a = nativeDevice->GetAdapterLuid(), b = swapDevice->GetAdapterLuid();
         if (a.HighPart != b.HighPart || a.LowPart != b.LowPart) return nullptr;
         auto session = std::make_unique<Session>();
+        session->providerSession = provider != nullptr;
         DXGI_SWAP_CHAIN_DESC1 desc{};
         if (FAILED(renderingChain->GetHwnd(&session->presentationWindow)) || !session->presentationWindow
             || FAILED(renderingChain->GetDesc1(&desc))) return nullptr;
@@ -499,6 +512,19 @@ Session* CreateSession(IDXGISwapChain* chain, IUnknown* presentedQueue) noexcept
         RecordFailure(L"MFG_PROXY_UI renderer allocation failed; original presentation retained");
         return nullptr;
     }
+}
+
+// Quiesces a provider session while the XeSS context is being destroyed.
+// Fails (and keeps the session) while a present or resize is in flight.
+bool RetireSession(Session* session) noexcept
+{
+    if (!session) return true;
+    std::lock_guard lock(session->mutex);
+    if (session->presents || session->resizing) return false;
+    session->platform.RetireInput();
+    if (!session->Shutdown(true)) return false;
+    session->retired = true;
+    return true;
 }
 
 void DestroySession(Session* session) noexcept
@@ -534,6 +560,7 @@ bool BeginPresent(Session* session, UINT flags, bool partialUpdate) noexcept
     ++session->presents;
     if (session->presents != 1) return true; // Concurrent calls forward; only one UI submission can own a frame.
     if ((flags & DXGI_PRESENT_TEST) || ((flags & DXGI_PRESENT_DO_NOT_WAIT) && session->wasStillDrawing)) return true;
+    if (session->providerSession) session->providerPresented.store(true, std::memory_order_release);
     if (!Principal(session)) return true;
     gDxgiFrames.fetch_add(1, std::memory_order_relaxed);
     const bool hudlessCapture = hudless_probe::WantsPresentCapture();
@@ -544,7 +571,7 @@ bool BeginPresent(Session* session, UINT flags, bool partialUpdate) noexcept
         catch (...) { RecordFailure(L"MFG_PROXY_UI HUDless probe capture exception"); }
     }
 #if MFG_UNLOCK_OVERLAY_MENU_DRAW && !MFG_UNLOCK_OVERLAY_SKIP_GPU_WORK
-    if (install::InputReady()) // A concurrent creator never waits on input publication.
+    if (install::InputReady() && single_module::OverlayAllowed()) // A concurrent creator never waits on input publication.
     {
         try { session->Render(partialUpdate); }
         catch (...) { session->Disable(); RecordFailure(L"MFG_PROXY_UI render exception; UI disabled for this generation"); }
