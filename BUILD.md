@@ -1,8 +1,9 @@
-# Building v1.5.0
+# Building v1.5.0-hotfix.1
 
-The v1.5.0 release combines the DLSS MFG backend, the built-in menu, RTX 30
-support and XeSS Multi Frame Generation (XeMFG) through OptiScaler in one
-DLL. ProductVersion is 1.5.0; FileVersion is 1.5.0.933.
+The v1.5.0-hotfix.1 release is the v1.5.0 runtime with the RTX 40 NGX
+ReleaseFeature VRAM leak fix. It combines the DLSS MFG backend, the built-in
+menu, RTX 30 support and XeSS Multi Frame Generation (XeMFG) through OptiScaler
+in one DLL. ProductVersion is 1.5.0-hotfix.1; FileVersion is 1.5.0.937.
 
 The release target is `RTXMFGUnified`, producing `Release/MFGUnlocker.dll`.
 Use Windows x64, Visual Studio 2022/MSVC 14.38.33130, Windows SDK
@@ -53,7 +54,7 @@ actual paths and a fresh build directory:
     -NativeCacheRoot 'C:/BuildInputs/rtxmfg-sm86' `
     -XessSdkRoot 'C:/SDKs/xess-sdk-3.0.2' `
     -XessProgramsRoot 'C:/BuildInputs/xess-programs' `
-    -BuildDirectory "$PWD/build/v1.5.0" `
+    -BuildDirectory "$PWD/build/v1.5.0-hotfix.1" `
     -EnableNgxCreateResultDiagnostics
 ```
 

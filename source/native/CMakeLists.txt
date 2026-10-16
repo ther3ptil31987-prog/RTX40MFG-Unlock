@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(RTX40MFGNative VERSION 1.5.0.933 LANGUAGES C CXX ASM_MASM)
+project(RTX40MFGNative VERSION 1.5.0.937 LANGUAGES C CXX ASM_MASM)
 option(MFG_UNLOCK_OVERLAY_SKIP_GPU_WORK "Isolated comparison: keep proxies/input but skip UI GPU work" OFF)
 option(MFG_UNLOCK_NGX_CREATE_RESULT_DIAGNOSTICS "Bounded NGX runtime Create results without DRED or new hooks" OFF)
 option(MFG_UNLOCK_GPU_FAULT_CAPTURE "Isolated local DRED and NGX result diagnostics" OFF)

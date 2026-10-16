@@ -9344,7 +9344,7 @@ DWORD WINAPI PatchWorker(void* context)
     hudless_probe::SetLogSink(&MidpointLog);
     hudless_visualizer::SetUiTagger(&TagSynthesizedUi);
 #if defined(MFG_UNLOCK_SINGLE_MODULE_UI)
-    Log(L"RTXMFG build=1.5.0 source=v1.5-flipmeter-20261006 base=intel6.6+optiscaler.1+ring2.3+dltb.2+slhost.1+flipmeter.18+hairdiscovery.1.4.2+reflexfg.2+capture.2+optixell.1+optiout.1+optipace.1+model2x.1+mvfill.1+uioff.1+uistable.1+mfgport.1+hudmatch.1+optiport.1+optcapture.1+optiportdefault.1+xefgdiscovery.1+slrestart.1+nvapipin.1+modeltoggle.1+uirefresh.1+noport.1+optiredirect.1+reflexport.1+portback.1+optionly.1+delayload.1+rtx30.3+xellungated.1+specialk.1a+themidaimports.1+modelchoice.1+xefgmodel.1+splat.2+scenechange.1+xellinput.1+rtx30sl2732.1+mfgunlocker.1+presetc.3+rtx30presetc.1+rtx30stable.1+rtx30ota.1 outputPullMask=%d occupancyHint=%d "
+    Log(L"RTXMFG build=1.5.0-hotfix.1 source=v1.5-flipmeter-20261006 base=intel6.6+optiscaler.1+ring2.3+dltb.2+slhost.1+flipmeter.18+hairdiscovery.1.4.2+reflexfg.2+capture.2+optixell.1+optiout.1+optipace.1+model2x.1+mvfill.1+uioff.1+uistable.1+mfgport.1+hudmatch.1+optiport.1+optcapture.1+optiportdefault.1+xefgdiscovery.1+slrestart.1+nvapipin.1+modeltoggle.1+uirefresh.1+noport.1+optiredirect.1+reflexport.1+portback.1+optionly.1+delayload.1+rtx30.3+xellungated.1+specialk.1a+themidaimports.1+modelchoice.1+xefgmodel.1+splat.2+scenechange.1+xellinput.1+rtx30sl2732.1+mfgunlocker.1+presetc.3+rtx30presetc.1+rtx30stable.1+rtx30ota.1+releaseleak.1 outputPullMask=%d occupancyHint=%d "
         L"uiInputs=framed-observations uiRecomposition=game-managed "
         L"hudlessDetection=tile-probe",
         MFG_UNLOCK_OUTPUT_PULL_MASK_ONLY,

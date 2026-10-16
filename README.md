@@ -1,4 +1,4 @@
-# Universal MFG Unlocker V1.5.0
+# Universal MFG Unlocker V1.5.0-hotfix.1
 
 Multi Frame Generation for Windows x64 games, in one DLL:
 
@@ -13,6 +13,12 @@ per game MFG override maximum. A listed maximum does not guarantee that the
 active Frame Generation pipeline can apply it.
 
 If this mod helps you, [help me get through university on Ko-fi](https://ko-fi.com/dashdogy).
+
+## V1.5.0-hotfix.1
+
+- **Fixes a VRAM leak when Frame Generation is switched on again.**
+  In The Witcher 3 each switch kept about 425 MiB of video memory until the
+  game was closed.
 
 ## V1.5.0
 
@@ -35,12 +41,12 @@ If this mod helps you, [help me get through university on Ko-fi](https://ko-fi.c
 
 ## Install
 
-The v1.5.0 download contains **`MFGUnlocker.dll`**. The menu is built in; no
+The v1.5.0-hotfix.1 download contains **`MFGUnlocker.dll`**. The menu is built in; no
 separate ReShade or external loader installation is needed. To use XeMFG, install
 it as an OptiScaler plugin instead; see [OptiScaler support](#optiscaler-support).
 
 1. Close the game. If upgrading, remove the old mod DLL as described below first.
-2. Download `MFGUnlocker-v1.5.0.zip` from [Releases](https://github.com/dashdogy/RTX40MFG-Unlock/releases)
+2. Download `MFGUnlocker-v1.5.0-hotfix.1.zip` from [Releases](https://github.com/dashdogy/RTX40MFG-Unlock/releases)
    and extract it.
 3. Rename `MFGUnlocker.dll` to **one** supported filename below that the game
    loads early. Place it beside the **actual game executable**, not the launcher.
