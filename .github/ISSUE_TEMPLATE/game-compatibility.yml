@@ -109,7 +109,12 @@ body:
     id: logs
     attributes:
       label: Logs and supporting evidence
-      description: Attach the matching MfgUnlock log and interval CSV from the temporary directory. Redact personal path information if needed. Add a short video for visual or pacing problems.
+      description: >-
+        Attach `RTXMFG-<game>-<path-hash>.log`, `RTXMFG-<game>-<path-hash>.previous.log` and
+        `RTXMFG-Universal.status.json` from the game folder, beside the game's executable, plus
+        `RTXMFG-<game>-<path-hash>-intervals.csv` if there is one. If the game folder cannot be written,
+        the logs are in `%TEMP%` instead. With OptiScaler, also attach `OptiScaler.log`.
+        Redact personal path information if needed. Add a short video for visual or pacing problems.
     validations:
       required: true
 

@@ -1,4 +1,6 @@
 #include "overlay_adapter_parent.h"
+#include "process_mitigations.h"
+#include "provider_image.h"
 #include "overlay_dxgi_proxy.h"
 #include "overlay_native.h"
 #include "overlay_platform.h"
@@ -34,40 +36,18 @@ bool SystemDxgi(HMODULE& image) noexcept {
         && !wcscat_s(expected,L"\\dxgi.dll")
         && GetModuleFileNameW(image,actual,MAX_PATH) && !_wcsicmp(expected,actual);
 }
-bool MitigationsSupported() noexcept {
-    PROCESS_MITIGATION_CONTROL_FLOW_GUARD_POLICY cfg{};
-    PROCESS_MITIGATION_USER_SHADOW_STACK_POLICY cet{};
-    return GetProcessMitigationPolicy(GetCurrentProcess(),ProcessControlFlowGuardPolicy,&cfg,sizeof(cfg))
-        && GetProcessMitigationPolicy(GetCurrentProcess(),ProcessUserShadowStackPolicy,&cet,sizeof(cet))
-        && !cfg.StrictMode && !cfg.EnableXfg && !cet.EnableUserShadowStackStrictMode
-        && !cet.BlockNonCetBinaries && !cet.BlockNonCetBinariesNonEhcont;
-}
 bool Current(const Binding& b) noexcept {
     return b.target && b.relay && !memcmp(b.target,b.published.data(),b.published.size())
         && !memcmp(b.relay,b.relayBytes.data(),b.relayBytes.size());
 }
 bool PublishedTo(Binding& b,void* trampoline,Parent replacement) noexcept {
-    const auto* code=static_cast<const unsigned char*>(b.target);
     // The pinned x64 MinHook implementation puts its FF25 relay in the same
     // 64-byte allocation as this hook's trampoline. Validate the decoded route
     // before activation instead of accepting arbitrary post-publication bytes.
-    if(code[0]!=0xe9)return false;
-    int32_t displacement=0;memcpy(&displacement,code+1,sizeof(displacement));
-    const auto address=reinterpret_cast<uintptr_t>(code)+5+displacement;
-    const auto begin=reinterpret_cast<uintptr_t>(trampoline);
-    if(address<begin||address-begin>64-b.relayBytes.size())return false;
-    MEMORY_BASIC_INFORMATION memory{};
-    if(VirtualQuery(reinterpret_cast<void*>(address),&memory,sizeof(memory))!=sizeof(memory)
-        ||memory.State!=MEM_COMMIT||memory.Type!=MEM_PRIVATE
-        ||(memory.Protect&(PAGE_GUARD|PAGE_NOACCESS))
-        ||!(memory.Protect&(PAGE_EXECUTE_READ|PAGE_EXECUTE_READWRITE))
-        ||memory.RegionSize<b.relayBytes.size()
-        ||address-reinterpret_cast<uintptr_t>(memory.BaseAddress)>memory.RegionSize-b.relayBytes.size())return false;
-    const auto* relay=reinterpret_cast<const unsigned char*>(address);
-    constexpr unsigned char indirect[]={0xff,0x25,0,0,0,0};
-    Parent destination=nullptr;memcpy(&destination,relay+6,sizeof(destination));
-    if(memcmp(relay,indirect,sizeof(indirect))||destination!=replacement)return false;
-    memcpy(b.published.data(),code,b.published.size());
+    const auto* relay=provider_image::MinHookRelay(b.target,reinterpret_cast<const void*>(replacement));
+    const auto address=reinterpret_cast<uintptr_t>(relay),begin=reinterpret_cast<uintptr_t>(trampoline);
+    if(!relay||address<begin||address-begin>64-b.relayBytes.size())return false;
+    memcpy(b.published.data(),b.target,b.published.size());
     memcpy(b.relayBytes.data(),relay,b.relayBytes.size());b.relay=relay;
     return Current(b);
 }
@@ -103,7 +83,7 @@ void Observe(IUnknown* object) noexcept {
     ComPtr<IDXGIAdapter> adapter;
     if (FAILED(object->QueryInterface(IID_PPV_ARGS(&adapter)))||!adapter) return;
     HMODULE dxgi=nullptr;
-    if (!SystemDxgi(dxgi)||!native::SystemDxgiObject(adapter.Get(),9)||!MitigationsSupported()) return;
+    if (!SystemDxgi(dxgi)||!native::SystemDxgiObject(adapter.Get(),9)||!HookMitigationsSupported()) return;
     void* target=(*reinterpret_cast<void***>(adapter.Get()))[6];
     if (!slots::ImageEntry(dxgi,target)) return;
     HMODULE pinned=nullptr;

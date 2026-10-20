@@ -1,9 +1,9 @@
-# Building v1.5.0-hotfix.1
+# Building v1.6.1
 
-The v1.5.0-hotfix.1 release is the v1.5.0 runtime with the RTX 40 NGX
-ReleaseFeature VRAM leak fix. It combines the DLSS MFG backend, the built-in
-menu, RTX 30 support and XeSS Multi Frame Generation (XeMFG) through OptiScaler
-in one DLL. ProductVersion is 1.5.0-hotfix.1; FileVersion is 1.5.0.937.
+The v1.6.1 release combines the DLSS MFG backend, the built-in menu with its
+translations, RTX 50, RTX 30 and experimental RTX 20 support, and XeSS Multi Frame
+Generation (XeMFG) through OptiScaler, including the XeMFG tensor-core kernels,
+in one DLL. ProductVersion is 1.6.1; FileVersion is 1.6.1.1021.
 
 The release target is `RTXMFGUnified`, producing `Release/MFGUnlocker.dll`.
 Use Windows x64, Visual Studio 2022/MSVC 14.38.33130, Windows SDK
@@ -16,6 +16,11 @@ Required external inputs:
   from ReShade 6.8.0, including its backends.
 - Vulkan SDK 1.2.176.1 headers and `glslangValidator.exe`.
 - XeSS SDK **3.0.2** public headers (`inc/xess_fg`, `inc/xell`).
+- CUDA Toolkit **13.2** (`nvcc` V13.2.51), for the XeMFG tensor-core kernels
+  (`source/native/xess/cuda/xefg_cuda_layers.cu`). `build.ps1` defaults to
+  `C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.2`; pass `-CudaRoot`
+  for another location. No CUDA runtime is linked or shipped: the kernels are
+  embedded as one fatbin and run through the NVIDIA driver.
 - The pinned XeSS Frame Generation program set: `programs/programs.tsv`
   (SHA-256 `D74BD783D29280ED372653701CE9B0395362E381FAACE1213206E0BDD9BFC9E5`)
   and the 54 DXIL programs it lists. Most are derived from Intel's XeSS SDK;
@@ -54,7 +59,7 @@ actual paths and a fresh build directory:
     -NativeCacheRoot 'C:/BuildInputs/rtxmfg-sm86' `
     -XessSdkRoot 'C:/SDKs/xess-sdk-3.0.2' `
     -XessProgramsRoot 'C:/BuildInputs/xess-programs' `
-    -BuildDirectory "$PWD/build/v1.5.0-hotfix.1" `
+    -BuildDirectory "$PWD/build/v1.6.1" `
     -EnableNgxCreateResultDiagnostics
 ```
 
@@ -64,9 +69,11 @@ GPU fault capture, menu suppression, skipped GPU work and test fault injection
 remain disabled. Do not enable those diagnostic switches for a release build.
 
 The proxy dispatchers, Vulkan shader arrays, adapted ImGui DX12 backend, the
-embedded XeSS program table and MFG Unlocker's own XeFG shaders
-(`source/native/xess/port/splat_motion_aware.hlsl`, compiled with the Windows
-SDK's `dxc.exe`) are generated in the build directory. The proxy and shader
+embedded XeSS program table, MFG Unlocker's own XeFG shaders
+(`source/native/xess/port/splat_motion_aware.hlsl` and `unet_conv.hlsl`,
+compiled with the Windows SDK's `dxc.exe`) and the tensor-core kernel fatbin (sm_75, sm_86, sm_89 and sm_120 SASS,
+compiled by `xess/cuda/generate_cuda_layers.py` with the pinned `nvcc` in the
+pinned MSVC toolset's environment) are generated in the build directory. The proxy and shader
 outputs' normalized SHA-256 values must match
 `source/native/generated_sha256.json`; the XeSS generators pin their own inputs
 and outputs. The fixed export map is recorded in `proxy_exports.txt`; generation
@@ -87,13 +94,44 @@ Test projects:
   must load the freshly built DLL. The Vulkan cases use a real Vulkan device;
   DirectX 12 presentation cases use WARP. They exercise synthetic presentation
   and control paths, not a game's Frame Generation output.
-- `tests/provider_310916`: DLSS Frame Generation 310.9.16 (Preset C) admission
-  audits against the 310.9.0 and 310.9.16 providers, mapped without running
-  provider code. Its RTX 30 audit is built only when configured with the same
-  `MFG_AMPERE_*` SM86 cache arguments as the release, and checks that the
-  complete 26-slot native program is selected.
-- `tests/ampere_font` and `tests/ampere_runtime`: RTX 30 publication, selection
-  and policy checks with data-only provider images and mock CUDA calls.
+- `tests/provider_audits`: DLSS Frame Generation provider admission audits
+  (310.9.0 and 310.9.16, Preset C) against those providers, mapped without
+  running provider code. Its RTX 30 audit is built only when configured with the
+  same `MFG_AMPERE_*` SM86 cache arguments as the release, and checks that the
+  complete 26-slot native program is selected from the embedded kernels.
+- `tests/ampere_audits` and `tests/ampere_runtime`: RTX 30 font, publication,
+  selection and policy checks with data-only provider images and mock CUDA calls.
+  `ampere_runtime`'s CTest runs the batch, options, status, Streamline OTA and
+  OptiScaler private Streamline startup checks, which need no inputs, the NVAPI
+  factory-detour check, which needs
+  the installed NVIDIA driver (a split driver-store `nvapi64_impl.dll`), and the
+  GPU name override check, which needs an NVIDIA DXGI adapter and detours the
+  real System32 `dxgi.dll` inside its own process only. Its
+  flip-metering, wrapper, selection and architecture tests take real
+  `sl.dlss_g.dll` wrappers and DLSS-G providers as arguments.
+- `tests/blackwell_runtime`: RTX 50 identification and menu policy. Its CTest
+  runs the selection, Vulkan admission, Streamline OTA, menu family and Dynamic
+  MFG checks, which need no inputs, and the adapter probe, which runs the
+  production RTX 50 check against the machine's NVIDIA adapters through the
+  installed driver's CUDA (exit 2 without one). RTX 50 runs DLSS-G unmodified,
+  so nothing here maps or patches a provider.
+- `tests/xess_cuda`: the XeMFG tensor-core route against Intel's DXIL programs,
+  through the production route code, on an NVIDIA RTX 20/30/40/50 GPU. Every layer
+  program, padded and poisoned outputs, fuzzed and shrunken constants, and the
+  fallback for incomplete recording state must be byte-identical. It needs the
+  build's fatbin, libxess_fg 3.0.2's layer programs and the pinned program set.
+- `tests/intel_native`: the Intel Arc native route's driver contract and XeLL
+  pairing rules. It maps the Intel driver's XeFG and XeLL files and the XeSS SDK
+  3.0.2 runtime without running their code; configure with `XESS_SDK_ROOT` and
+  the `INTEL_*` and `XESS_*` fixture paths.
+- `tests/localization`: menu translation lookup and Auto language rules,
+  the shipped catalogs and whether the Windows fonts they list draw every
+  character, the catalog generator's rejections, and that every catalog
+  matches the sources. Configure with `IMGUI_ROOT`.
+
+The menu catalogs in `source/native/locale` are validated and compiled in at
+configure time by `source/native/generate_locale.py`; a catalog error fails the
+configure. See [locale/README.md](source/native/locale/README.md).
 
 These checks do not establish live provider execution or correct final
 presentation in a game.

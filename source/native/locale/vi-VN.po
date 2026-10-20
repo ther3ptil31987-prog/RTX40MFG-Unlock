@@ -1,0 +1,777 @@
+# MFG Unlocker menu, Vietnamese.
+# Segoe UI draws Vietnamese, so no extra font is listed.
+msgid ""
+msgstr ""
+"Project-Id-Version: MFG Unlocker\n"
+"Language: vi_VN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"X-MFG-Native-Name: Tiếng Việt\n"
+"X-MFG-English-Name: Vietnamese\n"
+"X-MFG-Match: vi\n"
+
+msgid "Auto (%s)"
+msgstr "Tự động (%s)"
+
+msgid "Menu language"
+msgstr "Menu ngôn ngữ"
+
+msgid "Pin"
+msgstr "Ghim"
+
+msgid ""
+"Keeps this panel on screen, see-through and click-through.\n"
+"%s brings the menu back."
+msgstr ""
+"Ghim bảng này trên màn hình (nhìn xuyên và click xuyên qua).\n"
+"Bấm %s để mở lại menu."
+
+msgid "Pinned  |  %s brings the menu back"
+msgstr "Đã ghim  |  Bấm %s để mở lại menu"
+
+msgid "Menu key: %s"
+msgstr "Phím menu: %s"
+
+msgid "Press a key... Esc cancels"
+msgstr "Bấm một phím bất kỳ... Esc để hủy"
+
+msgid "Cancel"
+msgstr "Hủy"
+
+msgid "Change key"
+msgstr "Đổi phím"
+
+msgid "The new shortcut works for this session, but could not be saved."
+msgstr "Phím tắt mới chỉ có hiệu lực ở phiên này, không lưu được vào file."
+
+msgid "The language works for this session, but could not be saved."
+msgstr "Ngôn ngữ chỉ có hiệu lực ở phiên này, không lưu được vào file."
+
+msgid "MFG Unlocker  |  %s opens the menu"
+msgstr "MFG Unlocker  |  Bấm %s để mở menu"
+
+msgid ""
+"Shows the real and DLSS frame rates in the top-left corner\n"
+"while the menu is closed. Saved for the next launch."
+msgstr ""
+"Hiển thị FPS thực và FPS DLSS ở góc trên bên trái\n"
+"khi đóng menu. Tự động lưu cho các lần chơi sau."
+
+msgid "DLSS-G preset"
+msgstr "Preset DLSS-G"
+
+msgid "Original"
+msgstr "Mặc định"
+
+msgid "observed"
+msgstr "đã nhận diện"
+
+msgid "waiting for the provider"
+msgstr "đang chờ provider"
+
+msgid "Preset %s"
+msgstr "Preset %s"
+
+msgid "Game / driver"
+msgstr "Game / driver"
+
+msgid "managed by the game or driver"
+msgstr "do game hoặc driver quản lý"
+
+msgid "needs DLSS-G 310.9.16; game / driver in use"
+msgstr "cần DLSS-G 310.9.16; hiện đang dùng theo game / driver"
+
+msgid "override supplied"
+msgstr "đã nhận override"
+
+msgid "override unavailable"
+msgstr "không có override"
+
+msgid "This DLSS-G provider supports its original preset only. Preset B stays saved for providers that support it."
+msgstr "Provider DLSS-G này chỉ hỗ trợ preset mặc định của nó. Preset B vẫn được lưu cho các provider tương thích."
+
+msgid "This DLSS-G provider supports its original preset only."
+msgstr "Provider DLSS-G này chỉ hỗ trợ duy nhất preset mặc định."
+
+msgid "Restarting frame generation with the new preset..."
+msgstr "Đang khởi động lại Frame Gen với preset mới..."
+
+msgid "The game / driver preset is saved. Restart the game to use it."
+msgstr "Đã lưu preset của game / driver. Hãy khởi động lại game để áp dụng."
+
+msgid "Preset %s is saved. Restart the game to use it."
+msgstr "Đã lưu Preset %s. Hãy khởi động lại game để áp dụng."
+
+msgid "Preset C needs DLSS-G 310.9.16 or newer (NVIDIA app). This game's frame generation keeps the game / driver preset."
+msgstr "Preset C yêu cầu DLSS-G 310.9.16 trở lên (từ NVIDIA app). Frame Generation của game này sẽ giữ nguyên preset theo game / driver."
+
+msgid "The preset selection could not be saved."
+msgstr "Không lưu được preset đã chọn."
+
+msgid "Game / driver default"
+msgstr "Mặc định game / driver"
+
+msgid "Preset C (performance)"
+msgstr "Preset C (hiệu năng)"
+
+msgid "Original preset"
+msgstr "Preset gốc"
+
+msgid ""
+"The DLSS frame generation model preset.\n"
+"Preset C is NVIDIA's lighter Frame Generation mode. It needs DLSS-G 310.9.16 or newer,\n"
+"from the NVIDIA app's DLSS override; other providers keep the game / driver preset.\n"
+"A change made while frame generation runs restarts it once, with a short pause;\n"
+"some older DLSS-G versions apply it after a game restart."
+msgstr ""
+"Preset model của DLSS Frame Generation.\n"
+"Preset C là chế độ Frame Gen tối ưu nhẹ hơn của NVIDIA. Yêu cầu DLSS-G 310.9.16 trở lên,\n"
+"lấy từ tính năng DLSS override của NVIDIA app; các provider khác sẽ giữ preset mặc định của game / driver.\n"
+"Nếu đổi preset khi Frame Gen đang chạy, Frame Gen sẽ khởi động lại một lần và khựng trong giây lát;\n"
+"với một số phiên bản DLSS-G cũ, bạn cần khởi động lại game để có hiệu lực."
+
+msgid "Performance"
+msgstr "Hiệu năng"
+
+msgid "Balanced"
+msgstr "Cân bằng"
+
+msgid "Quality"
+msgstr "Chất lượng"
+
+msgid "Ultra Performance"
+msgstr "Hiệu năng cực cao"
+
+msgid "Ultra Quality"
+msgstr "Chất lượng cực cao"
+
+msgid "DLSS RR"
+msgstr "DLSS RR"
+
+msgid "DLSS SR"
+msgstr "DLSS SR"
+
+msgid "RR preset"
+msgstr "Preset RR"
+
+msgid "SR preset"
+msgstr "Preset SR"
+
+msgid "Running"
+msgstr "Đang chạy"
+
+msgid "Idle"
+msgstr "Nghỉ"
+
+msgid "not evaluated in the last second"
+msgstr "không chạy trong giây vừa qua"
+
+msgid "Not detected"
+msgstr "Chưa phát hiện"
+
+msgid "waiting for the game to create DLSS"
+msgstr "đang chờ game tạo DLSS"
+
+msgid "NVIDIA app override: latest"
+msgstr "override của NVIDIA app: mới nhất"
+
+msgid "NVIDIA app override: %s"
+msgstr "override của NVIDIA app: %s"
+
+msgid "sent as the game's preset hint"
+msgstr "gửi dưới dạng gợi ý preset của game"
+
+msgid "game hint: %s"
+msgstr "gợi ý của game: %s"
+
+msgid "DLSS default for this mode"
+msgstr "mặc định DLSS cho chế độ này"
+
+msgid ""
+"The DLSS Ray Reconstruction model preset.\n"
+"D is NVIDIA's transformer model; E is the newer transformer model, which games with a\n"
+"depth-of-field guide need. F is NVIDIA's second-generation model (RR2) and needs driver 580\n"
+"or newer; DLSS versions without a preset use their default.\n"
+"A change applies at once while DLSS runs. A preset selected when the game starts also\n"
+"replaces an NVIDIA app preset override for that session."
+msgstr ""
+"Preset mô hình DLSS Ray Reconstruction.\n"
+"D là mô hình transformer của NVIDIA; E là mô hình transformer mới hơn, cần cho các game\n"
+"có hướng dẫn độ sâu trường ảnh. F là mô hình thế hệ thứ hai của NVIDIA (RR2) và cần driver 580\n"
+"trở lên; các phiên bản DLSS không có preset sẽ dùng mặc định của mình.\n"
+"Thay đổi có hiệu lực ngay khi DLSS đang chạy. Preset được chọn khi game khởi động cũng thay thế\n"
+"override preset của NVIDIA app trong phiên đó."
+
+msgid ""
+"The DLSS Super Resolution model preset.\n"
+"K is NVIDIA's transformer model with the best image quality; J is similar with a little\n"
+"less ghosting and more flicker. L and M are the newer transformer presets NVIDIA uses for\n"
+"Ultra Performance and Performance; DLSS versions without them use their default.\n"
+"A change applies at once while DLSS runs. A preset selected when the game starts also\n"
+"replaces an NVIDIA app preset override for that session."
+msgstr ""
+"Preset mô hình DLSS Super Resolution.\n"
+"K là mô hình transformer của NVIDIA cho chất lượng hình ảnh tốt nhất; J tương tự, ít\n"
+"ghosting hơn một chút nhưng nhấp nháy nhiều hơn. L và M là các preset transformer mới hơn NVIDIA dùng cho\n"
+"Hiệu năng cực cao và Hiệu năng; các phiên bản DLSS không có chúng sẽ dùng mặc định của mình.\n"
+"Thay đổi có hiệu lực ngay khi DLSS đang chạy. Preset được chọn khi game khởi động cũng thay thế\n"
+"override preset của NVIDIA app trong phiên đó."
+
+msgid "The DLSS RR preset could not be saved."
+msgstr "Không lưu được preset DLSS RR."
+
+msgid "The DLSS SR preset could not be saved."
+msgstr "Không lưu được preset DLSS SR."
+
+msgid "The NVIDIA app's DLSS preset override is active in this game session. Restart the game with a preset selected here to switch presets live."
+msgstr "Override preset DLSS của NVIDIA app đang có hiệu lực trong phiên game này. Hãy khởi động lại game với một preset được chọn ở đây để đổi preset khi đang chạy."
+
+msgid "The NVIDIA app's DLSS preset override is replaced in this session. It applies again after a restart with Game / driver selected."
+msgstr "Override preset DLSS của NVIDIA app được thay thế trong phiên này. Nó sẽ áp dụng lại sau khi khởi động lại với Game / driver được chọn."
+
+msgid "The NVIDIA app's DLSS preset override could not be checked in this session. If one is set, it takes priority."
+msgstr "Không kiểm tra được override preset DLSS của NVIDIA app trong phiên này. Nếu có thiết lập, nó sẽ được ưu tiên."
+
+msgid "This game's DLSS cannot change its preset while running. The preset applies the next time the game starts DLSS (change the DLSS quality mode or restart the game)."
+msgstr "DLSS của game này không thể đổi preset khi đang chạy. Preset sẽ áp dụng vào lần tới game khởi động DLSS (đổi chế độ chất lượng DLSS hoặc khởi động lại game)."
+
+msgid "DLSS refused the new preset; the previous one stays in use."
+msgstr "DLSS đã từ chối preset mới; preset trước vẫn đang được dùng."
+
+msgid "Waiting to release the previous DLSS preset..."
+msgstr "Đang chờ giải phóng preset DLSS trước..."
+
+msgid "Switching DLSS Ray Reconstruction to the new preset..."
+msgstr "Đang chuyển DLSS Ray Reconstruction sang preset mới..."
+
+msgid "Switching DLSS Super Resolution to the new preset..."
+msgstr "Đang chuyển DLSS Super Resolution sang preset mới..."
+
+msgid "Waiting for the game's Reflex plugin."
+msgstr "Đang chờ plugin Reflex của game."
+
+msgid "The loaded Reflex plugin version is unsupported."
+msgstr "Phiên bản plugin Reflex đang load không được hỗ trợ."
+
+msgid "Reflex controls are unavailable for this plugin."
+msgstr "Không thể điều khiển Reflex trên plugin này."
+
+msgid "The Reflex limit is unavailable for the current FG runtime."
+msgstr "Giới hạn Reflex không khả dụng với FG runtime hiện tại."
+
+msgid "Waiting for game Reflex settings. Change the game's Reflex setting once to retry."
+msgstr "Đang chờ cài đặt Reflex từ game. Hãy thử đổi cài đặt Reflex trong game một lần để nhận diện lại."
+
+msgid "Waiting for the game's Reflex settings thread."
+msgstr "Đang chờ luồng cài đặt Reflex của game."
+
+msgid "Waiting for Reflex availability."
+msgstr "Đang kiểm tra Reflex khả dụng."
+
+msgid "Reflex is unavailable."
+msgstr "Reflex không khả dụng."
+
+msgid "Restoring the game's Reflex limit..."
+msgstr "Đang khôi phục lại giới hạn Reflex của game..."
+
+msgid "The game rejected the Reflex limit."
+msgstr "Game đã từ chối mức giới hạn Reflex này."
+
+msgid "The game's Reflex settings cannot be safely replayed."
+msgstr "Không thể áp dụng lại thiết lập Reflex của game một cách an toàn."
+
+msgid "The Reflex plugin changed. Restart the game."
+msgstr "Plugin Reflex đã thay đổi. Hãy restart lại game."
+
+msgid "Waiting for the next safe Reflex update."
+msgstr "Đang chờ thời điểm an toàn tiếp theo để cập nhật Reflex."
+
+msgid "Waiting for the game to accept the Reflex limit."
+msgstr "Đang chờ game chấp nhận mức giới hạn Reflex."
+
+msgid "Game"
+msgstr "Game"
+
+msgid "Off"
+msgstr "Tắt"
+
+msgid "V-Sync"
+msgstr "V-Sync"
+
+msgid ""
+"Off submits the game's frames without V-Sync.\n"
+"NVIDIA Control Panel V-Sync settings take priority."
+msgstr ""
+"Tắt sẽ xuất khung hình của game mà không dùng V-Sync.\n"
+"Thiết lập V-Sync trong NVIDIA Control Panel sẽ được ưu tiên hơn."
+
+msgid "Reflex FPS limit"
+msgstr "Giới hạn FPS Reflex"
+
+msgid ""
+"Caps the game's frame rate through Reflex.\n"
+"Paused while Dynamic MFG is on; the saved limit is kept."
+msgstr ""
+"Khóa FPS của game thông qua NVIDIA Reflex.\n"
+"Sẽ tạm dừng khi bật Dynamic MFG; mức giới hạn đã lưu vẫn được giữ nguyên."
+
+msgid "The Reflex limit is paused while Dynamic MFG is on. The saved limit is kept."
+msgstr "Giới hạn Reflex đang tạm dừng do bật Dynamic MFG. Mức giới hạn đã lưu vẫn được giữ nguyên."
+
+msgid "The presentation settings could not be saved."
+msgstr "Không thể lưu thiết lập xuất hình (presentation)."
+
+msgid "Off not applied"
+msgstr "Chưa áp dụng Tắt"
+
+msgid "applies when the game recreates its swapchain"
+msgstr "áp dụng khi game tạo lại swapchain"
+
+msgid "the game already presents without V-Sync"
+msgstr "game hiện đang chạy không dùng V-Sync"
+
+msgid "Off requested"
+msgstr "Đã yêu cầu Tắt"
+
+msgid "not available on this GPU or driver"
+msgstr "không hỗ trợ trên GPU hoặc driver này"
+
+msgid "game interval %u submitted as 0"
+msgstr "game interval %u được xuất dưới dạng 0"
+
+msgid "the game's last Present was not accepted"
+msgstr "lệnh Present cuối của game không được chấp nhận"
+
+msgid "waiting for the game's swapchain"
+msgstr "đang chờ swapchain của game"
+
+msgid "Applying..."
+msgstr "Đang áp dụng..."
+
+msgid "Reflex limit"
+msgstr "Giới hạn Reflex"
+
+msgid "accepted"
+msgstr "đã chấp nhận"
+
+msgid "%d FPS requested"
+msgstr "đã yêu cầu %d FPS"
+
+msgid "restoring the game's Reflex limit"
+msgstr "đang khôi phục giới hạn Reflex của game"
+
+msgid "paused for Dynamic MFG"
+msgstr "tạm dừng cho Dynamic MFG"
+
+msgid "Reflex status is temporarily unavailable."
+msgstr "Trạng thái Reflex tạm thời không khả dụng."
+
+msgid "Path traced hair"
+msgstr "Tóc Path Tracing"
+
+msgid "State"
+msgstr "Trạng thái"
+
+msgid "Unknown"
+msgstr "Không xác định"
+
+msgid "Disabled"
+msgstr "Đã tắt"
+
+msgid "Waiting for early device"
+msgstr "Đang chờ khởi tạo device"
+
+msgid "Preparing"
+msgstr "Đang chuẩn bị"
+
+msgid "Unsupported game build"
+msgstr "Bản build game không được hỗ trợ"
+
+msgid "Unsupported GPU"
+msgstr "GPU không được hỗ trợ"
+
+msgid "Native LSS"
+msgstr "LSS gốc"
+
+msgid "Unavailable"
+msgstr "Không khả dụng"
+
+msgid "Unsupported driver"
+msgstr "Driver không được hỗ trợ"
+
+msgid "game Path Traced Hair setting"
+msgstr "cài đặt Path Traced Hair trong game"
+
+msgid "Active"
+msgstr "Đang chạy"
+
+msgid "tracing converted hair"
+msgstr "đang render tóc Path Tracing"
+
+msgid "no hair traced in the last 2 s"
+msgstr "không có sợi tóc nào được xử lý trong 2 giây qua"
+
+msgid "Ready"
+msgstr "Sẵn sàng"
+
+msgid "waiting for game hair"
+msgstr "đang chờ dữ liệu tóc từ game"
+
+msgid "Turn it on or off with HairWorks and Path Traced Hair in the game's graphics settings."
+msgstr "Bật hoặc tắt qua mục HairWorks và Path Traced Hair trong cài đặt đồ họa của game."
+
+msgid "Traced hair"
+msgstr "Tóc đang render"
+
+msgid "%s updates"
+msgstr "%s lần cập nhật"
+
+msgid "Builds"
+msgstr "Phiên bản"
+
+msgid "Hair diagnostics"
+msgstr "Chẩn đoán tóc"
+
+msgid "Turn on frame generation in the game's settings (DLSS or XeSS)."
+msgstr "Hãy bật Frame Generation trong cài đặt game (DLSS hoặc XeSS)."
+
+msgid "Turn on frame generation in the game's settings (DLSS)."
+msgstr "Hãy bật Frame Generation trong cài đặt game (DLSS)."
+
+msgid "Turn on frame generation in the game's settings (XeSS)."
+msgstr "Hãy bật Frame Generation trong cài đặt game (XeSS)."
+
+msgid "Turn on DLSS or XeSS frame generation in the game's settings."
+msgstr "Hãy bật DLSS hoặc XeSS Frame Generation trong cài đặt game."
+
+msgid "Game FG"
+msgstr "FG của game"
+
+msgid "GPU"
+msgstr "GPU"
+
+msgid "Waiting for a supported game GPU"
+msgstr "Đang chờ GPU tương thích với game"
+
+msgid "Game FG option"
+msgstr "Tùy chọn FG của game"
+
+msgid "Unlock"
+msgstr "Mở khóa"
+
+msgid ""
+"For games that hide DLSS Frame Generation on RTX 30 cards, such as Wuthering Waves.\n"
+"The game then sees an NVIDIA GeForce RTX 4090. DLSS, Streamline, the driver and MFG Unlocker\n"
+"keep using your real GPU. The game's recommended settings may assume an RTX 4090.\n"
+"Online games with anti cheat may treat any mod as a risk. Applies after a game restart."
+msgstr ""
+"Dành cho các game ẩn tùy chọn DLSS Frame Generation trên card RTX 30 series (như Wuthering Waves).\n"
+"Khi bật, game sẽ nhận diện GPU là NVIDIA GeForce RTX 4090. DLSS, Streamline, driver và MFG Unlocker\n"
+"vẫn dùng GPU thật của bạn. Thiết lập đồ họa tự động của game có thể nhận diện theo RTX 4090.\n"
+"Lưu ý: Các game online có anti-cheat có thể coi mod là rủi ro. Có hiệu lực sau khi restart game."
+
+msgid "The Game FG option could not be saved."
+msgstr "Không lưu được tùy chọn FG của game."
+
+msgid "Restart the game to unlock its Frame Generation option."
+msgstr "Khởi động lại game để mở khóa tùy chọn Frame Generation."
+
+msgid "Restart the game to report your real GPU again."
+msgstr "Khởi động lại game để nhận diện lại GPU thật."
+
+msgid "The Game FG option could not be applied this session. See the log."
+msgstr "Không thể áp dụng tùy chọn FG của game ở phiên này. Hãy kiểm tra log."
+
+msgid "The game sees an NVIDIA GeForce RTX 4090 this session."
+msgstr "Trong phiên này, game đang nhận diện GPU là NVIDIA GeForce RTX 4090."
+
+msgid "This GPU is not an RTX 30 card; the game sees its real name."
+msgstr "GPU này không phải dòng RTX 30; game sẽ hiển thị đúng tên thật."
+
+msgid "MFG Unlocker multi-frame port"
+msgstr "Bản port Multi-Frame của MFG Unlocker"
+
+msgid "Intel 2x model"
+msgstr "Model Intel 2x"
+
+msgid "Frame generation"
+msgstr "Frame Generation"
+
+msgid "XeSS frame generation support is unavailable in this build."
+msgstr "Bản build này chưa hỗ trợ XeSS Frame Generation."
+
+msgid "XeSS multi-frame generation needs OptiScaler, with XeFG as its frame generation output. Without it the game's XeSS frame generation runs at Intel's standard 2x."
+msgstr "XeSS Multi-Frame Generation yêu cầu OptiScaler và chọn XeFG làm đầu ra tạo khung hình. Nếu không có, XeSS Frame Gen của game sẽ chỉ chạy ở mức 2x tiêu chuẩn của Intel."
+
+msgid "XeSS multi-frame generation runs through OptiScaler. Set the frame generation ratio and the MFG model in OptiScaler's menu."
+msgstr "XeSS Multi-Frame Generation hoạt động thông qua OptiScaler. Hãy chỉnh tỉ lệ Frame Gen và model MFG trong menu của OptiScaler."
+
+msgid "Display"
+msgstr "Màn hình"
+
+msgid "Off submits the game's frames without V-Sync."
+msgstr "Tắt sẽ xuất khung hình của game mà không dùng V-Sync."
+
+msgid "The V-Sync setting could not be saved."
+msgstr "Không thể lưu thiết lập V-Sync."
+
+msgid "Status"
+msgstr "Trạng thái"
+
+msgid "%u generated frames capacity"
+msgstr "khả năng tạo tối đa %u frame"
+
+msgid "Applied"
+msgstr "Đã áp dụng"
+
+msgid "Not verified"
+msgstr "Chưa xác thực"
+
+msgid "Model"
+msgstr "Model"
+
+msgid "Tensor cores"
+msgstr "Tensor cores"
+
+msgid "On"
+msgstr "Bật"
+
+msgid "the ported model's int8 layers run as CUDA kernels"
+msgstr "các layer int8 của model port chạy dưới dạng CUDA kernel"
+
+msgid "no layer has run yet"
+msgstr "chưa có layer nào chạy"
+
+msgid "XeFGTensorCores = off in OptiScaler.ini"
+msgstr "XeFGTensorCores = off trong OptiScaler.ini"
+
+msgid "presentation override is not verified"
+msgstr "override xuất hình (presentation) chưa được xác thực"
+
+msgid "DLSS multi-frame generation needs an NVIDIA RTX GPU."
+msgstr "DLSS Multi-Frame Generation yêu cầu card đồ họa NVIDIA RTX."
+
+msgid "DLSS multi-frame generation is unavailable on this GPU."
+msgstr "DLSS Multi-Frame Generation không khả dụng trên GPU này."
+
+msgid "Advanced"
+msgstr "Nâng cao"
+
+msgid "XeSS diagnostics"
+msgstr "Chẩn đoán XeSS"
+
+msgid "Waiting for status"
+msgstr "Đang chờ trạng thái"
+
+msgid "Waiting for current backend status. Saved settings are preserved."
+msgstr "Đang chờ trạng thái backend. Các thiết lập đã lưu vẫn được giữ nguyên."
+
+msgid "Not connected"
+msgstr "Chưa kết nối"
+
+msgid "%s backend is not loaded."
+msgstr "Chưa load backend %s."
+
+msgid "The integrated core is unavailable. Check the startup log and restart the game with one %s module."
+msgstr "Core tích hợp không khả dụng. Hãy kiểm tra log khởi động và restart game chỉ với một module %s duy nhất."
+
+msgid "Paused"
+msgstr "Tạm dừng"
+
+msgid "Live"
+msgstr "Hoạt động"
+
+msgid "The game changed graphics adapters. Restart the game to select a new GPU."
+msgstr "Game đã đổi GPU xuất hình. Hãy khởi động lại game để nhận diện GPU mới."
+
+msgid "RTX Remix detected. Frame generation and its multiplier are managed in the RTX Remix menu."
+msgstr "Đã phát hiện RTX Remix. Frame Generation và hệ số nhân được quản lý trực tiếp trong menu RTX Remix."
+
+msgid "Provider patch"
+msgstr "Patch provider"
+
+msgid "Ready at feature creation"
+msgstr "Sẵn sàng khi khởi tạo tính năng"
+
+msgid "Waiting for frame generation"
+msgstr "Đang chờ Frame Generation"
+
+msgid "5x MFG (experimental)"
+msgstr "5x MFG (thử nghiệm)"
+
+msgid "6x MFG (experimental)"
+msgstr "6x MFG (thử nghiệm)"
+
+msgid "Follow game"
+msgstr "Theo game"
+
+msgid "Mode"
+msgstr "Chế độ"
+
+msgid "MFG mode"
+msgstr "Chế độ MFG"
+
+msgid ""
+"Follow game uses the game's own frame generation setting.\n"
+"Dynamic adjusts frame generation toward a target frame rate; it does not set a hard FPS limit."
+msgstr ""
+"\"Theo game\" sẽ dùng thiết lập Frame Gen mặc định của game.\n"
+"\"Dynamic\" tự điều chỉnh số frame nội suy để đạt mức FPS mục tiêu; không phải là giới hạn FPS cứng."
+
+msgid "Dynamic target"
+msgstr "Mục tiêu Dynamic"
+
+msgid "Display refresh rate"
+msgstr "Tần số quét màn hình (Hz)"
+
+msgid "Target FPS"
+msgstr "FPS mục tiêu"
+
+msgid "Dynamic MFG is unavailable with the current limit or runtime. Its full frame-generation range must fit the limit."
+msgstr "Dynamic MFG không khả dụng với mức giới hạn hoặc runtime hiện tại. Toàn bộ dải tạo khung hình phải nằm gọn trong giới hạn này."
+
+msgid "Dynamic selection is saved; waiting for runtime support."
+msgstr "Đã lưu tùy chọn Dynamic; đang chờ runtime hỗ trợ."
+
+msgid "Saved MFG request: %dx (unavailable in this session)"
+msgstr "Mức MFG đã lưu: %dx (không khả dụng trong phiên này)"
+
+msgid "Request accepted, but the configuration was not saved."
+msgstr "Đã nhận yêu cầu, nhưng chưa lưu cấu hình."
+
+msgid "The selection could not be applied or saved."
+msgstr "Không thể áp dụng hoặc lưu tùy chọn đã chọn."
+
+msgid "Latency and display"
+msgstr "Độ trễ và hiển thị"
+
+msgid "DLSS Ray Reconstruction"
+msgstr "DLSS Ray Reconstruction"
+
+msgid "DLSS Super Resolution"
+msgstr "DLSS Super Resolution"
+
+msgid "game intent: unknown"
+msgstr "trạng thái game: không xác định"
+
+msgid "game intent: on"
+msgstr "trạng thái game: bật"
+
+msgid "game intent: off"
+msgstr "trạng thái game: tắt"
+
+msgid "FG state"
+msgstr "Trạng thái FG"
+
+msgid "Requested"
+msgstr "Đã yêu cầu"
+
+msgid "Dynamic"
+msgstr "Dynamic"
+
+msgid "Dynamic, %ux"
+msgstr "Dynamic, %ux"
+
+msgid "NVIDIA list unavailable"
+msgstr "Danh sách NVIDIA không khả dụng"
+
+msgid "NVIDIA lists no MFG for this game"
+msgstr "NVIDIA không hỗ trợ MFG cho game này"
+
+msgid "game not on NVIDIA's list"
+msgstr "game không có trong danh sách của NVIDIA"
+
+msgid "NVIDIA lists %ux"
+msgstr "Danh sách NVIDIA: %ux"
+
+msgid "Limit"
+msgstr "Giới hạn"
+
+msgid "the current wrapper has no verified MFG override"
+msgstr "wrapper hiện tại chưa có override MFG được xác thực"
+
+msgid "%dx (safe fallback)"
+msgstr "%dx (chế độ an toàn)"
+
+msgid "Waiting"
+msgstr "Đang chờ"
+
+msgid "for an active DLSS-G wrapper"
+msgstr "wrapper DLSS-G đang hoạt động"
+
+msgid "NVIDIA lists ordinary Frame Generation only. The mod keeps its override limit at 2x."
+msgstr "NVIDIA chỉ ghi nhận Frame Generation thường. Mod sẽ giữ mức override tối đa ở 2x."
+
+msgid "The listed %ux ceiling requires a compatible runtime. The current limit is %dx."
+msgstr "Mức trần %ux trên danh sách cần có runtime tương thích. Mức giới hạn hiện tại là %dx."
+
+msgid ""
+"The highest mode the current DLSS-G runtime supports, and the ceiling\n"
+"NVIDIA's override list gives this game."
+msgstr ""
+"Chế độ cao nhất mà runtime DLSS-G hiện tại hỗ trợ, cùng với mức trần\n"
+"mà danh sách override của NVIDIA cấp cho game này."
+
+msgid "%.1f real, %.1f DLSS"
+msgstr "%.1f thực, %.1f DLSS"
+
+msgid "%.1f real, DLSS unavailable"
+msgstr "%.1f thực, DLSS không khả dụng"
+
+msgid "Measuring..."
+msgstr "Đang đo..."
+
+msgid "DLSS FG off"
+msgstr "DLSS FG tắt"
+
+msgid "waiting for an accepted Dynamic request"
+msgstr "đang chờ áp dụng lệnh Dynamic"
+
+msgid "applied: display refresh rate"
+msgstr "đã áp dụng: theo tần số quét màn hình"
+
+msgid "applied: %.2f FPS"
+msgstr "đã áp dụng: %.2f FPS"
+
+msgid "Restart with the matching single-module build. The current status protocol is older than this UI expects."
+msgstr "Hãy restart game với bản build đơn module phù hợp. Giao thức trạng thái hiện tại cũ hơn phiên bản giao diện cần."
+
+msgid "Frame generation stays under the game's control. This wrapper has no verified MFG override support."
+msgstr "Frame Generation vẫn do game kiểm soát. Wrapper này chưa hỗ trợ override MFG chính thức."
+
+msgid "DLSS-G activity observed; waiting for the game's FG control calls."
+msgstr "Đã phát hiện DLSS-G hoạt động; đang chờ lệnh điều khiển FG từ game."
+
+msgid "Waiting for the game to request frame generation."
+msgstr "Đang chờ game yêu cầu bật Frame Generation."
+
+msgid "Waiting for an active DLSS-G pipeline."
+msgstr "Đang chờ pipeline DLSS-G hoạt động."
+
+msgid "Toggle frame generation off then on, or restart the game, to recreate the pipeline with this selection."
+msgstr "Bật tắt lại Frame Generation hoặc khởi động lại game để tạo lại pipeline với thiết lập mới này."
+
+msgid "Diagnostics"
+msgstr "Chẩn đoán"
+
+msgid "Status is temporarily unavailable; controls are paused."
+msgstr "Trạng thái tạm thời không khả dụng; các tùy chỉnh đang tạm dừng."
+
+msgid "FPS status unavailable"
+msgstr "Chưa có dữ liệu FPS"
+
+msgid "Real -- | DLSS --"
+msgstr "Thực -- | DLSS --"
+
+msgid "Real %.0f | DLSS %.0f"
+msgstr "Thực %.0f | DLSS %.0f"
+
+msgid "Real %.0f | DLSS --"
+msgstr "Thực %.0f | DLSS --"
+
+msgid "Dynamic (unavailable)"
+msgstr "Dynamic (không khả dụng)"
+
+msgid "Dynamic (checking...)"
+msgstr "Dynamic (đang kiểm tra...)"

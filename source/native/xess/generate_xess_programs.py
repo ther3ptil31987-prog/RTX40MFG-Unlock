@@ -38,9 +38,14 @@ if len(assets) != PROGRAM_COUNT + 1:
 header = ['#pragma once', '#include "runtime_payload.h"',
           'namespace xess_payload::embedded {', 'inline constexpr Asset assets[] = {']
 rc = ['#include <windows.h>', 'LANGUAGE LANG_NEUTRAL, SUBLANG_NEUTRAL']
-for index, (name, path, digest, size) in enumerate(sorted(assets), FIRST_RESOURCE_ID):
-    header.append(f'    {{{index}, "{name}", "{digest}", {size}}},')
-    rc.append(f'{index} RCDATA "{path.resolve().as_posix()}"')
+# Programs with identical bytes share one resource; each asset row still names its own program and
+# is verified against its own size and hash when read.
+resource_ids = {}
+for name, path, digest, size in sorted(assets):
+    if digest not in resource_ids:
+        resource_ids[digest] = FIRST_RESOURCE_ID + len(resource_ids)
+        rc.append(f'{resource_ids[digest]} RCDATA "{path.resolve().as_posix()}"')
+    header.append(f'    {{{resource_ids[digest]}, "{name}", "{digest}", {size}}},')
 header += ['};', '}']
 
 args.output.mkdir(parents=True, exist_ok=True)
@@ -49,4 +54,4 @@ for name, lines in (("embedded_xess_programs.generated.h", header), ("embedded_x
     target = args.output / name
     if not target.exists() or target.read_text(encoding="utf-8") != text:
         target.write_text(text, encoding="utf-8")
-print(f"Embedded {len(assets) - 1} verified XeSS programs")
+print(f"Embedded {len(assets) - 1} verified XeSS programs ({len(resource_ids)} resources)")

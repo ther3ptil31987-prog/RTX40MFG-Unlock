@@ -13,14 +13,23 @@
 //               (OptiScaler\streamline\sl.interposer.dll) loads before the
 //               game's interposer.
 //   second-streamline  RTXMFG alone; a second interposer loads after the game's.
-// The two Streamline modes check that RTXMFG routes and detours only the
-// game's interposer and that calls never cross instances.
+//   streamline-device  proxy layout, no game interposer: OptiScaler's private
+//               interposer loads, its sl.dlss_g (a clamp stand-in) loads, and its
+//               slSetD3DDevice gets a D3D12 device on the default adapter. On a
+//               verified Ada adapter the wrapper clamp is patched before that
+//               call reaches the instance (where slOnPluginStartup reads it).
+//               Only an armed RTX 30 reaches the RTX 30 startup decision there.
+//   streamline-warp  the same with a WARP device: nothing is selected or patched.
+// The Streamline modes check that RTXMFG routes and detours only the game's
+// interposer (and only slSetD3DDevice of OptiScaler's private one) and that
+// calls never cross instances.
 // Every case writes a saved control with fixed/preset/V-Sync/Reflex/XeSS
 // overrides and checks the effective values RTXMFG reports and that the saved
 // file stays byte-identical.
 #include "single_module_status.h"
 #include "ui_status_json.h"
 #include <Windows.h>
+#include <d3d12.h>
 #include <dxgi1_6.h>
 #include <wrl/client.h>
 #include <cstdio>
@@ -95,11 +104,9 @@ std::filesystem::path RuntimeLog()
         if (c >= L'A' && c <= L'Z') c = static_cast<wchar_t>(c + 32);
         if (!(c < 128 && (iswalnum(c) || c == L'-' || c == L'_'))) c = L'_';
     }
-    wchar_t temp[MAX_PATH]{};
-    GetTempPathW(MAX_PATH, temp);
     wchar_t name[128]{};
     swprintf_s(name, L"RTXMFG-%s-%016llX.log", stem.c_str(), static_cast<unsigned long long>(identity));
-    return std::filesystem::path(temp) / name;
+    return std::filesystem::path(path).parent_path() / name;
 }
 
 // A factory requested through this executable's GetProcAddress reaches
@@ -158,7 +165,7 @@ bool EntryUntouched(HMODULE module, const std::filesystem::path& file, const cha
 // The game's interposer is sl.interposer.dll beside the executable; the other
 // one is OptiScaler's private Streamline or any interposer loaded after it.
 void CheckStreamlineInstances(const std::filesystem::path& here, const std::filesystem::path& other,
-    bool otherFirst)
+    bool otherFirst, bool optiScalerPrivate)
 {
     using SetDeviceFn = int (*)(void*);
     using CountFn = unsigned(WINAPI*)();
@@ -175,11 +182,16 @@ void CheckStreamlineInstances(const std::filesystem::path& here, const std::file
         Check(Inside(second, reinterpret_cast<void*>(GetProcAddress(second, name))), text.c_str());
     }
     Sleep(1500); // background module inspection
-    for (const char* name : {"slInit", "slSetD3DDevice", "slUpgradeInterface"})
+    for (const char* name : {"slInit", "slUpgradeInterface"})
     {
         const std::string text = std::string("second instance ") + name + " entry bytes untouched";
         Check(EntryUntouched(second, other, name), text.c_str());
     }
+    // OptiScaler's private instance gets its own slSetD3DDevice entry (Ada
+    // maximum before its plug-in startup); any other instance stays untouched.
+    Check(EntryUntouched(second, other, "slSetD3DDevice") != optiScalerPrivate, optiScalerPrivate
+        ? "OptiScaler's private slSetD3DDevice entry is hooked"
+        : "second instance slSetD3DDevice entry bytes untouched");
     auto secondSet = reinterpret_cast<SetDeviceFn>(reinterpret_cast<const unsigned char*>(second)
         + ExportRva(reinterpret_cast<const unsigned char*>(second), "slSetD3DDevice"));
     auto gameCount = reinterpret_cast<CountFn>(GetProcAddress(game, "FixtureDeviceSets"));
@@ -191,6 +203,197 @@ void CheckStreamlineInstances(const std::filesystem::path& here, const std::file
     Check(gameCount() == 1 && secondCount() == 1, "the second instance's slSetD3DDevice stays in that instance");
     gameSet(nullptr);
     Check(gameCount() == 2 && secondCount() == 1, "the game's calls still reach the game's instance afterwards");
+}
+
+std::string WaitLog(const char* text, unsigned timeoutMs = 3000)
+{
+    std::string log;
+    for (unsigned waited = 0; waited <= timeoutMs; waited += 25)
+    {
+        log = ReadText(RuntimeLog());
+        if (log.find(text) != std::string::npos) break;
+        Sleep(25);
+    }
+    return log;
+}
+
+// OptiScaler's DLSS-G output with no game Streamline: OptiScaler loads its
+// private interposer, slInit loads sl.dlss_g, and slSetD3DDevice follows at
+// once on the same thread, before discovery runs.
+void CheckPrivateStartupOrder(const std::filesystem::path& here, const std::filesystem::path& status, bool warp)
+{
+    const auto folder = here / L"OptiScaler" / L"streamline";
+    std::filesystem::create_directories(folder);
+    const auto interposerPath = folder / L"sl.interposer.dll";
+    if (!CopyFileW((here / L"hotpatch" / L"sl.interposer.dll").c_str(), interposerPath.c_str(), FALSE)
+        || !CopyFileW((here / L"MaximumClampFixture.dll").c_str(), (folder / L"sl.dlss_g.dll").c_str(), FALSE))
+    {
+        Check(false, "private Streamline fixtures copied");
+        return;
+    }
+    HMODULE interposer = LoadLibraryW(interposerPath.c_str());
+    Check(interposer != nullptr, "private interposer loads");
+    if (!interposer) return;
+    Check(!EntryUntouched(interposer, interposerPath, "slSetD3DDevice"),
+        "private slSetD3DDevice is hooked when its LoadLibrary returns");
+    HMODULE wrapper = LoadLibraryW((folder / L"sl.dlss_g.dll").c_str());
+    using ReadFn = int(WINAPI*)();
+    auto clampPatched = wrapper ? reinterpret_cast<ReadFn>(GetProcAddress(wrapper, "FixtureClampPatched")) : nullptr;
+    Check(clampPatched && clampPatched() == 0, "wrapper clamp native before a device is seen");
+
+    using DeviceFn = HRESULT(WINAPI*)(IUnknown*, D3D_FEATURE_LEVEL, REFIID, void**);
+    using FactoryFn = HRESULT(WINAPI*)(REFIID, void**);
+    HMODULE d3d12 = LoadLibraryExW(L"d3d12.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    HMODULE dxgi = LoadLibraryExW(L"dxgi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    auto createDevice = d3d12 ? reinterpret_cast<DeviceFn>(GetProcAddress(d3d12, "D3D12CreateDevice")) : nullptr;
+    auto createFactory = dxgi ? reinterpret_cast<FactoryFn>(GetProcAddress(dxgi, "CreateDXGIFactory1")) : nullptr;
+    Microsoft::WRL::ComPtr<IDXGIFactory4> factory;
+    Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+    if (warp && createFactory && SUCCEEDED(createFactory(IID_PPV_ARGS(&factory))))
+        factory->EnumWarpAdapter(IID_PPV_ARGS(&adapter));
+    Microsoft::WRL::ComPtr<ID3D12Device> device;
+    if (createDevice && (!warp || adapter))
+        createDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device));
+    Check(device != nullptr, warp ? "WARP D3D12 device created" : "default-adapter D3D12 device created");
+    if (!device || !clampPatched) return;
+
+    using ProbeFn = void(WINAPI*)(HMODULE);
+    using CountFn = unsigned(WINAPI*)();
+    using SetDeviceFn = int (*)(void*);
+    auto probe = reinterpret_cast<ProbeFn>(GetProcAddress(interposer, "FixtureProbeWrapper"));
+    auto atSet = reinterpret_cast<ReadFn>(GetProcAddress(interposer, "FixtureWrapperAtDeviceSet"));
+    auto count = reinterpret_cast<CountFn>(GetProcAddress(interposer, "FixtureDeviceSets"));
+    const auto* base = reinterpret_cast<const unsigned char*>(interposer);
+    auto set = reinterpret_cast<SetDeviceFn>(base + ExportRva(base, "slSetD3DDevice"));
+    Check(probe && atSet && count, "interposer fixture probe exports");
+    if (!probe || !atSet || !count) return;
+    probe(wrapper);
+    // OptiScaler resolves its private exports with the loader's raw lookup.
+    set(device.Get());
+    Check(count() == 1, "the private slSetD3DDevice reaches the private instance once");
+
+    const std::string log = WaitLog("OptiScaler private Streamline slSetD3DDevice: call=1 ");
+    const bool verifiedAda = log.find("adapter verification: luid=") != std::string::npos
+        && log.find("verified=1") != std::string::npos;
+    // optirtx30.1: only an armed RTX 30 reaches the private RTX 30 startup decision.
+    if (log.find("OptiScaler private Streamline slSetD3DDevice: call=1 ada=0 ampere=1") != std::string::npos)
+        Check(log.find("OptiScaler private Streamline RTX 30 startup: call=1 decision=") != std::string::npos,
+            "RTX 30: the private hook decides the RTX 30 startup");
+    else
+        Check(log.find("OptiScaler private Streamline RTX 30 startup") == std::string::npos,
+            "not RTX 30: the private hook takes no RTX 30 startup");
+    if (warp)
+    {
+        Check(log.find("OptiScaler private Streamline slSetD3DDevice: call=1 ada=0") != std::string::npos,
+            "WARP: the private hook selects nothing");
+        Check(atSet() == 0 && clampPatched() == 0, "WARP: the wrapper clamp stays native");
+        Check(Has(ReadText(status), "gpuFamily", "0"), "WARP: no GPU family selected");
+    }
+    else if (verifiedAda)
+    {
+        Check(log.find("OptiScaler private Streamline slSetD3DDevice: call=1 ada=1") != std::string::npos,
+            "Ada: the private hook selects the verified adapter");
+        Check(atSet() == 1, "Ada: the wrapper clamp is patched before the private instance's slSetD3DDevice runs");
+        Check(Has(WaitStatus(status, [](const std::string& text) { return Has(text, "gpuFamily", "1"); }),
+            "gpuFamily", "1"), "Ada: status reports the Ada family");
+    }
+    else
+    {
+        Check(log.find("OptiScaler private Streamline slSetD3DDevice: call=1 ") != std::string::npos,
+            "the private hook ran");
+        std::printf("SKIP default adapter is not a verified Ada GPU; patch-before-startup not applicable\n");
+    }
+    Sleep(1500); // background module inspection
+    Check(EntryUntouched(interposer, interposerPath, "slInit")
+        && EntryUntouched(interposer, interposerPath, "slUpgradeInterface"),
+        "private slInit and slUpgradeInterface entries stay untouched");
+    Check(count() == 1, "no other route reached the private instance");
+}
+
+// xefgrace.1 (Trails in the Sky 2nd Chapter, DX11, OptiScaler XeFG output): OptiScaler loads its XeSS pair
+// and resolves xefgSwapChainD3D12CreateContext in its DllMain, before plug-ins, and created its context
+// about 390 ms after start. V1.6.0 detoured that entry about 380 ms after its own load, after the rest of
+// the worker's startup, so the context stayed stock 2x. Both layouts: RTXMFG under a proxy name after
+// OptiScaler's initialization, and as the plug-in OptiScaler loads right after the pair.
+constexpr double kXefgRouteBoundMs = 150.0;
+
+int RunXefgEarly(const std::filesystem::path& here, const std::filesystem::path& candidate,
+    const std::filesystem::path& host, const std::filesystem::path& plugin, bool pluginLayout)
+{
+    SetEnvironmentVariableW(L"RTXMFG_TEST_OPTISCALER_XEFG", (here / L"OptiScaler").c_str());
+    if (pluginLayout) SetEnvironmentVariableW(L"RTXMFG_TEST_OPTISCALER_PLUGIN", plugin.c_str());
+    LARGE_INTEGER frequency{}, loaded{}, now{};
+    QueryPerformanceFrequency(&frequency);
+    HMODULE optiscaler = LoadLibraryW(host.c_str());
+    HMODULE rtxmfg = pluginLayout ? GetModuleHandleW(plugin.c_str()) : LoadLibraryW(candidate.c_str());
+    QueryPerformanceCounter(&loaded);
+    SetEnvironmentVariableW(L"RTXMFG_TEST_OPTISCALER_XEFG", nullptr);
+    SetEnvironmentVariableW(L"RTXMFG_TEST_OPTISCALER_PLUGIN", nullptr);
+
+    using StateFn = void*(__cdecl*)(unsigned char*);
+    using CallFn = int(__cdecl*)(void*, void**);
+    auto state = optiscaler ? reinterpret_cast<StateFn>(GetProcAddress(optiscaler, "OptiFixtureXefgCreate")) : nullptr;
+    auto callCreate = optiscaler ? reinterpret_cast<CallFn>(GetProcAddress(optiscaler, "OptiFixtureCallXefgCreate")) : nullptr;
+    unsigned char resolved[16]{};
+    auto* create = state ? static_cast<const unsigned char*>(state(resolved)) : nullptr;
+    Check(create != nullptr && callCreate != nullptr,
+        "OptiScaler stand-in loaded OptiScaler\\libxell.dll + libxess_fg.dll and resolved the creation in DllMain");
+    Check(rtxmfg != nullptr, pluginLayout ? "stand-in loaded plugins\\MFGUnlocker.asi after the XeSS pair"
+        : "candidate loaded after OptiScaler's initialization");
+    if (!create || !callCreate || !rtxmfg) return 1;
+
+    double routeMs = -1;
+    for (;;)
+    {
+        QueryPerformanceCounter(&now);
+        const double elapsed = double(now.QuadPart - loaded.QuadPart) * 1000.0 / double(frequency.QuadPart);
+        if (std::memcmp(resolved, create, sizeof(resolved)) != 0) { routeMs = elapsed; break; }
+        if (elapsed > 5000) break;
+        Sleep(1);
+    }
+    std::printf("INFO XeFG creation entry detoured %.1f ms after RTXMFG's load (bound %.0f ms)\n", routeMs, kXefgRouteBoundMs);
+    Check(routeMs >= 0, "RTXMFG detours the creation entry OptiScaler already resolved");
+    Check(routeMs >= 0 && routeMs < kXefgRouteBoundMs, "the XeFG route is live well before OptiScaler's first creation");
+
+    using DeviceFn = HRESULT(WINAPI*)(IUnknown*, D3D_FEATURE_LEVEL, REFIID, void**);
+    using FactoryFn = HRESULT(WINAPI*)(REFIID, void**);
+    HMODULE d3d12 = LoadLibraryExW(L"d3d12.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    HMODULE dxgi = LoadLibraryExW(L"dxgi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    auto createDevice = d3d12 ? reinterpret_cast<DeviceFn>(GetProcAddress(d3d12, "D3D12CreateDevice")) : nullptr;
+    auto createFactory = dxgi ? reinterpret_cast<FactoryFn>(GetProcAddress(dxgi, "CreateDXGIFactory1")) : nullptr;
+    Microsoft::WRL::ComPtr<IDXGIFactory4> factory;
+    Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+    if (createFactory && SUCCEEDED(createFactory(IID_PPV_ARGS(&factory))))
+        factory->EnumWarpAdapter(IID_PPV_ARGS(&adapter));
+    Microsoft::WRL::ComPtr<ID3D12Device> device;
+    if (createDevice && adapter)
+        createDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device));
+    Check(device != nullptr, "WARP D3D12 device created");
+    if (!device) return 1;
+    void* context = nullptr;
+    const int result = callCreate(device.Get(), &context);
+    std::printf("INFO host XeFG creation on WARP returned %d\n", result);
+
+    std::string log, line;
+    for (unsigned waited = 0; waited <= 5000 && line.empty(); waited += 25)
+    {
+        log = ReadText(RuntimeLog());
+        const size_t at = log.find("\"stage\":\"host_context_create\"");
+        if (at != std::string::npos) line = log.substr(at, log.find('\n', at) - at);
+        else Sleep(25);
+    }
+    Check(!line.empty(), "OptiScaler's creation reaches RTXMFG's host route (host_context_create)");
+    Check(line.find("\"unlocked\":true") != std::string::npos && line.find("\"intel\":false") != std::string::npos,
+        "the host unlock is applied before XeFG creates the context");
+    Check(log.find("\"stage\":\"host_unlock\"") != std::string::npos && log.find("host_unlock_rejected") == std::string::npos,
+        "host_unlock logged, not rejected");
+    const std::string firstCall =
+        "\"stage\":\"sdk_first_call\",\"api\":\"xefgSwapChainD3D12CreateContext\",\"caller\":\"OptiScaler.dll\"";
+    const size_t first = log.find("\"stage\":\"sdk_first_call\"");
+    Check(first != std::string::npos && log.compare(first, firstCall.size(), firstCall) == 0,
+        "the first SDK call RTXMFG sees is OptiScaler's creation");
+    std::printf("COMPLETE optiscaler xefg-%s failures=%d\n", pluginLayout ? "plugin" : "proxy", gFailures);
+    return gFailures ? 1 : 0;
 }
 }
 
@@ -207,7 +410,9 @@ int wmain(int argc, wchar_t** argv)
     SetEnvironmentVariableW(L"RTX_MFG_STATUS_PATH", status.c_str());
     const bool known = mode == L"standalone" || mode == L"proxy" || mode == L"plugin"
         || mode == L"late" || mode == L"optin" || mode == L"impostor" || mode == L"fakenvapi"
-        || mode == L"streamline" || mode == L"second-streamline";
+        || mode == L"streamline" || mode == L"second-streamline" || mode == L"streamline-device"
+        || mode == L"streamline-warp" || mode == L"xefg-proxy" || mode == L"xefg-plugin";
+    const bool privateStartup = mode == L"streamline-device" || mode == L"streamline-warp";
     if (!known || std::filesystem::exists(config)) return 2;
 
     std::string saved = R"({"followGame":false,"mode":"fixed","multiplier":4,"dlssgPreset":1,)"
@@ -222,6 +427,8 @@ int wmain(int argc, wchar_t** argv)
     const auto plugin = pluginDirectory / L"MFGUnlocker.asi";
     std::filesystem::create_directories(pluginDirectory);
     if (!CopyFileW(candidate.c_str(), plugin.c_str(), FALSE)) return 3;
+    if (mode == L"xefg-proxy" || mode == L"xefg-plugin")
+        return RunXefgEarly(here, candidate, host, plugin, mode == L"xefg-plugin");
 
     HMODULE rtxmfg = nullptr;
     HMODULE optiscaler = nullptr;
@@ -229,7 +436,7 @@ int wmain(int argc, wchar_t** argv)
     {
         rtxmfg = LoadLibraryW(candidate.c_str());
     }
-    else if (mode == L"proxy" || mode == L"optin" || mode == L"streamline")
+    else if (mode == L"proxy" || mode == L"optin" || mode == L"streamline" || privateStartup)
     {
         optiscaler = LoadLibraryW(host.c_str());
         rtxmfg = LoadLibraryW(candidate.c_str());
@@ -275,7 +482,7 @@ int wmain(int argc, wchar_t** argv)
     Check(Query(rtxmfg).backendOwner == 1, "candidate owns the backend");
 
     const bool expectHost = mode == L"proxy" || mode == L"plugin" || mode == L"late" || mode == L"optin"
-        || mode == L"streamline";
+        || mode == L"streamline" || privateStartup;
     const bool delegated = expectHost && mode != L"optin";
     const char* route = mode == L"plugin" ? "\"plugin\"" : mode == L"late" ? "\"late\""
         : expectHost ? "\"proxy\"" : "\"none\"";
@@ -339,11 +546,15 @@ int wmain(int argc, wchar_t** argv)
         const auto folder = here / L"OptiScaler" / L"streamline";
         std::filesystem::create_directories(folder);
         if (!CopyFileW((here / L"sl.interposer.dll").c_str(), (folder / L"sl.interposer.dll").c_str(), FALSE)) return 3;
-        CheckStreamlineInstances(here, folder / L"sl.interposer.dll", true);
+        CheckStreamlineInstances(here, folder / L"sl.interposer.dll", true, true);
     }
     else if (mode == L"second-streamline")
     {
-        CheckStreamlineInstances(here, here / L"hotpatch" / L"sl.interposer.dll", false);
+        CheckStreamlineInstances(here, here / L"hotpatch" / L"sl.interposer.dll", false, false);
+    }
+    else if (privateStartup)
+    {
+        CheckPrivateStartupOrder(here, status, mode == L"streamline-warp");
     }
 
     Check(ReadText(config) == saved, "saved control remains byte-identical");

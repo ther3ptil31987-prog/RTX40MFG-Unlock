@@ -2,4 +2,5 @@
 /build-tests/
 /outputs/
 /test_runs/
+/source/native/locale/messages.pot
 **/bridge_status.json

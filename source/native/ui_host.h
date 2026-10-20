@@ -33,6 +33,22 @@ inline std::wstring SettingsPath(const char* filename)
     path += Wide(filename);
     return path;
 }
+// [section] key: 1, true or on (any case) is eOn; 0, false or off is eOff; any
+// other value is eInvalid; no path, key or value is `missing`.
+template<class Setting>
+Setting ReadOnOff(const wchar_t* section, const wchar_t* key, const wchar_t* path, Setting missing) noexcept
+{
+    if (!path || !*path) return missing;
+    wchar_t value[16]{};
+    const DWORD count = GetPrivateProfileStringW(section, key, L"", value, static_cast<DWORD>(std::size(value)), path);
+    if (!count) return missing;
+    if (count >= std::size(value) - 1) return Setting::eInvalid;
+    for (const wchar_t* on : {L"1", L"true", L"on"})
+        if (!_wcsicmp(value, on)) return Setting::eOn;
+    for (const wchar_t* off : {L"0", L"false", L"off"})
+        if (!_wcsicmp(value, off)) return Setting::eOff;
+    return Setting::eInvalid;
+}
 }
 
 namespace reshade

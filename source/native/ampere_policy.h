@@ -23,6 +23,10 @@ constexpr bool EvaluationCountValid(int count) noexcept
 // Counts may change only between complete intervals, within the same proven
 // allocation. A failed interval can restart only at index 1 of a newer frame.
 // This records successful submissions, not completed GPU work or presentation.
+// flipMetered: the wrapper is in flip-metering presentation (observed through
+// SetFlipConfig, ampere_flip_metering.h), where each generated frame is
+// presented before the next index writes the shared output, so an output may
+// repeat within the interval. Order, count and frame rules are unchanged.
 struct Batch
 {
     uint64_t frame = 0;
@@ -32,27 +36,32 @@ struct Batch
     bool started = false;
     bool failed = false;
 
-    bool Accepts(uint64_t value, int count, int index, uintptr_t output) const noexcept
+    bool Accepts(uint64_t value, int count, int index, uintptr_t output, bool flipMetered = false) const noexcept
     {
         if (!output || !EvaluationCountValid(count) || index < 1 || index > count) return false;
         if (!started) return index == 1;
         if (failed || submitted == generated)
             return index == 1 && value > frame;
         if (value != frame || count != generated || index != submitted + 1) return false;
-        for (uint32_t i = 0; i < submitted; ++i)
-            if (output == outputs[i]) return false;
-        return true;
+        return flipMetered || !RepeatsOutput(output);
     }
+    // The output is one this in-progress interval already submitted.
+    bool RepeatsOutput(uintptr_t output) const noexcept
+    {
+        if (!started || failed || submitted >= generated) return false;
+        for (uint32_t i = 0; i < submitted; ++i)
+            if (output == outputs[i]) return true;
+        return false;
+    }
+    // No interval is in progress: the next accepted call starts one at index 1.
+    bool BetweenIntervals() const noexcept { return !started || failed || submitted == generated; }
     // The next call of the current interval, refused only because its output is
     // one this interval already submitted (a wrapper sharing one surface across
     // the batch, e.g. flip-metering presentation's two-surface pool).
     bool DuplicateOutput(uint64_t value, int count, int index, uintptr_t output) const noexcept
     {
-        if (!started || failed || !output || submitted >= generated || value != frame
-            || count != static_cast<int>(generated) || index != static_cast<int>(submitted) + 1) return false;
-        for (uint32_t i = 0; i < submitted; ++i)
-            if (output == outputs[i]) return true;
-        return false;
+        return output && value == frame && count == static_cast<int>(generated)
+            && index == static_cast<int>(submitted) + 1 && RepeatsOutput(output);
     }
     void Fail(uint64_t value, int count, int index) noexcept
     {
@@ -66,9 +75,10 @@ struct Batch
         }
         failed = true;
     }
-    void Complete(uint64_t value, int count, int index, uintptr_t output, bool succeeded) noexcept
+    void Complete(uint64_t value, int count, int index, uintptr_t output, bool succeeded,
+        bool flipMetered = false) noexcept
     {
-        if (!succeeded || !Accepts(value, count, index, output)) { Fail(value, count, index); return; }
+        if (!succeeded || !Accepts(value, count, index, output, flipMetered)) { Fail(value, count, index); return; }
         if (index == 1) { frame = value; generated = static_cast<uint32_t>(count); outputs = {}; started = true; failed = false; }
         outputs[static_cast<size_t>(index - 1)] = output;
         submitted = static_cast<uint32_t>(index);
@@ -79,7 +89,7 @@ constexpr bool AdapterMatches(uint64_t d3dLuid, uint64_t cudaLuid,
     unsigned matches, int major, int minor, unsigned nodeMask) noexcept
 {
     return d3dLuid != 0 && d3dLuid == cudaLuid && matches == 1
-        && major == 8 && minor == 6 && nodeMask != 0
+        && ((major == 8 && minor == 6) || (major == 7 && minor == 5)) && nodeMask != 0
         && (nodeMask & (nodeMask - 1)) == 0;
 }
 
@@ -171,6 +181,18 @@ struct Feature
     // The wrapper shared one output across a batch: this feature stays at 2x
     // (certified one generated frame) until it is released and recreated.
     bool outputReuseLatched = false;
+    // Flip-metering path: repeats refused while SetFlipConfig did not report
+    // metering (the mode switch costs at most one batch). Past the allowance the
+    // feature latches at 2x as without the flip-metering path.
+    uint32_t unmeteredRepeats = 0;
+    // NGX entry family that created the feature (ampere_backend::GraphicsApi):
+    // device/outputFormat then hold Vulkan identities (VkDevice, VkFormat).
+    uint32_t api = 0;
+    static constexpr uint32_t kUnmeteredRepeatAllowance = 4;
+    bool LatchRepeatedOutput(bool observingFlipMetering) noexcept
+    {
+        return !observingFlipMetering || ++unmeteredRepeats > kUnmeteredRepeatAllowance;
+    }
 
     bool Matches(uintptr_t value, uintptr_t module, uint64_t load,
         uint64_t program, uint64_t adapter) const noexcept

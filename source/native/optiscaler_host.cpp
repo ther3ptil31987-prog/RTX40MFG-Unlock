@@ -393,33 +393,114 @@ uint32_t ReadXefgModel(std::wstring& setting, std::wstring& path, std::wstring& 
     }
 }
 
-bool ReadXefgSceneChangeThreshold(float& threshold, std::wstring& setting) noexcept
+namespace
+{
+// [XeFG] `key` of the OptiScaler.ini beside the identified module (ReadXefgModel
+// resolves it) into `value`, and as `setting`. eNoIni without that ini; eFailed
+// when the read threw. `setting` is empty unless eRead.
+enum class XefgIniRead { eNoIni, eRead, eFailed };
+template<size_t N> XefgIniRead ReadXefgIni(const wchar_t* key, wchar_t (&value)[N], std::wstring& setting) noexcept
 {
     try
     {
-        threshold = 0.0f;
         setting.clear();
         std::wstring ignoredSetting, path, ignoredKey;
-        ReadXefgModel(ignoredSetting, path, ignoredKey); // resolves the ini beside the identified module
-        if (path.empty()) return false;
-        wchar_t value[32]{};
-        GetPrivateProfileStringW(L"XeFG", L"XeFGSceneChangeThreshold", L"", value,
-            static_cast<DWORD>(_countof(value)), path.c_str());
-        if (!value[0] || _wcsicmp(value, L"auto") == 0) return false;
+        ReadXefgModel(ignoredSetting, path, ignoredKey);
+        if (path.empty()) return XefgIniRead::eNoIni;
+        GetPrivateProfileStringW(L"XeFG", key, L"", value, static_cast<DWORD>(N), path.c_str());
         setting = value;
-        wchar_t* end{};
-        const float parsed = wcstof(value, &end);
-        while (end && (*end == L' ' || *end == L'\t')) ++end;
-        if (!end || end == value || *end || !(parsed >= 0.0f && parsed <= 1.0f)) return false;
-        threshold = parsed;
-        return true;
+        return XefgIniRead::eRead;
     }
     catch (...)
     {
-        threshold = 0.0f;
+        setting.clear();
+        return XefgIniRead::eFailed;
+    }
+}
+// Switch words: off, 0, false, no, disabled / on, 1, true, yes, enabled (any case).
+bool SwitchWord(const wchar_t* value, bool on) noexcept
+{
+    static constexpr const wchar_t* kWords[2][5]{{L"off", L"0", L"false", L"no", L"disabled"},
+        {L"on", L"1", L"true", L"yes", L"enabled"}};
+    for (const wchar_t* word : kWords[on ? 1 : 0])
+        if (_wcsicmp(value, word) == 0) return true;
+    return false;
+}
+// scene.1: off (also false, no, disabled) or intel (also on, stock); 0 stays a threshold.
+bool SceneDetectorOffWord(const wchar_t* value) noexcept
+{
+    return _wcsicmp(value, L"0") != 0 && SwitchWord(value, false);
+}
+bool SceneDetectorWord(const wchar_t* value) noexcept
+{
+    if (SceneDetectorOffWord(value)) return true;
+    for (const wchar_t* word : {L"intel", L"on", L"stock"})
+        if (_wcsicmp(value, word) == 0) return true;
+    return false;
+}
+}
+
+bool XefgSceneDetectorOff(std::wstring& setting) noexcept
+{
+    wchar_t value[32]{};
+    const auto read = ReadXefgIni(L"XeFGSceneChangeThreshold", value, setting);
+    if (read != XefgIniRead::eRead) return read == XefgIniRead::eNoIni;
+    return !value[0] || _wcsicmp(value, L"auto") == 0 || SceneDetectorOffWord(value);
+}
+
+bool ReadXefgSceneChangeThreshold(float& threshold, std::wstring& setting) noexcept
+{
+    threshold = 0.0f;
+    wchar_t value[32]{};
+    // scene.1: the words XefgSceneDetectorOff reads set no threshold.
+    if (ReadXefgIni(L"XeFGSceneChangeThreshold", value, setting) != XefgIniRead::eRead
+        || !value[0] || _wcsicmp(value, L"auto") == 0 || SceneDetectorWord(value))
+    {
         setting.clear();
         return false;
     }
+    wchar_t* end{};
+    const float parsed = wcstof(value, &end);
+    while (end && (*end == L' ' || *end == L'\t')) ++end;
+    if (!end || end == value || *end || !(parsed >= 0.0f && parsed <= 1.0f)) return false;
+    threshold = parsed;
+    return true;
+}
+
+bool ReadXefgTensorCores(std::wstring& setting) noexcept
+{
+    wchar_t value[32]{};
+    return ReadXefgIni(L"XeFGTensorCores", value, setting) != XefgIniRead::eRead || !SwitchWord(value, false);
+}
+
+bool ReadXefgFlipMetering(std::wstring& setting) noexcept
+{
+    wchar_t value[32]{};
+    return ReadXefgIni(L"XeFGFlipMetering", value, setting) != XefgIniRead::eRead || !SwitchWord(value, false);
+}
+
+bool ReadXefgFlipMeteringLead(uint32_t& microseconds, std::wstring& setting) noexcept
+{
+    microseconds = 0;
+    wchar_t value[16]{};
+    if (ReadXefgIni(L"XeFGFlipMeteringLeadUs", value, setting) != XefgIniRead::eRead
+        || !value[0] || _wcsicmp(value, L"auto") == 0)
+    {
+        setting.clear();
+        return false;
+    }
+    wchar_t* end{};
+    const unsigned long parsed = wcstoul(value, &end, 10);
+    while (end && (*end == L' ' || *end == L'\t')) ++end;
+    if (!end || end == value || *end || value[0] == L'-' || parsed > 8000) return false;
+    microseconds = static_cast<uint32_t>(parsed);
+    return true;
+}
+
+bool ReadXefgFlipMeteringHotkey(std::wstring& setting) noexcept
+{
+    wchar_t value[32]{};
+    return ReadXefgIni(L"XeFGFlipMeteringHotkey", value, setting) == XefgIniRead::eRead && SwitchWord(value, true);
 }
 
 namespace

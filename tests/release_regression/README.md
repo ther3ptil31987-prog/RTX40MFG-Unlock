@@ -13,7 +13,7 @@ cmake -S tests/release_regression -B build/release-tests `
     '-DVULKAN_LIBRARY=C:/VulkanSDK/1.2.176.1/Lib/vulkan-1.lib'
 cmake --build build/release-tests --config Release --parallel 6
 python tests/release_regression/run.py `
-    --dll build/v1.3.3-hotfix.2/Release/RTXMFG.dll `
+    --dll build/v1.5.1/Release/MFGUnlocker.dll `
     --harness-dir build/release-tests/Release `
     --output build/release-test-results `
     --provider C:/Fixtures/nvngx_dlssg.dll
@@ -23,6 +23,16 @@ Supply an identified, supported DLSS-G provider for `--provider`. Its CPU
 count/index gate is exercised using the normal publisher in the exact release
 DLL. The runner verifies that the provider file remains unchanged. Without this
 argument, that case is skipped and provider gate validation is incomplete.
+
+`--xess-pair <folder>` takes the profiled XeSS SDK 3.0.2 `libxess_fg.dll` and
+`libxell.dll` (verified by SHA-256) and adds `optiscaler-xefg-proxy` and
+`optiscaler-xefg-plugin`. The OptiScaler stand-in loads that pair from
+`OptiScaler\` and resolves `xefgSwapChainD3D12CreateContext` in its `DllMain`
+before plug-ins, as OptiScaler does. The exact DLL then loads under a proxy name
+or as the plug-in. Its detour of that entry must be live within 150 ms of the
+load. V1.6.0 needed about 380 ms, so OptiScaler's early first creation stayed
+stock 2x. A host creation on a WARP device must then reach the host route, with
+the unlock applied. Without this argument, both cases are skipped.
 
 The runner creates a separate directory per case, copies the exact DLL and
 required fixtures, captures exit codes and hashes, and stops on failure.
@@ -34,14 +44,18 @@ or validation layers are reported in the individual logs.
 Coverage includes Dynamic availability for legacy runtimes and range limits,
 clean/default and saved controls, renamed loader forwarding
 and duplicate ownership, observed wrapper controls, NVIDIA policy limits,
-first-launch menu pixels and persistence across relaunch, WARP presentation and
-layered swapchains, and Vulkan direct/dynamic/internal-Streamline/mixed routes.
+first-launch menu pixels and persistence across relaunch, WARP presentation,
+layered and ReShade-wrapped swapchains, and Vulkan
+direct/dynamic/internal-Streamline/mixed routes.
 Hotfix coverage also includes unaligned DXGI factory imports, native adapter
 parent-factory returns, coexistence with existing hooks, writable/executable import tables,
 HDR interface forwarding, locked status files and process identity, renderer DLL
 imports and late loading, 64 KiB/128 KiB resolver threads, and log/status reuse
 across launches. The first-launch case reuses its settings directory in a second process to
-verify that the automatic menu does not reopen.
+verify that the automatic menu does not reopen. `first-launch-zh`, `first-launch-uk`,
+`first-launch-it`, `first-launch-sv`, `first-launch-tr` and `first-launch-vi` repeat the first launch with
+`Language=zh-CN` / `uk-UA` / `it-IT` / `sv-SE` / `tr-TR` / `vi-VN` saved and require the runtime log to
+report that language's font ready.
 
 `factory-revision-menu` loads the exact DLL and reproduces Witcher 3's base
 `IDXGIFactory` creation followed by `EnumAdapters1`, `IsCurrent` and newer
@@ -63,6 +77,13 @@ native. The swapchain must then present, open and close the menu.
 eight-byte-aligned `USER32` import slots sit in a data page that becomes
 executable after startup. The menu must open with game-only input suppression
 through public-entry detours, leaving the slot bytes and page protection as found.
+`gpuname-off`, `gpuname-on` and `gpuname-invalid` load the exact DLL with the
+opt-in `[Compatibility] GpuNameOverride` setting absent, `1` and unrecognized.
+Off and unrecognized must leave System32 `dxgi.dll`'s `GetDesc1` byte-identical;
+on must arm all four adapter description detours from the worker before the
+startup status. Every adapter the executable queries must keep its real identity
+unless it is an RTX 30 card with the setting on, and a non-RTX 30 NVIDIA query
+must be logged as left unchanged.
 Run `FactoryRevisionTests.exe` directly from the Release harness directory for
 the source-level supported/unsupported revision, lazy-query and concurrent
 cache-lifetime cases. This target compiles the production proxy with isolated

@@ -2,6 +2,7 @@
 // Isolated, exact-provider XeSS capability experiment. No on-disk provider edits.
 #include "../xess_mod.h"
 #include "../runtime_layout.h"
+#include "../../sha256_util.h"
 #include <windows.h>
 #include <bcrypt.h>
 #include <d3d12.h>
@@ -58,27 +59,16 @@ static void llLog(const char* message, xell_logging_level_t level) {
 static std::string sha256(const std::filesystem::path& path) {
     std::ifstream f(path, std::ios::binary);
     if (!f) throw std::runtime_error("hash_open");
-    BCRYPT_ALG_HANDLE alg{}; BCRYPT_HASH_HANDLE hash{};
-    if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, nullptr, 0) < 0)
-        throw std::runtime_error("hash_algorithm");
-    DWORD size{}, bytes{};
-    NTSTATUS status = BCryptGetProperty(alg, BCRYPT_OBJECT_LENGTH, reinterpret_cast<PUCHAR>(&size), sizeof(size), &bytes, 0);
-    std::vector<UCHAR> object(size);
-    if (status >= 0) status = BCryptCreateHash(alg, &hash, object.data(), size, nullptr, 0, 0);
+    sha256_util::Hasher hasher;
     std::array<char, 65536> buf{};
-    while (status >= 0 && f) {
+    bool okay = true;
+    while (okay && f) {
         f.read(buf.data(), buf.size());
-        if (f.gcount()) status = BCryptHashData(hash, reinterpret_cast<PUCHAR>(buf.data()), ULONG(f.gcount()), 0);
+        if (f.gcount()) okay = hasher.Update(buf.data(), size_t(f.gcount()));
     }
-    std::array<UCHAR, 32> digest{};
-    if (status >= 0 && !f.bad()) status = BCryptFinishHash(hash, digest.data(), ULONG(digest.size()), 0);
-    else status = -1;
-    if (hash) BCryptDestroyHash(hash);
-    BCryptCloseAlgorithmProvider(alg, 0);
-    if (status < 0) throw std::runtime_error("hash_failed");
-    std::string out;
-    for (UCHAR b : digest) { char h[3]; sprintf_s(h, "%02x", b); out += h; }
-    return out;
+    sha256_util::Digest digest{};
+    if (!okay || f.bad() || !hasher.Finish(digest)) throw std::runtime_error("hash_failed");
+    return sha256_util::LowerHex(digest);
 }
 static HMODULE verifyModule(const wchar_t* name, const char* expected) {
     HMODULE module = GetModuleHandleW(name);

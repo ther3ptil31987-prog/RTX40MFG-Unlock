@@ -1,4 +1,5 @@
 #include "runtime_payload.h"
+#include "../sha256_util.h"
 #include "embedded_xess_programs.generated.h"
 #include "embedded_xess_shaders.generated.h"
 #include <bcrypt.h>
@@ -11,18 +12,9 @@
 
 namespace xess_payload {
 std::string Hash(std::span<const unsigned char> bytes) {
-    BCRYPT_ALG_HANDLE algorithm{}; BCRYPT_HASH_HANDLE hash{};
-    if(BCryptOpenAlgorithmProvider(&algorithm,BCRYPT_SHA256_ALGORITHM,nullptr,0)<0)throw std::runtime_error("hash_algorithm");
-    std::array<UCHAR,32> digest{};
-    NTSTATUS status=BCryptCreateHash(algorithm,&hash,nullptr,0,nullptr,0,0);
-    if(status>=0)status=BCryptHashData(hash,const_cast<PUCHAR>(bytes.data()),static_cast<ULONG>(bytes.size()),0);
-    if(status>=0)status=BCryptFinishHash(hash,digest.data(),static_cast<ULONG>(digest.size()),0);
-    if(hash)BCryptDestroyHash(hash);
-    BCryptCloseAlgorithmProvider(algorithm,0);
-    if(status<0)throw std::runtime_error("hash_failed");
-    std::string out;
-    for(UCHAR b:digest){char h[3];sprintf_s(h,"%02x",b);out+=h;}
-    return out;
+    sha256_util::Digest digest{};
+    if(!sha256_util::Compute(bytes.data(),bytes.size(),digest))throw std::runtime_error("hash_failed");
+    return sha256_util::LowerHex(digest);
 }
 std::span<const Asset> Assets() noexcept { return embedded::assets; }
 std::span<const unsigned char> Read(HMODULE module,const Asset& asset) {
@@ -62,11 +54,17 @@ Programs LoadPrograms(HMODULE module) {
 std::span<const Asset> ShaderAssets() noexcept { return embedded::shaders; }
 std::vector<Replacement> LoadReplacements(HMODULE module) {
     // The Intel program each shader replaces: XeFG's motion-vector splat in libxess_fg 3.0.2 (ec5e0c65), and
-    // (splat.2) its inverted-depth variant, which XeFG uses when started with INVERTED_DEPTH (OptiScaler's default).
+    // (splat.2) its inverted-depth variant, which XeFG uses when started with INVERTED_DEPTH (OptiScaler's default);
+    // unet.1: five U-Net conv programs of the same build (the CUDA route recognizes both bytes, xess/cuda/cuda_route.cpp).
     struct Native { const char* name; const char* hash; size_t bytes; };
     static constexpr Native natives[]{
         {"shaders/splat_motion_aware.dxil","3f3f91d2ecd4345042f0519f7455776314be9e7730453a3fcb42c57f0acb49b5",4008},
-        {"shaders/splat_motion_aware_inverted.dxil","c3649191906bdd300462dbafe6add8f82b09e8e10c41e92784a209d99513224b",4012}};
+        {"shaders/splat_motion_aware_inverted.dxil","c3649191906bdd300462dbafe6add8f82b09e8e10c41e92784a209d99513224b",4012},
+        {"shaders/unet_3ed03daf.dxil","01c8beac27d3f3f82ecba8f3dc2d9d8b60d4c175a41df3c24a24e8643f5578f5",35852},
+        {"shaders/unet_748b0baf.dxil","8291bbc36b1100b07d0788f35a3a9fadfbfcc2267ff0ccb7afb114d76f5d69fe",57376},
+        {"shaders/unet_cb391582.dxil","a60f7488872a675d66afd2bec02b0b89e3cc38c1c4ed1d25d745a7b2fe677412",57372},
+        {"shaders/unet_aa016078.dxil","8c2efb9e955f39379a91887ed3d90412c4b7ae2c142a874e3da5f699de197f7c",47728},
+        {"shaders/unet_efbe3788.dxil","40e159414d5b839ba7e0e07cbf8ff4ef425ee026c216b2928ef3bb6dd0e20d40",54224}};
     const auto all=ShaderAssets();
     if(all.size()!=std::size(natives))throw std::runtime_error("embedded_replacement_set");
     std::vector<Replacement> result;

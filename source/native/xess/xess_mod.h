@@ -63,7 +63,6 @@ void PreparePresent(void* swapchain, uint64_t generation) noexcept;
 // XeFG input fixes for tracked contexts (on by default, read once):
 //  - matrix fix (dev.38/42): when the game passes XeFG's view and projection in each other's slot
 //    (the view slot holds a projection, the projection slot a view; Witcher does), swap them back.
-//    RTXMFG_XESS_MATRIX_FIX=0 turns it off.
 //  - motion vectors (dev.43, xess/motion_fill.h): 0 the game's own motion vectors, 1 its (2,2)
 //    marker filled with camera motion (default; RTXMFG_XESS_MV_FILL=0 selects 0, =2 selects 2),
 //    2 all-zero motion (diagnostic).
@@ -71,7 +70,6 @@ void PreparePresent(void* swapchain, uint64_t generation) noexcept;
 //  - HUD-less match (dev.47, xess/hudless_match.h): 1 the game's HUD-less input converted to the back
 //    buffer's encoding before XeFG sees it (default; composition then only for frames it converted),
 //    0 the game's own HUD-less input (RTXMFG_XESS_HUDLESS=game).
-bool MatrixFixDefault() noexcept;
 uint32_t MotionFillDefault() noexcept;
 bool UiCompositionOffDefault() noexcept;
 uint32_t HudlessMatchDefault() noexcept;

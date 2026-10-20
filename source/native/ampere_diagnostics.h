@@ -8,6 +8,7 @@ inline constexpr uint32_t kCreateSubmissionFailure = 172;
 inline constexpr uint32_t kEvaluationSubmissionFailure = 173;
 inline constexpr uint32_t kStartupAdmissionFailure = 174;
 inline constexpr uint32_t kRuntimeDispatchFailure = 176;
+inline constexpr uint32_t kStartupWrapperMissingFailure = 177;
 
 enum class Preparation : uint32_t
 {
@@ -109,13 +110,17 @@ constexpr const char* FailureName(uint32_t code) noexcept
     case 142: return "FG preset hook installation failed";
     case 151: return "provider preparation failed";
     case 152: return "NGX runtime layout could not be validated";
+    case 153: return "NVIDIA NGX entry points are already hooked by another mod";
     case 155: return "early Streamline initialization was not intercepted";
+    case 156: return "another RTX 30/40 frame generation mod is loaded";
+    case 157: return "DLSS-G provider could not be declared for RTX 30 (GPU check or provider identity)";
     case 170: return "early wrapper allocation could not be established";
     case 171: return "wrapper buffer ownership could not be established";
     case kCreateSubmissionFailure: return "NGX Create failed";
     case kEvaluationSubmissionFailure: return "NGX evaluation failed";
     case kStartupAdmissionFailure: return "Streamline startup did not establish MFG admission";
     case kRuntimeDispatchFailure: return "NGX runtime dispatch target changed or is invalid";
+    case kStartupWrapperMissingFailure: return "no Streamline DLSS-G plug-in at device setup (unloaded during slInit or never loaded)";
     default: return "compatibility or ownership check failed";
     }
 }

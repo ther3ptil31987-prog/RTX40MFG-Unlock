@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <fstream>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 
@@ -55,6 +56,7 @@ PFN_vkGetPhysicalDeviceProperties vkGetPhysicalDeviceProperties = nullptr;
 PFN_vkGetPhysicalDeviceQueueFamilyProperties vkGetPhysicalDeviceQueueFamilyProperties = nullptr;
 PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR vkGetPhysicalDeviceSurfaceCapabilitiesKHR = nullptr;
 PFN_vkGetPhysicalDeviceSurfaceFormatsKHR vkGetPhysicalDeviceSurfaceFormatsKHR = nullptr;
+PFN_vkGetPhysicalDeviceSurfacePresentModesKHR vkGetPhysicalDeviceSurfacePresentModesKHR = nullptr;
 PFN_vkGetPhysicalDeviceSurfaceSupportKHR vkGetPhysicalDeviceSurfaceSupportKHR = nullptr;
 PFN_vkGetSwapchainImagesKHR vkGetSwapchainImagesKHR = nullptr;
 PFN_vkMapMemory vkMapMemory = nullptr;
@@ -141,6 +143,57 @@ unsigned char Srgb(float value)
     value = std::clamp(value, 0.0f, 1.0f);
     return static_cast<unsigned char>(255.0f*(value <= 0.0031308f ? value*12.92f : 1.055f*std::pow(value, 1.0f/2.4f)-0.055f)+0.5f);
 }
+// V-Sync through the saved config, as the menu does (vkmenu.1). The present
+// mode is fixed at swapchain creation, so a change waits for the next one.
+std::filesystem::path ExecutableDirectory()
+{
+    wchar_t path[32768]{}; GetModuleFileNameW(nullptr, path, 32768);
+    return std::filesystem::path(path).parent_path();
+}
+bool WriteVsyncConfig(unsigned vsyncMode)
+{
+    std::ofstream config(ExecutableDirectory() / L"RTXMFG-Universal.json", std::ios::binary | std::ios::trunc);
+    config << "{\"followGame\":true,\"mode\":\"follow\",\"multiplier\":2,"
+              "\"dynamicTargetFrameRate\":0,\"dlssgPreset\":0,\"vsyncMode\":" << vsyncMode
+           << ",\"reflexFrameLimitFps\":0,\"generatedOnlyDebug\":false,"
+              "\"intervalLogging\":false,\"version\":13}\n";
+    return static_cast<bool>(config);
+}
+// Read with full sharing and close at once: an open reader makes the backend's
+// replace of the status file fail and moves it to the shared-memory fallback.
+std::string ReadStatusFile(const std::filesystem::path& path)
+{
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return {};
+    std::string text;
+    LARGE_INTEGER size{};
+    if (GetFileSizeEx(file, &size) && size.QuadPart > 0 && size.QuadPart < (1 << 22))
+    {
+        text.resize(static_cast<size_t>(size.QuadPart));
+        DWORD read = 0;
+        if (!ReadFile(file, text.data(), static_cast<DWORD>(text.size()), &read, nullptr)) read = 0;
+        text.resize(read);
+    }
+    CloseHandle(file);
+    return text;
+}
+bool WaitForStatus(std::initializer_list<std::string> expected)
+{
+    const auto status = ExecutableDirectory() / L"RTXMFG-Universal.status.json";
+    std::string text;
+    for (unsigned attempt = 0; attempt < 400; ++attempt)
+    {
+        text = ReadStatusFile(status);
+        if (std::all_of(expected.begin(), expected.end(), [&](const std::string& value) {
+                return text.find(value) != std::string::npos; }))
+            return true;
+        Pump(); Sleep(25);
+    }
+    for (const auto& value : expected)
+        if (text.find(value) == std::string::npos) printf("status lacks %s\n", value.c_str());
+    return false;
+}
 }
 
 int wmain(int argc, wchar_t** argv)
@@ -159,6 +212,7 @@ int wmain(int argc, wchar_t** argv)
         HMODULE loaderBefore = LoadLibraryW(L"vulkan-1.dll");
         Require(loaderBefore != nullptr, "loader available for code preservation check");
         const auto originalCode = SnapshotCode(loaderBefore);
+        Require(WriteVsyncConfig(0), "saved V-Sync mode Game written before startup");
         HMODULE module = LoadLibraryExW(std::filesystem::absolute(argv[1]).c_str(), nullptr,
             LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
         Require(module != nullptr, "integrated module loaded before Vulkan instance");
@@ -267,6 +321,8 @@ int wmain(int argc, wchar_t** argv)
         Require(vkGetPhysicalDeviceSurfaceCapabilitiesKHR != nullptr, "dynamic vkGetPhysicalDeviceSurfaceCapabilitiesKHR resolved");
         vkGetPhysicalDeviceSurfaceFormatsKHR = reinterpret_cast<PFN_vkGetPhysicalDeviceSurfaceFormatsKHR>(getVulkanProc("vkGetPhysicalDeviceSurfaceFormatsKHR"));
         Require(vkGetPhysicalDeviceSurfaceFormatsKHR != nullptr, "dynamic vkGetPhysicalDeviceSurfaceFormatsKHR resolved");
+        vkGetPhysicalDeviceSurfacePresentModesKHR = reinterpret_cast<PFN_vkGetPhysicalDeviceSurfacePresentModesKHR>(getVulkanProc("vkGetPhysicalDeviceSurfacePresentModesKHR"));
+        Require(vkGetPhysicalDeviceSurfacePresentModesKHR != nullptr, "dynamic vkGetPhysicalDeviceSurfacePresentModesKHR resolved");
         vkGetPhysicalDeviceSurfaceSupportKHR = reinterpret_cast<PFN_vkGetPhysicalDeviceSurfaceSupportKHR>(getVulkanProc("vkGetPhysicalDeviceSurfaceSupportKHR"));
         Require(vkGetPhysicalDeviceSurfaceSupportKHR != nullptr, "dynamic vkGetPhysicalDeviceSurfaceSupportKHR resolved");
         vkGetSwapchainImagesKHR = reinterpret_cast<PFN_vkGetSwapchainImagesKHR>(getVulkanProc("vkGetSwapchainImagesKHR"));
@@ -419,6 +475,15 @@ int wmain(int argc, wchar_t** argv)
             vkDestroyInstance(instance, nullptr); DestroyWindow(window); return 77;
         }
         printf("color_mode=%d format=%d color_space=%d\n", colorMode, format->format, format->colorSpace);
+        Vk(vkGetPhysicalDeviceSurfacePresentModesKHR(physical, surface, &count, nullptr), "enumerate present modes");
+        std::vector<VkPresentModeKHR> presentModes(count);
+        Vk(vkGetPhysicalDeviceSurfacePresentModesKHR(physical, surface, &count, presentModes.data()), "read present modes");
+        const auto listed = [&](VkPresentModeKHR mode) {
+            return std::find(presentModes.begin(), presentModes.end(), mode) != presentModes.end(); };
+        // Off replaces the game's FIFO with IMMEDIATE, else MAILBOX, when listed.
+        const VkPresentModeKHR offMode = listed(VK_PRESENT_MODE_IMMEDIATE_KHR) ? VK_PRESENT_MODE_IMMEDIATE_KHR
+            : listed(VK_PRESENT_MODE_MAILBOX_KHR) ? VK_PRESENT_MODE_MAILBOX_KHR : VK_PRESENT_MODE_FIFO_KHR;
+        printf("present_modes=%u off_mode=%d\n", count, offMode);
         for (unsigned phase = 0; phase < 2; ++phase)
         {
             const VkExtent2D requested = phase
@@ -441,6 +506,17 @@ int wmain(int argc, wchar_t** argv)
             chainInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE; chainInfo.preTransform = caps.currentTransform;
             chainInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR; chainInfo.presentMode = VK_PRESENT_MODE_FIFO_KHR; chainInfo.clipped = VK_TRUE;
             VkSwapchainKHR chain = VK_NULL_HANDLE; Vk(vkCreateSwapchainKHR(device, &chainInfo, nullptr, &chain), "create/recreate swapchain");
+            if (!phase)
+                Require(WaitForStatus({"\"vsyncMode\":0,", "\"vsyncVulkanSwapchain\":true,", "\"vsyncVulkanHook\":true,",
+                    "\"vsyncOriginalPresentMode\":2,", "\"vsyncSubmittedPresentMode\":2,", "\"vsyncFailure\":0,"}),
+                    "Game: FIFO swapchain created unchanged and reported");
+            else if (offMode != VK_PRESENT_MODE_FIFO_KHR)
+                Require(WaitForStatus({"\"vsyncMode\":1,", "\"vsyncOverrideApplied\":true,", "\"vsyncPresentationObserved\":true,",
+                    "\"vsyncOriginalPresentMode\":2,", "\"vsyncSubmittedPresentMode\":" + std::to_string(static_cast<int>(offMode)) + ",",
+                    "\"vsyncFailure\":0,"}), "Off: recreated swapchain submitted without V-Sync");
+            else
+                Require(WaitForStatus({"\"vsyncMode\":1,", "\"vsyncSubmittedPresentMode\":2,", "\"vsyncFailure\":14,"}),
+                    "Off: FIFO kept and reported when the surface lists no other mode");
 #if MFG_VK_MIXED
             MfgSingleModuleStatus attached{};attached.size=sizeof(attached);
             Require(query(&attached) && attached.overlayInstallState==2,"mixed route attaches swapchain before drawing");
@@ -572,6 +648,12 @@ int wmain(int argc, wchar_t** argv)
                 Vk(vkQueueWaitIdle(queue), "wait game presentation queue"); Sleep(15);
             }
             Require(captured, "Vulkan UI capture completed for this swapchain generation");
+            // Switch live while this swapchain exists: its mode stays until recreation.
+            Require(WriteVsyncConfig(phase ? 0 : 1) && WaitForStatus({phase ? "\"vsyncMode\":0," : "\"vsyncMode\":1,",
+                "\"vsyncVulkanSwapchain\":true,",
+                phase && offMode == VK_PRESENT_MODE_FIFO_KHR ? "\"vsyncFailure\":0," : "\"vsyncFailure\":13,"}),
+                phase ? "Game selected live: overridden swapchain reported until recreation"
+                    : "Off selected live: applies when the game recreates its swapchain");
             Vk(vkDeviceWaitIdle(device), "drain device for destruction");
             vkDestroyBuffer(device, readback, nullptr); vkFreeMemory(device, memory, nullptr);
             vkDestroyCommandPool(device, pool, nullptr); vkDestroyFence(device, fence, nullptr);
@@ -579,6 +661,8 @@ int wmain(int argc, wchar_t** argv)
             vkDestroySemaphore(device, acquire, nullptr); for (auto semaphore : ready) vkDestroySemaphore(device, semaphore, nullptr);
             vkDestroySemaphore(device, unknown, nullptr);
         }
+        Require(WaitForStatus({"\"vsyncMode\":0,", "\"vsyncVulkanSwapchain\":false,", "\"vsyncFailure\":2,"}),
+            "destroyed swapchain clears the Vulkan V-Sync record");
         MfgSingleModuleStatus status{}; status.size = sizeof(status);
         Require(query(&status) && status.backendOwner && status.vulkanFrames == 34 && status.renderedFrames == 34
             && !status.renderFailures && !status.overlayVisible, "Vulkan toggle, rendering and swapchain recreation remain healthy");

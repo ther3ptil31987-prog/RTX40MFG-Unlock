@@ -91,7 +91,7 @@ void ReadParameters(const NVSDK_NGX_Parameter* parameters,
             parameters->Get("DLSSG.MultiFrameIndex", &event.index));
         event.maximumResult = static_cast<uint32_t>(
             parameters->Get("DLSSG.MultiFrameCountMax", &event.maximum));
-        if (gpu_dispatch::IsAmpere())
+        if (gpu_dispatch::UsesTranslatedProgram())
         {
             void* frame = nullptr;
             void* output = nullptr;

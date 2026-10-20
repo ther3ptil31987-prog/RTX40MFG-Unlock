@@ -157,4 +157,5 @@ bool ProviderImplementsPresetC(HMODULE module) noexcept
     return IsSupportedRetainedProvider(module) && RetainedProviderVersion(module, version)
         && ImplementsPresetC(version);
 }
+
 }

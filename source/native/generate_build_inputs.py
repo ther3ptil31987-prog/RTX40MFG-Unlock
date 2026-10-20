@@ -33,7 +33,8 @@ assert min(ordinals) >= 1 and max(ordinals) < 1024
 named_base = 1024
 public_base = 4096
 assert named_base + len(names) < public_base
-public = ["MfgUnlockCoreLoaded", "MfgUnlockSampleFrameTelemetry", "MfgUnlockSingleModuleQuery", "InitializeASI"]
+public = ["MfgUnlockCoreLoaded", "MfgUnlockSampleFrameTelemetry", "MfgUnlockSingleModuleQuery", "InitializeASI",
+          "XeFGModelName"]
 defs = ["LIBRARY RTXMFG", "EXPORTS"]
 asm = ["; Generated Windows x64 ABI-preserving named/ordinal tail dispatch.",
        "option casemap:none", "extern MfgProxyResolveRenamed:proc", ".code"]

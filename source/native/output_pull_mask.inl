@@ -3,9 +3,6 @@
 #if MFG_UNLOCK_OUTPUT_PULL_MASK_OCCUPANCY && !MFG_UNLOCK_OUTPUT_PULL_MASK_ONLY
 #error OutputPull mask occupancy requires the mask-only path
 #endif
-#if MFG_UNLOCK_OUTPUT_PULL_MASK_ONLY && MFG_UNLOCK_OUTPUT_PULL_EXPERIMENT
-#error Two OutputPull publishers cannot be enabled together
-#endif
 
 namespace
 {

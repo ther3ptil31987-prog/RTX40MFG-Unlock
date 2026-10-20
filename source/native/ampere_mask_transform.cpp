@@ -1,4 +1,5 @@
 #include "ampere_mask_transform.h"
+#include "sha256_util.h"
 #include <Windows.h>
 #include <bcrypt.h>
 #include <array>
@@ -10,23 +11,7 @@ namespace
 {
 bool Sha256Equals(const uint8_t* bytes, size_t count, const char* expected) noexcept
 {
-    if (!bytes || count == 0 || count > 64u * 1024u * 1024u
-        || !expected || std::strlen(expected) != 64)
-        return false;
-    BCRYPT_ALG_HANDLE algorithm = nullptr;
-    BCRYPT_HASH_HANDLE hash = nullptr;
-    std::array<uint8_t, 32> digest{};
-    bool okay = BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0) >= 0
-        && BCryptCreateHash(algorithm, &hash, nullptr, 0, nullptr, 0, 0) >= 0
-        && BCryptHashData(hash, const_cast<PUCHAR>(bytes), static_cast<ULONG>(count), 0) >= 0
-        && BCryptFinishHash(hash, digest.data(), static_cast<ULONG>(digest.size()), 0) >= 0;
-    if (hash) BCryptDestroyHash(hash);
-    if (algorithm) BCryptCloseAlgorithmProvider(algorithm, 0);
-    constexpr char digits[] = "0123456789ABCDEF";
-    for (size_t i = 0; okay && i < digest.size(); ++i)
-        okay = expected[i * 2] == digits[digest[i] >> 4]
-            && expected[i * 2 + 1] == digits[digest[i] & 15];
-    return okay;
+    return sha256_util::EqualsUpperHex(bytes, count, expected, 64u * 1024u * 1024u);
 }
 
 size_t FindUniqueBytes(const uint8_t* bytes, size_t count,

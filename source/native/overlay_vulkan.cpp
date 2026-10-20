@@ -4,7 +4,9 @@
 #include "overlay_hook.h"
 #include "overlay_install.h"
 #include "overlay_color_spv.h"
+#include "present_counter.h"
 #include "ui_input_coherence.h"
+#include "vsync_control.h"
 #include <backends/imgui_impl_vulkan.h>
 #include <algorithm>
 #include <array>
@@ -563,6 +565,77 @@ struct CreateSurfaceTag
         return result;
     }
 };
+// VK_EXT_swapchain_maintenance1 (newer than the pinned headers): the chain's
+// own present-mode list constrains presentMode and lets each present switch.
+constexpr VkStructureType kSwapchainPresentModesCreateInfo = static_cast<VkStructureType>(1000275002);
+
+// The modes the creation's surface lists, for the V-Sync Off choice. A
+// full-screen exclusive creation is asked about in that exact state.
+vsync_control::VulkanSurfaceModes SurfacePresentModes(const Device& device, const VkSwapchainCreateInfoKHR& info)
+{
+    vsync_control::VulkanSurfaceModes modes{};
+    modes.queried = true;
+    modes.unsupported = true;
+    const VkSurfaceFullScreenExclusiveInfoEXT* exclusive = nullptr;
+    const VkSurfaceFullScreenExclusiveWin32InfoEXT* monitor = nullptr;
+    unsigned links = 0;
+    for (auto* next = static_cast<const VkBaseInStructure*>(info.pNext); next; next = next->pNext)
+    {
+        if (++links > 64 || next->sType == kSwapchainPresentModesCreateInfo) return modes;
+        if (next->sType == VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_INFO_EXT)
+            exclusive = reinterpret_cast<const VkSurfaceFullScreenExclusiveInfoEXT*>(next);
+        else if (next->sType == VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_WIN32_INFO_EXT)
+            monitor = reinterpret_cast<const VkSurfaceFullScreenExclusiveWin32InfoEXT*>(next);
+    }
+    InternalScope internal;
+    const auto& instance = *device.instance;
+    std::array<VkPresentModeKHR, 32> list{};
+    uint32_t count = 0;
+    VkResult result = VK_ERROR_INITIALIZATION_FAILED;
+    if (exclusive || monitor)
+    {
+        auto query = reinterpret_cast<PFN_vkGetPhysicalDeviceSurfacePresentModes2EXT>(
+            instance.gipa(instance.handle, "vkGetPhysicalDeviceSurfacePresentModes2EXT"));
+        if (!query) return modes;
+        VkSurfaceFullScreenExclusiveWin32InfoEXT monitorCopy{};
+        VkSurfaceFullScreenExclusiveInfoEXT exclusiveCopy{};
+        VkPhysicalDeviceSurfaceInfo2KHR surface{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SURFACE_INFO_2_KHR};
+        surface.surface = info.surface;
+        if (monitor)
+        {
+            monitorCopy = *monitor;
+            monitorCopy.pNext = nullptr;
+            surface.pNext = &monitorCopy;
+        }
+        if (exclusive)
+        {
+            exclusiveCopy = *exclusive;
+            exclusiveCopy.pNext = const_cast<void*>(surface.pNext);
+            surface.pNext = &exclusiveCopy;
+        }
+        result = query(device.physical, &surface, &count, nullptr);
+        if (result == VK_SUCCESS && count && count <= list.size())
+            result = query(device.physical, &surface, &count, list.data());
+    }
+    else
+    {
+        auto query = reinterpret_cast<PFN_vkGetPhysicalDeviceSurfacePresentModesKHR>(
+            instance.gipa(instance.handle, "vkGetPhysicalDeviceSurfacePresentModesKHR"));
+        if (!query) return modes;
+        result = query(device.physical, info.surface, &count, nullptr);
+        if (result == VK_SUCCESS && count && count <= list.size())
+            result = query(device.physical, info.surface, &count, list.data());
+    }
+    if (result != VK_SUCCESS || !count || count > list.size()) return modes;
+    modes.unsupported = false;
+    for (uint32_t index = 0; index < count; ++index)
+    {
+        modes.immediate |= list[index] == VK_PRESENT_MODE_IMMEDIATE_KHR;
+        modes.mailbox |= list[index] == VK_PRESENT_MODE_MAILBOX_KHR;
+    }
+    return modes;
+}
+
 struct CreateSwapchainTag
 {
     static VkResult Call(PFN_vkCreateSwapchainKHR original, VkDevice handle,
@@ -581,6 +654,17 @@ struct CreateSwapchainTag
                 && (support.supportedUsageFlags & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT))
                 adjusted.imageUsage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
         }
+        // V-Sync Off: the present mode is fixed here, so a change applies to
+        // the game's next swapchain. Only presentMode changes, and only to a
+        // mode the surface lists; Game leaves it untouched (vsync_control.h).
+        vsync_control::VulkanSwapchainSubmission vsync{};
+        if (device)
+        {
+            vsync = vsync_control::BeforeVulkanSwapchain(static_cast<uint32_t>(info->presentMode),
+                vsync_control::OffRequested() ? SurfacePresentModes(*device, *info)
+                    : vsync_control::VulkanSurfaceModes{});
+            adjusted.presentMode = static_cast<VkPresentModeKHR>(vsync.presentMode);
+        }
         VkResult result;
         {
             // Windows Vulkan drivers may build an internal DXGI swapchain.
@@ -588,6 +672,9 @@ struct CreateSwapchainTag
             InternalScope internal;
             result = original(handle, &adjusted, allocator, output);
         }
+        if (device)
+            vsync_control::AfterVulkanSwapchain(vsync, result,
+                result == VK_SUCCESS && output ? reinterpret_cast<uint64_t>(*output) : 0);
         if (result == VK_SUCCESS && output && device)
         {
             // Match the rebuilt DXGI path's bounded input setup. No graphics
@@ -677,7 +764,7 @@ struct PresentTag
         InternalScope internal;
         const VkResult result = original(handle, info);
         if (selected && (result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR))
-            MfgUnlockSampleFrameTelemetry();
+            frame_telemetry::SampleVulkanPresent();
         return result;
     }
 };
@@ -710,7 +797,11 @@ struct DestroySwapchainTag
     static void Call(PFN_vkDestroySwapchainKHR original, VkDevice device,
         VkSwapchainKHR swapchain, const VkAllocationCallbacks* allocator)
     {
-        if (!gInsideOverlay) ForgetSwapchain(device, swapchain);
+        if (!gInsideOverlay)
+        {
+            ForgetSwapchain(device, swapchain);
+            vsync_control::VulkanSwapchainDestroyed(reinterpret_cast<uint64_t>(swapchain));
+        }
         original(device, swapchain, allocator);
     }
 };
@@ -726,7 +817,11 @@ struct DestroyDeviceTag
                 for (const auto& [chain, state] : gSwapchains)
                     if (state->device->handle == device) chains.push_back(chain);
             }
-            for (auto chain : chains) ForgetSwapchain(device, chain);
+            for (auto chain : chains)
+            {
+                ForgetSwapchain(device, chain);
+                vsync_control::VulkanSwapchainDestroyed(reinterpret_cast<uint64_t>(chain));
+            }
             {
                 std::lock_guard lock(gRegistryMutex);
                 std::erase_if(gQueues, [&](const auto& row) { return row.second.device->handle == device; });
@@ -778,6 +873,15 @@ PFN_vkVoidFunction Wrap(const char* name, PFN_vkVoidFunction original)
     MFG_VK_SEMAPHORE_WRAP("vkDestroySemaphore", DestroySemaphoreTag, void, VkDevice, VkSemaphore, const VkAllocationCallbacks*)
     MFG_VK_SEMAPHORE_WRAP("vkImportSemaphoreWin32HandleKHR", ImportSemaphoreTag, VkResult, VkDevice, const VkImportSemaphoreWin32HandleInfoKHR*)
 #undef MFG_VK_SEMAPHORE_WRAP
+    // The V-Sync status distinguishes a missing swapchain from a missing route.
+    if (strcmp(name, "vkCreateSwapchainKHR") == 0)
+    {
+        const auto wrapped = reinterpret_cast<PFN_vkVoidFunction>(
+            HookFamily<CreateSwapchainTag, VkResult, VkDevice, const VkSwapchainCreateInfoKHR*,
+                const VkAllocationCallbacks*, VkSwapchainKHR*>::Bind(reinterpret_cast<void*>(original), false));
+        if (wrapped != original) vsync_control::VulkanSwapchainHookInstalled();
+        return wrapped;
+    }
 #define MFG_VK_WRAP(nameLiteral, Tag, Result, ...) \
     if (strcmp(name, nameLiteral) == 0) return reinterpret_cast<PFN_vkVoidFunction>( \
         HookFamily<Tag, Result, __VA_ARGS__>::Bind(reinterpret_cast<void*>(original), false));
@@ -790,7 +894,6 @@ PFN_vkVoidFunction Wrap(const char* name, PFN_vkVoidFunction original)
     MFG_VK_WRAP("vkGetDeviceQueue2", GetQueue2Tag, void, VkDevice, const VkDeviceQueueInfo2*, VkQueue*)
     MFG_VK_WRAP("vkCreateSemaphore", CreateSemaphoreTag, VkResult, VkDevice, const VkSemaphoreCreateInfo*, const VkAllocationCallbacks*, VkSemaphore*)
     MFG_VK_WRAP("vkCreateWin32SurfaceKHR", CreateSurfaceTag, VkResult, VkInstance, const VkWin32SurfaceCreateInfoKHR*, const VkAllocationCallbacks*, VkSurfaceKHR*)
-    MFG_VK_WRAP("vkCreateSwapchainKHR", CreateSwapchainTag, VkResult, VkDevice, const VkSwapchainCreateInfoKHR*, const VkAllocationCallbacks*, VkSwapchainKHR*)
     MFG_VK_WRAP("vkQueuePresentKHR", PresentTag, VkResult, VkQueue, const VkPresentInfoKHR*)
     MFG_VK_WRAP("vkDestroySwapchainKHR", DestroySwapchainTag, void, VkDevice, VkSwapchainKHR, const VkAllocationCallbacks*)
     MFG_VK_WRAP("vkDestroyDevice", DestroyDeviceTag, void, VkDevice, const VkAllocationCallbacks*)

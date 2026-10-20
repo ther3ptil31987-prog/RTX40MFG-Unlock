@@ -46,7 +46,6 @@ float Apply(const float* lut, float value) noexcept; // lut of one channel
 class Matcher
 {
 public:
-    using Capture = std::function<void(ID3D12GraphicsCommandList*, uint32_t, const xefg_swapchain_d3d12_resource_data_t&)>;
     Matcher(ID3D12Device* device, ID3D12CommandQueue* queue) noexcept;
     ~Matcher(); // waits (bounded) for its own GPU work
     Matcher(const Matcher&) = delete;
@@ -59,7 +58,7 @@ public:
     // Right before the game's Present: backBuffer is the swap chain's current buffer (state PRESENT).
     // False: nothing was tagged for the frame (the caller turns composition off for it).
     bool Submit(ID3D12Resource* backBuffer, uint32_t& frame, xefg_swapchain_d3d12_resource_data_t& tag,
-        const Capture& capture, const char*& reason) noexcept;
+        const char*& reason) noexcept;
     bool Broken() const noexcept { return broken_; }
     uint64_t Submitted() const noexcept { return submitted_; }
 

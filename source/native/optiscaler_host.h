@@ -79,6 +79,27 @@ uint32_t ReadXefgModel(std::wstring& setting, std::wstring& path, std::wstring& 
 // value in [0, 1] when one is set; absent, empty or auto return false with an empty setting, anything else returns
 // false with the rejected text in setting.
 bool ReadXefgSceneChangeThreshold(float& threshold, std::wstring& setting) noexcept;
+// #490 scene.1: the same key decides XeFG's scene-change detector. True (detector off: its decision is redirected,
+// host_unlock.h SceneDetour) when absent, empty, auto or off (also false, no, disabled), and without OptiScaler;
+// false for intel (also on, stock), a 0..1 threshold or anything else (Intel's detector). setting receives the raw
+// value. Off or intel set no threshold (ReadXefgSceneChangeThreshold returns false with an empty setting).
+bool XefgSceneDetectorOff(std::wstring& setting) noexcept;
+// V1.5.1 tensorcore.1: OptiScaler.ini [XeFG] XeFGTensorCores beside the identified module. False only for
+// off (also 0, false, no, disabled); absent, empty, auto, on and anything else return true (the default:
+// the ported model's int8 layers run on tensor cores where the GPU supports it). setting receives the raw value.
+bool ReadXefgTensorCores(std::wstring& setting) noexcept;
+// flipmeter.1 (test build): OptiScaler.ini [XeFG] XeFGFlipMetering beside the identified module. False only for
+// off (also 0, false, no, disabled); absent, empty, auto, on and anything else return true (this test build's
+// default: NVIDIA driver flip metering for OptiScaler's XeFG). setting receives the raw value.
+bool ReadXefgFlipMetering(std::wstring& setting) noexcept;
+// flipmeter.1: OptiScaler.ini [XeFG] XeFGFlipMeteringLeadUs, how early an output inside a metered batch is released,
+// in microseconds (0..8000). Returns true with the value when one is set; absent, empty or auto return false with an
+// empty setting, anything else returns false with the rejected text in setting.
+bool ReadXefgFlipMeteringLead(uint32_t& microseconds, std::wstring& setting) noexcept;
+// V1.5.1: OptiScaler.ini [XeFG] XeFGFlipMeteringHotkey beside the identified module, the opt-in for Page Up as the
+// live flip-metering toggle (Page Up is also OptiScaler's FPS overlay key and many games bind it). True only for on
+// (also 1, true, yes, enabled); absent, empty, off and anything else return false. setting receives the raw value.
+bool ReadXefgFlipMeteringHotkey(std::wstring& setting) noexcept;
 
 // fakenvapi (bundled with OptiScaler; built into OptiScaler v10) answers
 // nvapi_QueryInterface for its private interface 0x21382138, and a separate

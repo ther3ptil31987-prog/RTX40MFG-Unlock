@@ -160,13 +160,4 @@ inline Correction NormalizeUnits(float source, Units units) noexcept
     if (units == Units::eSeconds) return ConvertSeconds(source);
     return {source, false, std::isfinite(source) && source >= 0.0f};
 }
-
-// RTXMFG_XESS_FRAME_TIME_UNITS: "ms" or "s" force the units, anything else detects them.
-inline Units ForcedUnits(std::string_view value) noexcept
-{
-    if (EqualAsciiInsensitive(value, std::string_view{"ms"})) return Units::eMilliseconds;
-    if (EqualAsciiInsensitive(value, std::string_view{"s"}) || EqualAsciiInsensitive(value, std::string_view{"seconds"}))
-        return Units::eSeconds;
-    return Units::eUndecided;
-}
 }

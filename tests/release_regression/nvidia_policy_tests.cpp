@@ -11,6 +11,7 @@ int wmain(int argc, wchar_t** argv) {
     Check(FindTier(L"Marvel's Spider-Man: Miles Morales") == Tier::eNoMfgOverride, "Miles Morales is FG-only");
     Check(FindTier(L"Marvel's Spider-Man 2") == Tier::eFourX, "Spider-Man 2 has 4x ceiling");
     Check(FindTier(L"Cyberpunk 2077") == Tier::eSixX, "Cyberpunk has 6x ceiling");
+    Check(FindTier(L"Dragon's Dogma 2") == Tier::eSixX, "Dragon's Dogma 2 has 6x ceiling (issue 94)");
     Check(FindTier(L"Definitely Unknown Title 6725") == Tier::eUnknown, "unmatched title stays unknown");
     Check(FindTier(L"Marvel's Spider-Man") == Tier::eUnknown, "partial title cannot borrow sequel policy");
     Check(FindTier(L"Alan Wake Remastered") == Tier::eUnknown, "SR-only row does not imply FG or MFG");

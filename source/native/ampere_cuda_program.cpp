@@ -12,7 +12,9 @@ Result detail::ValidateUsing(const Api& api, ampere_native_cache::ProgramView pr
         || !api.current || !api.create || !api.pop || !api.destroy || !api.load
         || !api.function || !api.unload || !wantedLuid
         || program.size() < ampere_native_cache::kSlots || program.size() > ampere_native_cache::kMaximumSlots
-        || entries.size() != program.size() || (font.payload && font.payload->empty())) return result;
+        || entries.size() != program.size() || (font.payload && font.payload->empty())
+        || font.network.size() != font.networkEntries.size() || font.network.size() > 64
+        || (font.targetSm != 75 && font.targetSm != 86)) return result;
     result.stage = Stage::eAdapter;
     int count = 0, selected = 0, major = 0, minor = 0;
     unsigned matches = 0, selectedNodes = 0;
@@ -29,7 +31,8 @@ Result detail::ValidateUsing(const Api& api, ampere_native_cache::ProgramView pr
         if (luid == wantedLuid)
         { ++matches; selected = device; major = deviceMajor; minor = deviceMinor; selectedNodes = nodes; }
     }
-    if (!ampere_policy::AdapterMatches(wantedLuid, wantedLuid, matches, major, minor, selectedNodes)) return result;
+    if (!ampere_policy::AdapterMatches(wantedLuid, wantedLuid, matches, major, minor, selectedNodes)
+        || major * 10 + minor != static_cast<int>(font.targetSm)) return result;
     result.stage = Stage::eContext;
     void* previous = nullptr;
     void* context = nullptr;
@@ -62,14 +65,18 @@ Result detail::ValidateUsing(const Api& api, ampere_native_cache::ProgramView pr
         if (!result.contextRestored)
         { result.stage = Stage::eCleanup; result.error = error ? error : queried ? queried : 201; }
     };
-    for (size_t i = 0; i < program.size() + (font.payload ? 1u : 0u); ++i)
+    for (size_t i = 0; i < program.size() + (font.payload ? 1u : 0u) + font.network.size(); ++i)
     {
-        const bool auxiliary = i == program.size();
-        const auto& payload = auxiliary ? *font.payload : program[i];
-        const char* entry = auxiliary ? "cuda_font_kernel" : entries[i].data();
+        const bool auxiliary = font.payload && i == program.size();
+        const bool network = i >= program.size() + (font.payload ? 1u : 0u);
+        const size_t netIndex = network ? i - program.size() - (font.payload ? 1u : 0u) : 0;
+        const auto& payload = auxiliary ? *font.payload : network ? font.network[netIndex] : program[i];
+        const auto& names = network ? font.networkEntries : entries;
+        const size_t entryIndex = network ? netIndex : i;
+        const char* entry = auxiliary ? "cuda_font_kernel" : names[entryIndex].data();
         result.slot = static_cast<uint32_t>(i);
         result.stage = Stage::eModule;
-        if (payload.empty() || (!auxiliary && (entries[i][0] == '\0' || entries[i].back() != '\0')))
+        if (payload.empty() || (!auxiliary && (names[entryIndex][0] == '\0' || names[entryIndex].back() != '\0')))
         { result.error = 200; cleanup(); return result; }
         void* module = nullptr;
         result.error = api.load(&module, payload.data());

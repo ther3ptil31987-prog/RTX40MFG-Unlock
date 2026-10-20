@@ -7,8 +7,6 @@
 #include "overlay_device_identity.h"
 #include "present_counter.h"
 #include "ui_input_coherence.h"
-#include "hudless_probe.h"
-#include "hudless_visualizer.h"
 #include <backends/imgui_impl_dx12.h>
 #include <d3d12.h>
 #include <dxgi1_6.h>
@@ -418,40 +416,6 @@ bool Principal(Session* session) noexcept
     return true;
 }
 
-uintptr_t HudlessProbeDeviceIdentity(ID3D12Device* device)
-{
-    ComPtr<IUnknown> identity;
-    return DeviceIdentity(device, identity) ? reinterpret_cast<uintptr_t>(identity.Get()) : 0;
-}
-
-// Supplies the application's final colour to HUDless detection before the UI
-// draws. Uses this layer's own buffer indexing, like the renderer above.
-// The debug tint then marks what the HUDless image leaves out.
-void CaptureHudlessProbe(Session* session, bool capture, bool tint) noexcept
-{
-    InternalScope internal;
-    hudless_probe::SetDeviceIdentityResolver(&HudlessProbeDeviceIdentity);
-    ComPtr<ID3D12Resource> exposed, buffer;
-    const UINT index = session->swapchain->GetCurrentBackBufferIndex();
-    if (FAILED(session->swapchain->GetBuffer(index, IID_PPV_ARGS(&exposed)))
-        || !native::Unwrap(exposed.Get(), buffer)) return;
-    if (capture)
-        hudless_probe::CapturePresent(session->device.Get(), session->queue.Get(), buffer.Get(),
-            static_cast<uint32_t>(session->colorSpace));
-    if (tint) hudless_visualizer::Draw(session->device.Get(), session->queue.Get(), buffer.Get());
-}
-
-// Derives and tags this frame's UI alpha for games that tag HUDless without a
-// UI buffer. Runs after the menu so the menu counts as UI in recomposed frames.
-void SynthesizeHudlessUi(Session* session, bool partialUpdate) noexcept
-{
-    InternalScope internal;
-    ComPtr<ID3D12Resource> exposed, buffer;
-    const UINT index = session->swapchain->GetCurrentBackBufferIndex();
-    if (FAILED(session->swapchain->GetBuffer(index, IID_PPV_ARGS(&exposed)))
-        || !native::Unwrap(exposed.Get(), buffer)) return;
-    hudless_visualizer::SynthesizeUi(session->device.Get(), session->queue.Get(), buffer.Get(), partialUpdate);
-}
 }
 
 Session* CreateSession(IDXGISwapChain* chain, IUnknown* presentedQueue, HMODULE provider) noexcept
@@ -506,7 +470,6 @@ Session* CreateSession(IDXGISwapChain* chain, IUnknown* presentedQueue, HMODULE 
             *slot = session.get();
         }
         single_module::Log(L"MFG_PROXY_UI renderer registered layer=creation-return buffers=layer-local index=layer-local queue=creation-argument device=matched");
-        hudless_probe::SetDeviceIdentityResolver(&HudlessProbeDeviceIdentity);
         return session.release();
     } catch (...) {
         RecordFailure(L"MFG_PROXY_UI renderer allocation failed; original presentation retained");
@@ -563,25 +526,11 @@ bool BeginPresent(Session* session, UINT flags, bool partialUpdate) noexcept
     if (session->providerSession) session->providerPresented.store(true, std::memory_order_release);
     if (!Principal(session)) return true;
     gDxgiFrames.fetch_add(1, std::memory_order_relaxed);
-    const bool hudlessCapture = hudless_probe::WantsPresentCapture();
-    const bool hudlessTint = !MFG_UNLOCK_OVERLAY_SKIP_GPU_WORK && hudless_visualizer::Enabled();
-    if (!partialUpdate && (hudlessCapture || hudlessTint))
-    {
-        try { CaptureHudlessProbe(session, hudlessCapture, hudlessTint); }
-        catch (...) { RecordFailure(L"MFG_PROXY_UI HUDless probe capture exception"); }
-    }
 #if MFG_UNLOCK_OVERLAY_MENU_DRAW && !MFG_UNLOCK_OVERLAY_SKIP_GPU_WORK
     if (install::InputReady() && single_module::OverlayAllowed()) // A concurrent creator never waits on input publication.
     {
         try { session->Render(partialUpdate); }
         catch (...) { session->Disable(); RecordFailure(L"MFG_PROXY_UI render exception; UI disabled for this generation"); }
-    }
-#endif
-#if !MFG_UNLOCK_OVERLAY_SKIP_GPU_WORK
-    if (hudless_visualizer::SynthesisActive())
-    {
-        try { SynthesizeHudlessUi(session, partialUpdate); }
-        catch (...) { RecordFailure(L"MFG_PROXY_UI UI synthesis exception"); }
     }
 #endif
     return true;

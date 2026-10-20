@@ -1,0 +1,777 @@
+# MFG Unlocker menu, Turkish.
+# Segoe UI draws Latin, so no extra font is listed.
+msgid ""
+msgstr ""
+"Project-Id-Version: MFG Unlocker\n"
+"Language: tr_TR\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"X-MFG-Native-Name: Türkçe\n"
+"X-MFG-English-Name: Turkish\n"
+"X-MFG-Match: tr\n"
+
+msgid "Auto (%s)"
+msgstr "Otomatik (%s)"
+
+msgid "Menu language"
+msgstr "Menü dili"
+
+msgid "Pin"
+msgstr "Sabitle"
+
+msgid ""
+"Keeps this panel on screen, see-through and click-through.\n"
+"%s brings the menu back."
+msgstr ""
+"Paneli ekranda saydam şekilde sabitler; tıklamalar arkadaki oyuna geçer.\n"
+"Menüyü yeniden açmak için %s tuşuna basın."
+
+msgid "Pinned  |  %s brings the menu back"
+msgstr "Sabitlendi  |  Menüyü yeniden açmak için %s tuşuna basın"
+
+msgid "Menu key: %s"
+msgstr "Menü tuşu: %s"
+
+msgid "Press a key... Esc cancels"
+msgstr "Bir tuşa basın... İptal için Esc"
+
+msgid "Cancel"
+msgstr "İptal"
+
+msgid "Change key"
+msgstr "Tuşu değiştir"
+
+msgid "The new shortcut works for this session, but could not be saved."
+msgstr "Yeni kısayol yalnızca bu oturumda geçerli; dosyaya kaydedilemedi."
+
+msgid "The language works for this session, but could not be saved."
+msgstr "Dil yalnızca bu oturumda geçerli; dosyaya kaydedilemedi."
+
+msgid "MFG Unlocker  |  %s opens the menu"
+msgstr "MFG Unlocker  |  Menüyü açmak için %s tuşuna basın"
+
+msgid ""
+"Shows the real and DLSS frame rates in the top-left corner\n"
+"while the menu is closed. Saved for the next launch."
+msgstr ""
+"Menü kapalıyken gerçek ve DLSS FPS değerlerini\n"
+"sol üst köşede gösterir. Ayar, sonraki açılışlar için kaydedilir."
+
+msgid "DLSS-G preset"
+msgstr "DLSS-G preset'i"
+
+msgid "Original"
+msgstr "Varsayılan"
+
+msgid "observed"
+msgstr "algılandı"
+
+msgid "waiting for the provider"
+msgstr "sağlayıcı bekleniyor"
+
+msgid "Preset %s"
+msgstr "Preset %s"
+
+msgid "Game / driver"
+msgstr "Oyun / sürücü"
+
+msgid "managed by the game or driver"
+msgstr "oyun veya sürücü tarafından yönetiliyor"
+
+msgid "needs DLSS-G 310.9.16; game / driver in use"
+msgstr "DLSS-G 310.9.16 gerekir; oyun / sürücü preset'i kullanılıyor"
+
+msgid "override supplied"
+msgstr "override iletildi"
+
+msgid "override unavailable"
+msgstr "override kullanılamıyor"
+
+msgid "This DLSS-G provider supports its original preset only. Preset B stays saved for providers that support it."
+msgstr "Bu DLSS-G sağlayıcısı yalnızca kendi varsayılan preset'ini destekler. Preset B, destekleyen sağlayıcılar için kayıtlı kalır."
+
+msgid "This DLSS-G provider supports its original preset only."
+msgstr "Bu DLSS-G sağlayıcısı yalnızca kendi varsayılan preset'ini destekler."
+
+msgid "Restarting frame generation with the new preset..."
+msgstr "Kare oluşturma yeni preset ile yeniden başlatılıyor..."
+
+msgid "The game / driver preset is saved. Restart the game to use it."
+msgstr "Oyun / sürücü preset'i kaydedildi. Uygulamak için oyunu yeniden başlatın."
+
+msgid "Preset %s is saved. Restart the game to use it."
+msgstr "Preset %s kaydedildi. Uygulamak için oyunu yeniden başlatın."
+
+msgid "Preset C needs DLSS-G 310.9.16 or newer (NVIDIA app). This game's frame generation keeps the game / driver preset."
+msgstr "Preset C için DLSS-G 310.9.16 veya daha yenisi gerekir (NVIDIA App üzerinden). Bu oyunda kare oluşturma, oyun / sürücü preset'ini kullanmaya devam eder."
+
+msgid "The preset selection could not be saved."
+msgstr "Preset seçimi kaydedilemedi."
+
+msgid "Game / driver default"
+msgstr "Oyun / sürücü varsayılanı"
+
+msgid "Preset C (performance)"
+msgstr "Preset C (performans)"
+
+msgid "Original preset"
+msgstr "Varsayılan preset"
+
+msgid ""
+"The DLSS frame generation model preset.\n"
+"Preset C is NVIDIA's lighter Frame Generation mode. It needs DLSS-G 310.9.16 or newer,\n"
+"from the NVIDIA app's DLSS override; other providers keep the game / driver preset.\n"
+"A change made while frame generation runs restarts it once, with a short pause;\n"
+"some older DLSS-G versions apply it after a game restart."
+msgstr ""
+"DLSS kare oluşturma modelinin preset'i.\n"
+"Preset C, NVIDIA'nın daha hafif Kare Oluşturma modudur. DLSS-G 310.9.16 veya daha yenisi gerekir;\n"
+"bu sürüm NVIDIA App'teki DLSS Override ile gelir. Diğer sağlayıcılar oyun / sürücü preset'inde kalır.\n"
+"Kare oluşturma çalışırken yapılan değişiklik onu bir kez, kısa bir duraklamayla yeniden başlatır;\n"
+"bazı eski DLSS-G sürümlerinde değişiklik oyun yeniden başlatılınca uygulanır."
+
+msgid "Performance"
+msgstr "Performans"
+
+msgid "Balanced"
+msgstr "Dengeli"
+
+msgid "Quality"
+msgstr "Kalite"
+
+msgid "Ultra Performance"
+msgstr "Ultra Performans"
+
+msgid "Ultra Quality"
+msgstr "Ultra Kalite"
+
+msgid "DLSS RR"
+msgstr "DLSS RR"
+
+msgid "DLSS SR"
+msgstr "DLSS SR"
+
+msgid "RR preset"
+msgstr "RR preset'i"
+
+msgid "SR preset"
+msgstr "SR preset'i"
+
+msgid "Running"
+msgstr "Çalışıyor"
+
+msgid "Idle"
+msgstr "Boşta"
+
+msgid "not evaluated in the last second"
+msgstr "son saniyede çalışmadı"
+
+msgid "Not detected"
+msgstr "Algılanmadı"
+
+msgid "waiting for the game to create DLSS"
+msgstr "oyunun DLSS'i oluşturması bekleniyor"
+
+msgid "NVIDIA app override: latest"
+msgstr "NVIDIA uygulaması override: en yeni"
+
+msgid "NVIDIA app override: %s"
+msgstr "NVIDIA uygulaması override: %s"
+
+msgid "sent as the game's preset hint"
+msgstr "oyunun preset ipucu olarak gönderildi"
+
+msgid "game hint: %s"
+msgstr "oyun ipucu: %s"
+
+msgid "DLSS default for this mode"
+msgstr "bu mod için DLSS varsayılanı"
+
+msgid ""
+"The DLSS Ray Reconstruction model preset.\n"
+"D is NVIDIA's transformer model; E is the newer transformer model, which games with a\n"
+"depth-of-field guide need. F is NVIDIA's second-generation model (RR2) and needs driver 580\n"
+"or newer; DLSS versions without a preset use their default.\n"
+"A change applies at once while DLSS runs. A preset selected when the game starts also\n"
+"replaces an NVIDIA app preset override for that session."
+msgstr ""
+"DLSS Ray Reconstruction model preset'i.\n"
+"D, NVIDIA'nın transformer modelidir; E daha yeni transformer modelidir ve alan derinliği\n"
+"kılavuzu kullanan oyunlar buna ihtiyaç duyar. F, NVIDIA'nın ikinci nesil modelidir (RR2) ve 580\n"
+"veya daha yeni bir sürücü gerektirir; preset'i olmayan DLSS sürümleri kendi varsayılanını kullanır.\n"
+"Değişiklik DLSS çalışırken hemen uygulanır. Oyun başlarken seçili olan bir preset, o oturum için\n"
+"NVIDIA uygulamasındaki preset override'ının da yerini alır."
+
+msgid ""
+"The DLSS Super Resolution model preset.\n"
+"K is NVIDIA's transformer model with the best image quality; J is similar with a little\n"
+"less ghosting and more flicker. L and M are the newer transformer presets NVIDIA uses for\n"
+"Ultra Performance and Performance; DLSS versions without them use their default.\n"
+"A change applies at once while DLSS runs. A preset selected when the game starts also\n"
+"replaces an NVIDIA app preset override for that session."
+msgstr ""
+"DLSS Super Resolution model preset'i.\n"
+"K, en iyi görüntü kalitesini veren NVIDIA transformer modelidir; J benzerdir, biraz\n"
+"daha az ghosting ve daha fazla titreme gösterir. L ve M, NVIDIA'nın Ultra Performans ve Performans için\n"
+"kullandığı daha yeni transformer preset'leridir; bunlara sahip olmayan DLSS sürümleri kendi varsayılanını kullanır.\n"
+"Değişiklik DLSS çalışırken hemen uygulanır. Oyun başlarken seçili olan bir preset, o oturum için\n"
+"NVIDIA uygulamasındaki preset override'ının da yerini alır."
+
+msgid "The DLSS RR preset could not be saved."
+msgstr "DLSS RR preset'i kaydedilemedi."
+
+msgid "The DLSS SR preset could not be saved."
+msgstr "DLSS SR preset'i kaydedilemedi."
+
+msgid "The NVIDIA app's DLSS preset override is active in this game session. Restart the game with a preset selected here to switch presets live."
+msgstr "NVIDIA uygulamasının DLSS preset override'ı bu oyun oturumunda etkin. Preset'leri çalışırken değiştirmek için burada bir preset seçiliyken oyunu yeniden başlatın."
+
+msgid "The NVIDIA app's DLSS preset override is replaced in this session. It applies again after a restart with Game / driver selected."
+msgstr "NVIDIA uygulamasının DLSS preset override'ı bu oturumda devre dışı bırakıldı. Oyun / sürücü seçiliyken yeniden başlatmadan sonra tekrar uygulanır."
+
+msgid "The NVIDIA app's DLSS preset override could not be checked in this session. If one is set, it takes priority."
+msgstr "NVIDIA uygulamasının DLSS preset override'ı bu oturumda denetlenemedi. Ayarlanmışsa önceliklidir."
+
+msgid "This game's DLSS cannot change its preset while running. The preset applies the next time the game starts DLSS (change the DLSS quality mode or restart the game)."
+msgstr "Bu oyunun DLSS'i çalışırken preset değiştiremez. Preset, oyun DLSS'i bir sonraki başlatışında uygulanır (DLSS kalite modunu değiştirin veya oyunu yeniden başlatın)."
+
+msgid "DLSS refused the new preset; the previous one stays in use."
+msgstr "DLSS yeni preset'i reddetti; önceki preset kullanılmaya devam ediyor."
+
+msgid "Waiting to release the previous DLSS preset..."
+msgstr "Önceki DLSS preset'inin serbest bırakılması bekleniyor..."
+
+msgid "Switching DLSS Ray Reconstruction to the new preset..."
+msgstr "DLSS Ray Reconstruction yeni preset'e geçiriliyor..."
+
+msgid "Switching DLSS Super Resolution to the new preset..."
+msgstr "DLSS Super Resolution yeni preset'e geçiriliyor..."
+
+msgid "Waiting for the game's Reflex plugin."
+msgstr "Oyunun Reflex eklentisi bekleniyor."
+
+msgid "The loaded Reflex plugin version is unsupported."
+msgstr "Yüklenen Reflex eklentisi sürümü desteklenmiyor."
+
+msgid "Reflex controls are unavailable for this plugin."
+msgstr "Bu eklentide Reflex kontrolleri kullanılamıyor."
+
+msgid "The Reflex limit is unavailable for the current FG runtime."
+msgstr "Mevcut FG runtime'ı ile Reflex sınırı kullanılamıyor."
+
+msgid "Waiting for game Reflex settings. Change the game's Reflex setting once to retry."
+msgstr "Oyunun Reflex ayarları bekleniyor. Tekrar denemek için oyundaki Reflex ayarını bir kez değiştirin."
+
+msgid "Waiting for the game's Reflex settings thread."
+msgstr "Oyunun Reflex ayarları iş parçacığı bekleniyor."
+
+msgid "Waiting for Reflex availability."
+msgstr "Reflex'in kullanılabilir olup olmadığı kontrol ediliyor."
+
+msgid "Reflex is unavailable."
+msgstr "Reflex kullanılamıyor."
+
+msgid "Restoring the game's Reflex limit..."
+msgstr "Oyunun Reflex sınırı geri yükleniyor..."
+
+msgid "The game rejected the Reflex limit."
+msgstr "Oyun Reflex sınırını reddetti."
+
+msgid "The game's Reflex settings cannot be safely replayed."
+msgstr "Oyunun Reflex ayarları güvenli şekilde yeniden uygulanamıyor."
+
+msgid "The Reflex plugin changed. Restart the game."
+msgstr "Reflex eklentisi değişti. Oyunu yeniden başlatın."
+
+msgid "Waiting for the next safe Reflex update."
+msgstr "Reflex'i güncellemek için bir sonraki güvenli an bekleniyor."
+
+msgid "Waiting for the game to accept the Reflex limit."
+msgstr "Oyunun Reflex sınırını kabul etmesi bekleniyor."
+
+msgid "Game"
+msgstr "Oyun"
+
+msgid "Off"
+msgstr "Kapalı"
+
+msgid "V-Sync"
+msgstr "V-Sync"
+
+msgid ""
+"Off submits the game's frames without V-Sync.\n"
+"NVIDIA Control Panel V-Sync settings take priority."
+msgstr ""
+"Kapalı seçildiğinde oyunun kareleri V-Sync olmadan gönderilir.\n"
+"NVIDIA Denetim Masası'ndaki V-Sync ayarları önceliklidir."
+
+msgid "Reflex FPS limit"
+msgstr "Reflex FPS sınırı"
+
+msgid ""
+"Caps the game's frame rate through Reflex.\n"
+"Paused while Dynamic MFG is on; the saved limit is kept."
+msgstr ""
+"Oyunun kare hızını Reflex ile sınırlar.\n"
+"Dinamik MFG açıkken duraklatılır; kayıtlı sınır korunur."
+
+msgid "The Reflex limit is paused while Dynamic MFG is on. The saved limit is kept."
+msgstr "Dinamik MFG açıkken Reflex sınırı duraklatılır. Kayıtlı sınır korunur."
+
+msgid "The presentation settings could not be saved."
+msgstr "Gecikme ve ekran ayarları kaydedilemedi."
+
+msgid "Off not applied"
+msgstr "Kapalı uygulanmadı"
+
+msgid "applies when the game recreates its swapchain"
+msgstr "oyun swapchain'ini yeniden oluşturduğunda uygulanır"
+
+msgid "the game already presents without V-Sync"
+msgstr "oyun zaten V-Sync olmadan çalışıyor"
+
+msgid "Off requested"
+msgstr "Kapalı istendi"
+
+msgid "not available on this GPU or driver"
+msgstr "bu GPU veya sürücüde kullanılamıyor"
+
+msgid "game interval %u submitted as 0"
+msgstr "oyunun V-Sync aralığı %u, 0 olarak gönderildi"
+
+msgid "the game's last Present was not accepted"
+msgstr "oyunun son Present çağrısı kabul edilmedi"
+
+msgid "waiting for the game's swapchain"
+msgstr "oyunun swapchain'i bekleniyor"
+
+msgid "Applying..."
+msgstr "Uygulanıyor..."
+
+msgid "Reflex limit"
+msgstr "Reflex sınırı"
+
+msgid "accepted"
+msgstr "kabul edildi"
+
+msgid "%d FPS requested"
+msgstr "%d FPS istendi"
+
+msgid "restoring the game's Reflex limit"
+msgstr "oyunun Reflex sınırı geri yükleniyor"
+
+msgid "paused for Dynamic MFG"
+msgstr "Dinamik MFG nedeniyle duraklatıldı"
+
+msgid "Reflex status is temporarily unavailable."
+msgstr "Reflex durumu geçici olarak kullanılamıyor."
+
+msgid "Path traced hair"
+msgstr "Yol izlemeli saç"
+
+msgid "State"
+msgstr "Durum"
+
+msgid "Unknown"
+msgstr "Bilinmiyor"
+
+msgid "Disabled"
+msgstr "Devre dışı"
+
+msgid "Waiting for early device"
+msgstr "Grafik cihazı bekleniyor"
+
+msgid "Preparing"
+msgstr "Hazırlanıyor"
+
+msgid "Unsupported game build"
+msgstr "Desteklenmeyen oyun sürümü"
+
+msgid "Unsupported GPU"
+msgstr "Desteklenmeyen GPU"
+
+msgid "Native LSS"
+msgstr "Yerel LSS"
+
+msgid "Unavailable"
+msgstr "Kullanılamıyor"
+
+msgid "Unsupported driver"
+msgstr "Desteklenmeyen sürücü"
+
+msgid "game Path Traced Hair setting"
+msgstr "oyunun Path Traced Hair ayarı"
+
+msgid "Active"
+msgstr "Etkin"
+
+msgid "tracing converted hair"
+msgstr "dönüştürülen saç yol izlemeyle işleniyor"
+
+msgid "no hair traced in the last 2 s"
+msgstr "son 2 sn içinde saç işlenmedi"
+
+msgid "Ready"
+msgstr "Hazır"
+
+msgid "waiting for game hair"
+msgstr "oyundan saç verisi bekleniyor"
+
+msgid "Turn it on or off with HairWorks and Path Traced Hair in the game's graphics settings."
+msgstr "Oyunun grafik ayarlarındaki HairWorks ve Path Traced Hair seçenekleriyle açıp kapatın."
+
+msgid "Traced hair"
+msgstr "İşlenen saç"
+
+msgid "%s updates"
+msgstr "%s güncelleme"
+
+msgid "Builds"
+msgstr "Oluşturma"
+
+msgid "Hair diagnostics"
+msgstr "Saç tanılaması"
+
+msgid "Turn on frame generation in the game's settings (DLSS or XeSS)."
+msgstr "Oyunun ayarlarından kare oluşturmayı açın (DLSS veya XeSS)."
+
+msgid "Turn on frame generation in the game's settings (DLSS)."
+msgstr "Oyunun ayarlarından kare oluşturmayı açın (DLSS)."
+
+msgid "Turn on frame generation in the game's settings (XeSS)."
+msgstr "Oyunun ayarlarından kare oluşturmayı açın (XeSS)."
+
+msgid "Turn on DLSS or XeSS frame generation in the game's settings."
+msgstr "Oyunun ayarlarından DLSS veya XeSS kare oluşturmayı açın."
+
+msgid "Game FG"
+msgstr "Oyundaki FG"
+
+msgid "GPU"
+msgstr "GPU"
+
+msgid "Waiting for a supported game GPU"
+msgstr "Oyun için desteklenen bir GPU bekleniyor"
+
+msgid "Game FG option"
+msgstr "Oyunun FG seçeneği"
+
+msgid "Unlock"
+msgstr "Kilidi aç"
+
+msgid ""
+"For games that hide DLSS Frame Generation on RTX 30 cards, such as Wuthering Waves.\n"
+"The game then sees an NVIDIA GeForce RTX 4090. DLSS, Streamline, the driver and MFG Unlocker\n"
+"keep using your real GPU. The game's recommended settings may assume an RTX 4090.\n"
+"Online games with anti cheat may treat any mod as a risk. Applies after a game restart."
+msgstr ""
+"Wuthering Waves gibi, RTX 30 kartlarda DLSS Kare Oluşturma seçeneğini gizleyen oyunlar için.\n"
+"Açıldığında oyun, GPU'yu NVIDIA GeForce RTX 4090 olarak görür. DLSS, Streamline, sürücü ve MFG Unlocker\n"
+"gerçek GPU'nuzu kullanmaya devam eder. Oyunun önerilen ayarları RTX 4090'a göre belirlenebilir.\n"
+"Anti-cheat kullanan online oyunlar her türlü modu risk olarak görebilir. Oyunu yeniden başlattıktan sonra geçerli olur."
+
+msgid "The Game FG option could not be saved."
+msgstr "Oyunun FG seçeneği kaydedilemedi."
+
+msgid "Restart the game to unlock its Frame Generation option."
+msgstr "Kare Oluşturma seçeneğinin kilidini açmak için oyunu yeniden başlatın."
+
+msgid "Restart the game to report your real GPU again."
+msgstr "Oyuna gerçek GPU'nuzu tekrar bildirmek için oyunu yeniden başlatın."
+
+msgid "The Game FG option could not be applied this session. See the log."
+msgstr "Oyunun FG seçeneği bu oturumda uygulanamadı. Log dosyasına bakın."
+
+msgid "The game sees an NVIDIA GeForce RTX 4090 this session."
+msgstr "Bu oturumda oyun, GPU'yu NVIDIA GeForce RTX 4090 olarak görüyor."
+
+msgid "This GPU is not an RTX 30 card; the game sees its real name."
+msgstr "Bu GPU bir RTX 30 kartı değil; oyun kartın gerçek adını görür."
+
+msgid "MFG Unlocker multi-frame port"
+msgstr "MFG Unlocker çoklu kare portu"
+
+msgid "Intel 2x model"
+msgstr "Intel 2x modeli"
+
+msgid "Frame generation"
+msgstr "Kare oluşturma"
+
+msgid "XeSS frame generation support is unavailable in this build."
+msgstr "Bu sürümde XeSS kare oluşturma desteği kullanılamıyor."
+
+msgid "XeSS multi-frame generation needs OptiScaler, with XeFG as its frame generation output. Without it the game's XeSS frame generation runs at Intel's standard 2x."
+msgstr "XeSS çoklu kare oluşturma için OptiScaler gerekir ve kare oluşturma çıkışı olarak XeFG seçilmelidir. Aksi halde oyunun XeSS kare oluşturması Intel'in standart 2x oranında çalışır."
+
+msgid "XeSS multi-frame generation runs through OptiScaler. Set the frame generation ratio and the MFG model in OptiScaler's menu."
+msgstr "XeSS çoklu kare oluşturma OptiScaler üzerinden çalışır. Kare oluşturma oranını ve MFG modelini OptiScaler menüsünden ayarlayın."
+
+msgid "Display"
+msgstr "Ekran"
+
+msgid "Off submits the game's frames without V-Sync."
+msgstr "Kapalı seçildiğinde oyunun kareleri V-Sync olmadan gönderilir."
+
+msgid "The V-Sync setting could not be saved."
+msgstr "V-Sync ayarı kaydedilemedi."
+
+msgid "Status"
+msgstr "Durum"
+
+msgid "%u generated frames capacity"
+msgstr "kapasite: %u oluşturulan kare"
+
+msgid "Applied"
+msgstr "Uygulanan"
+
+msgid "Not verified"
+msgstr "Doğrulanmadı"
+
+msgid "Model"
+msgstr "Model"
+
+msgid "Tensor cores"
+msgstr "Tensör çekirdekleri"
+
+msgid "On"
+msgstr "Açık"
+
+msgid "the ported model's int8 layers run as CUDA kernels"
+msgstr "port edilen modelin int8 katmanları CUDA kernel olarak çalışıyor"
+
+msgid "no layer has run yet"
+msgstr "henüz hiçbir katman çalışmadı"
+
+msgid "XeFGTensorCores = off in OptiScaler.ini"
+msgstr "OptiScaler.ini içinde XeFGTensorCores = off"
+
+msgid "presentation override is not verified"
+msgstr "Present override'ı doğrulanmadı"
+
+msgid "DLSS multi-frame generation needs an NVIDIA RTX GPU."
+msgstr "DLSS çoklu kare oluşturma için bir NVIDIA RTX GPU gerekir."
+
+msgid "DLSS multi-frame generation is unavailable on this GPU."
+msgstr "DLSS çoklu kare oluşturma bu GPU'da kullanılamıyor."
+
+msgid "Advanced"
+msgstr "Gelişmiş"
+
+msgid "XeSS diagnostics"
+msgstr "XeSS tanılaması"
+
+msgid "Waiting for status"
+msgstr "Durum bekleniyor"
+
+msgid "Waiting for current backend status. Saved settings are preserved."
+msgstr "Güncel backend durumu bekleniyor. Kayıtlı ayarlar korunuyor."
+
+msgid "Not connected"
+msgstr "Bağlı değil"
+
+msgid "%s backend is not loaded."
+msgstr "%s backend'i yüklenmedi."
+
+msgid "The integrated core is unavailable. Check the startup log and restart the game with one %s module."
+msgstr "Yerleşik çekirdek kullanılamıyor. Başlangıç log'unu kontrol edin ve oyunu tek bir %s modülüyle yeniden başlatın."
+
+msgid "Paused"
+msgstr "Duraklatıldı"
+
+msgid "Live"
+msgstr "Canlı"
+
+msgid "The game changed graphics adapters. Restart the game to select a new GPU."
+msgstr "Oyun kullandığı GPU'yu değiştirdi. Yeni GPU'yu seçmek için oyunu yeniden başlatın."
+
+msgid "RTX Remix detected. Frame generation and its multiplier are managed in the RTX Remix menu."
+msgstr "RTX Remix algılandı. Kare oluşturma ve çarpanı RTX Remix menüsünden yönetilir."
+
+msgid "Provider patch"
+msgstr "Sağlayıcı yaması"
+
+msgid "Ready at feature creation"
+msgstr "Özellik oluşturulurken hazır"
+
+msgid "Waiting for frame generation"
+msgstr "Kare oluşturma bekleniyor"
+
+msgid "5x MFG (experimental)"
+msgstr "5x MFG (deneysel)"
+
+msgid "6x MFG (experimental)"
+msgstr "6x MFG (deneysel)"
+
+msgid "Follow game"
+msgstr "Oyuna göre"
+
+msgid "Mode"
+msgstr "Mod"
+
+msgid "MFG mode"
+msgstr "MFG modu"
+
+msgid ""
+"Follow game uses the game's own frame generation setting.\n"
+"Dynamic adjusts frame generation toward a target frame rate; it does not set a hard FPS limit."
+msgstr ""
+"\"Oyuna göre\" modu oyunun kendi kare oluşturma ayarını kullanır.\n"
+"\"Dinamik\" modu kare oluşturmayı bir hedef kare hızına göre ayarlar; kesin bir FPS sınırı koymaz."
+
+msgid "Dynamic target"
+msgstr "Dinamik hedef"
+
+msgid "Display refresh rate"
+msgstr "Ekran yenileme hızı"
+
+msgid "Target FPS"
+msgstr "Hedef FPS"
+
+msgid "Dynamic MFG is unavailable with the current limit or runtime. Its full frame-generation range must fit the limit."
+msgstr "Dinamik MFG, mevcut sınır veya runtime ile kullanılamıyor. Kare oluşturma aralığının tamamı sınırın içinde kalmalıdır."
+
+msgid "Dynamic selection is saved; waiting for runtime support."
+msgstr "Dinamik seçimi kaydedildi; runtime desteği bekleniyor."
+
+msgid "Saved MFG request: %dx (unavailable in this session)"
+msgstr "Kayıtlı MFG isteği: %dx (bu oturumda kullanılamıyor)"
+
+msgid "Request accepted, but the configuration was not saved."
+msgstr "İstek kabul edildi, ancak yapılandırma kaydedilmedi."
+
+msgid "The selection could not be applied or saved."
+msgstr "Seçim uygulanamadı veya kaydedilemedi."
+
+msgid "Latency and display"
+msgstr "Gecikme ve ekran"
+
+msgid "DLSS Ray Reconstruction"
+msgstr "DLSS Ray Reconstruction"
+
+msgid "DLSS Super Resolution"
+msgstr "DLSS Super Resolution"
+
+msgid "game intent: unknown"
+msgstr "oyunun isteği: bilinmiyor"
+
+msgid "game intent: on"
+msgstr "oyunun isteği: açık"
+
+msgid "game intent: off"
+msgstr "oyunun isteği: kapalı"
+
+msgid "FG state"
+msgstr "FG durumu"
+
+msgid "Requested"
+msgstr "İstenen"
+
+msgid "Dynamic"
+msgstr "Dinamik"
+
+msgid "Dynamic, %ux"
+msgstr "Dinamik, %ux"
+
+msgid "NVIDIA list unavailable"
+msgstr "NVIDIA listesi kullanılamıyor"
+
+msgid "NVIDIA lists no MFG for this game"
+msgstr "NVIDIA listesinde bu oyun için MFG yok"
+
+msgid "game not on NVIDIA's list"
+msgstr "oyun NVIDIA listesinde değil"
+
+msgid "NVIDIA lists %ux"
+msgstr "NVIDIA listesi: %ux"
+
+msgid "Limit"
+msgstr "Sınır"
+
+msgid "the current wrapper has no verified MFG override"
+msgstr "mevcut wrapper'da doğrulanmış MFG override'ı yok"
+
+msgid "%dx (safe fallback)"
+msgstr "%dx (güvenli yedek)"
+
+msgid "Waiting"
+msgstr "Bekleniyor"
+
+msgid "for an active DLSS-G wrapper"
+msgstr "etkin bir DLSS-G wrapper'ı için"
+
+msgid "NVIDIA lists ordinary Frame Generation only. The mod keeps its override limit at 2x."
+msgstr "NVIDIA listesinde bu oyun için yalnızca normal Kare Oluşturma var. Mod, override sınırını 2x olarak tutar."
+
+msgid "The listed %ux ceiling requires a compatible runtime. The current limit is %dx."
+msgstr "Listelenen %ux üst sınırı için uyumlu bir runtime gerekir. Mevcut sınır: %dx."
+
+msgid ""
+"The highest mode the current DLSS-G runtime supports, and the ceiling\n"
+"NVIDIA's override list gives this game."
+msgstr ""
+"Mevcut DLSS-G runtime'ının desteklediği en yüksek mod ve\n"
+"NVIDIA'nın override listesinin bu oyuna verdiği üst sınır."
+
+msgid "%.1f real, %.1f DLSS"
+msgstr "%.1f gerçek, %.1f DLSS"
+
+msgid "%.1f real, DLSS unavailable"
+msgstr "%.1f gerçek, DLSS kullanılamıyor"
+
+msgid "Measuring..."
+msgstr "Ölçülüyor..."
+
+msgid "DLSS FG off"
+msgstr "DLSS FG kapalı"
+
+msgid "waiting for an accepted Dynamic request"
+msgstr "kabul edilmiş bir Dinamik isteği bekleniyor"
+
+msgid "applied: display refresh rate"
+msgstr "uygulanan: ekran yenileme hızı"
+
+msgid "applied: %.2f FPS"
+msgstr "uygulanan: %.2f FPS"
+
+msgid "Restart with the matching single-module build. The current status protocol is older than this UI expects."
+msgstr "Oyunu eşleşen tek modüllü sürümle yeniden başlatın. Mevcut durum protokolü bu arayüzün beklediğinden eski."
+
+msgid "Frame generation stays under the game's control. This wrapper has no verified MFG override support."
+msgstr "Kare oluşturma oyunun kontrolünde kalır. Bu wrapper'ın doğrulanmış MFG override desteği yok."
+
+msgid "DLSS-G activity observed; waiting for the game's FG control calls."
+msgstr "DLSS-G etkinliği algılandı; oyunun FG kontrol çağrıları bekleniyor."
+
+msgid "Waiting for the game to request frame generation."
+msgstr "Oyunun kare oluşturma istemesi bekleniyor."
+
+msgid "Waiting for an active DLSS-G pipeline."
+msgstr "Etkin bir DLSS-G pipeline'ı bekleniyor."
+
+msgid "Toggle frame generation off then on, or restart the game, to recreate the pipeline with this selection."
+msgstr "Pipeline'ı bu seçimle yeniden oluşturmak için kare oluşturmayı kapatıp tekrar açın veya oyunu yeniden başlatın."
+
+msgid "Diagnostics"
+msgstr "Tanılama"
+
+msgid "Status is temporarily unavailable; controls are paused."
+msgstr "Durum geçici olarak kullanılamıyor; kontroller duraklatıldı."
+
+msgid "FPS status unavailable"
+msgstr "FPS verisi alınamıyor"
+
+msgid "Real -- | DLSS --"
+msgstr "Gerçek -- | DLSS --"
+
+msgid "Real %.0f | DLSS %.0f"
+msgstr "Gerçek %.0f | DLSS %.0f"
+
+msgid "Real %.0f | DLSS --"
+msgstr "Gerçek %.0f | DLSS --"
+
+msgid "Dynamic (unavailable)"
+msgstr "Dinamik (kullanılamıyor)"
+
+msgid "Dynamic (checking...)"
+msgstr "Dinamik (denetleniyor...)"

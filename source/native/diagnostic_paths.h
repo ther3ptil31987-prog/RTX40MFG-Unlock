@@ -42,12 +42,43 @@ inline std::wstring FileName(const std::wstring& executable,const wchar_t* suffi
     swprintf_s(identity,L"-%016llX",static_cast<unsigned long long>(PathHash(executable)));
     return MFG_LOG_PREFIX_W L"-"+stem+identity+suffix;
 }
-inline std::wstring RuntimeLog() {
+inline std::wstring TempDirectory() {
     std::wstring directory(32768,L'\0');
     const DWORD count=GetTempPathW(static_cast<DWORD>(directory.size()),directory.data());
     if(!count||count>=directory.size())return {};
-    directory.resize(count);
+    directory.resize(count);return directory;
+}
+// A uniquely named probe that deletes itself on close, so nothing is left behind.
+inline bool CanCreateFiles(const std::wstring& directory) {
+    if(directory.empty())return false;
+    static volatile LONG sequence=0;
+    wchar_t name[96]{};
+    swprintf_s(name,MFG_LOG_PREFIX_W L"-write-probe-%lu-%ld.tmp",GetCurrentProcessId(),InterlockedIncrement(&sequence));
+    const auto probe=(std::filesystem::path(directory)/name).wstring();
+    const HANDLE file=CreateFileW(probe.c_str(),GENERIC_WRITE|DELETE,0,nullptr,CREATE_NEW,
+        FILE_ATTRIBUTE_TEMPORARY|FILE_ATTRIBUTE_HIDDEN|FILE_FLAG_DELETE_ON_CLOSE,nullptr);
+    if(file==INVALID_HANDLE_VALUE)return false;
+    CloseHandle(file);return true;
+}
+// Logs go in the game folder, beside the executable, where the mod's settings and
+// status file already are. %TEMP% only when the game folder cannot be written
+// (for example a protected install). Decided once, so every diagnostic file of
+// one launch lands in the same folder.
+inline const std::wstring& LogDirectory() {
+    static const std::wstring directory=[] {
+        const auto executable=Executable();
+        const auto separator=executable.find_last_of(L"\\/");
+        if(separator!=std::wstring::npos) {
+            auto game=executable.substr(0,separator+1);
+            if(CanCreateFiles(game))return game;
+        }
+        return TempDirectory();
+    }();
+    return directory;
+}
+inline std::wstring RuntimeLog() {
+    const auto& directory=LogDirectory();
     const auto name=FileName(Executable());
-    return name.empty()?std::wstring{}:(std::filesystem::path(directory)/name).wstring();
+    return directory.empty()||name.empty()?std::wstring{}:(std::filesystem::path(directory)/name).wstring();
 }
 }

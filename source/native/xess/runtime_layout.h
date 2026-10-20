@@ -32,6 +32,16 @@ class Image {
     uintptr_t base{};
     uint32_t bytes{};
     std::vector<RUNTIME_FUNCTION> functions;
+    // xefgrace.1: each executable section is copied once per Image and shared by every scanned witness.
+    mutable std::map<uint32_t,std::vector<unsigned char>> code;
+    const std::vector<unsigned char>& Code(const Section& section) const {
+        auto& copy=code[section.start];
+        if (copy.empty()) {
+            copy.resize(section.size);
+            if (!Read(section.start,copy.data(),copy.size())) { code.erase(section.start); throw std::runtime_error("layout_text_read"); }
+        }
+        return copy;
+    }
 public:
     explicit Image(HMODULE module) : base(reinterpret_cast<uintptr_t>(module)) {
         IMAGE_DOS_HEADER dos{};
@@ -130,14 +140,25 @@ public:
         if (w.unwind) {
             for (const auto& f:functions) if (f.EndAddress-f.BeginAddress==w.size) match(f.BeginAddress);
         } else {
+            const bool redirects=entryRedirectFilter.load(std::memory_order_relaxed)!=nullptr;
             for (const auto& section:sections) {
                 if (!(section.flags&IMAGE_SCN_MEM_EXECUTE) || section.size<w.size) continue;
-                std::vector<unsigned char> code(section.size);
-                if (!Read(section.start,code.data(),code.size())) throw std::runtime_error("layout_text_read");
+                const auto& code=Code(section);
                 // MSVC leaf entry points in these two decoded families are 16-byte aligned.
                 for (uint32_t offset=0;offset<=section.size-w.size;offset+=16) {
-                    if (code[offset]==w.bytes[0] || (code[offset]==0xe9 && entryRedirectFilter.load(std::memory_order_relaxed)))
-                        match(section.start+offset);
+                    const unsigned char* at=code.data()+offset;
+                    const bool redirect=at[0]==0xe9 && redirects;
+                    if (at[0]!=w.bytes[0] && !redirect) continue;
+                    // xefgrace.1: the copy rejects what match() would reject, without reading the image again.
+                    // A host's entry jump can excuse at most the bytes HostReplaced counts, so the bytes after
+                    // them must match either way. Every remaining candidate is still read and verified by match().
+                    size_t i=1;
+                    if (redirect && at[0]!=w.bytes[0] && w.size>=16) {
+                        i=5;
+                        while (i<w.size && at[i]==0xcc && w.bytes[i]!=0xcc) ++i;
+                    }
+                    while (i<w.size && (!mask[i] || at[i]==w.bytes[i])) ++i;
+                    if (i==w.size) match(section.start+offset);
                 }
             }
         }
@@ -145,8 +166,20 @@ public:
     }
 };
 
+// xefg134.1: object fields the RTXMFG code reads or patches next to the mapped sites. Each value is used by an
+// instruction inside the family's witnessed functions, so a matched family proves it. XeFG 1.3.4 (fg95) moved
+// the implementation's swap chain (+8 -> +10), the chain's native swap chain (+30 -> +38) and presenter
+// (+120 -> +128; queue +28 stays), the override count (+16C -> +18C), and the keep-2x-model predicate's first
+// test skips 0C bytes (was 09: its second compare uses a 32-bit displacement).
+struct Fields {
+    uint32_t implementationChain{8}, chainQueue{0x28}, chainNative{0x30}, chainPresenter{0x120}, overrideCount{0x16c};
+    uint8_t keep2xSkip{0x09};
+};
+inline constexpr Fields kFg95Fields{0x10,0x28,0x38,0x128,0x18c,0x0c};
+
 struct Layout {
     const char* family{};
+    Fields fields{};
     std::map<uint32_t,uint32_t> addresses;
     std::map<uint32_t,std::vector<unsigned char>> witnessed;
     uint32_t Rva(uint32_t reference) const {
@@ -177,7 +210,7 @@ inline Layout Discover(HMODULE module,bool fg) {
         : std::vector<const Family*>(std::begin(generated::ll),std::end(generated::ll));
     for (const auto* family:families) {
         try {
-            Layout result{family->name,{},{}};
+            Layout result{family->name,family==&generated::fg95 ? kFg95Fields : Fields{},{},{}};
             std::vector<uint32_t> found;
             for (size_t i=0;i<family->count;++i) {
                 const auto candidates=image.Find(family->witnesses[i]);

@@ -1,6 +1,6 @@
 #include "../runtime_payload.h"
 // Exact-build, process-local shader additions. Unknown keys use the provider's
-// original decoder and retain its native failure behavior; splat.1: a decoded
+// original decoder and retain its native failure behavior; splat.1, unet.1: a decoded
 // program identical to one RTXMFG replaces is swapped for RTXMFG's own shader.
 // Install before any context; retain programs and relay until after exact
 // context destruction.
@@ -177,12 +177,8 @@ public:
         // Embedded resources supply the exact same 54 verified byte arrays.
         // No external program directory is consulted by the game build.
         programs=xess_payload::LoadPrograms(payload);
-        // splat.1: always validated; RTXMFG_XESS_SPLAT=intel keeps Intel's programs (A/B and fallback).
+        // splat.1, unet.1: our own splat and U-Net conv shaders replace Intel's (proven byte-identical; always validated).
         replacements=xess_payload::LoadReplacements(payload);
-        wchar_t splat[16]{};
-        const auto splatLength=GetEnvironmentVariableW(L"RTXMFG_XESS_SPLAT",splat,16);
-        const bool keepIntel=splatLength>0 && splatLength<16 && !_wcsicmp(splat,L"intel");
-        if (keepIntel) replacements.clear();
         // Search only free regions within the signed-rel32 range of this call.
         const auto callEnd=reinterpret_cast<uintptr_t>(site+5);
         const uintptr_t low=callEnd>0x7ffe0000 ? callEnd-0x7ffe0000 : 0x10000;
@@ -209,7 +205,7 @@ public:
         if (distance<INT32_MIN || distance>INT32_MAX) {VirtualFree(relay,0,MEM_RELEASE);relay=nullptr;throw std::runtime_error("shader_port_relay_range");}
         replacement=LONG(distance); instance=this; change(original,replacement); active=true;
         logEvent("shader_port_applied","\"programs\":"+std::to_string(programs.size())+",\"replacements\":"+
-            std::to_string(replacements.size())+(keepIntel ? ",\"replacements_disabled\":\"RTXMFG_XESS_SPLAT\"" : ""));
+            std::to_string(replacements.size()));
     }
     ~ShaderPort() {
         if (active) {

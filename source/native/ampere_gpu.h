@@ -7,6 +7,11 @@ using LogCallback = midpoint_fix::LogCallback;
 void SetLogCallback(LogCallback) noexcept;
 bool ObserveD3D12Device(void*) noexcept;
 bool ObserveAdapter(void*) noexcept;
+// The VkPhysicalDevice LUID takes the D3D12 device's place in the same CUDA
+// adapter verification. ObserveVulkanAdapter is the requirements-scope check
+// (NVIDIA Ampere RTX by NVAPI) and records nothing.
+bool ObserveVulkanPhysicalDevice(void*) noexcept;
+bool ObserveVulkanAdapter(void*) noexcept;
 struct PreparationBoundary
 {
     uint64_t providerGeneration = 0;
@@ -28,6 +33,8 @@ bool PatchProvider(HMODULE, const wchar_t*, const PreparationBoundary& = {}) noe
 bool PreparedProvider(HMODULE) noexcept;
 bool BindProvider(HMODULE) noexcept;
 bool AdapterVerified() noexcept;
+// Selected only after CUDA LUID and NVAPI TU102/104/106 identity agree.
+bool IsTuring() noexcept;
 bool Ready() noexcept;
 uint32_t FailureCode() noexcept;
 uint32_t PreparationStage() noexcept;

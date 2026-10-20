@@ -8,7 +8,13 @@ namespace ampere_cuda_program
 using Entry = std::array<char, 96>;
 using Entries = std::array<Entry, ampere_native_cache::kSlots>;
 using EntryView = std::span<const Entry>;
-struct FontImage { const std::vector<uint8_t>* payload = nullptr; };
+struct FontImage
+{
+    const std::vector<uint8_t>* payload = nullptr;
+    ampere_native_cache::ProgramView network{};
+    EntryView networkEntries{};
+    uint32_t targetSm = 86;
+};
 enum class Stage : uint32_t { eReady, eApi, eAdapter, eContext, eModule, eFunction, eCleanup };
 struct Result
 {

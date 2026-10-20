@@ -44,6 +44,21 @@ enum class Kind : uint32_t
     eNgxD3D12InitProject = 30,
     eSlUpgradeInterface = 31,
     eSlSetD3DDevice = 32,
+    // OptiScaler's private interposer: hotpatch profile, installed at load.
+    eOptiScalerSlSetD3DDevice = 33,
+    eDlssgEndpointCreate = 34,
+    eDlssgEndpointEvaluate = 35,
+    // RTX 30 Vulkan route: NGX Vulkan ReleaseFeature (provider and runtime),
+    // the runtime's Vulkan requirements/capability parameters, and the
+    // interposer's device setup entries (slSetVulkanInfo, vkCreateDevice).
+    eAmpereVulkanRelease = 36,
+    eAmpereVulkanRequirements = 37,
+    eAmpereVulkanParameters = 38,
+    eSlSetVulkanInfo = 39,
+    eSlVulkanCreateDevice = 40,
+    eSrPresetSelector = 41,
+    eSrPresetReader = 42,
+    eSrPresetReport = 43,
     eCount,
 };
 

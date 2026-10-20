@@ -1,4 +1,5 @@
 #pragma once
+#include "localization.h"
 #include "nvidia_mfg_policy.h"
 #include "reshade_bridge.h"
 
@@ -18,7 +19,7 @@ inline Availability Classify(const MfgUnlockReShadeSnapshot& state) noexcept
     const bool rangeFits = nvidia_mfg_policy::DynamicRangeFits(
         state.numFramesToGenerateMax, state.safeMaximumMultiplier);
     const bool rangeBlocked = state.numFramesToGenerateMax != 0 && !rangeFits;
-    const bool ampereLimit = state.gpuFamily == 2 && state.safeMaximumMultiplier < 6;
+    const bool ampereLimit = (state.gpuFamily == 2 || state.gpuFamily == 4) && state.safeMaximumMultiplier < 6;
 
     // A known rejection or limit is already conclusive, even before a newer
     // capability query arrives or while the control bridge is unavailable.
@@ -30,13 +31,14 @@ inline Availability Classify(const MfgUnlockReShadeSnapshot& state) noexcept
     return Availability::Supported;
 }
 
+// English; the menu translates it with l10n::T.
 inline const char* Label(Availability value) noexcept
 {
     switch (value)
     {
-    case Availability::Supported: return "Dynamic";
-    case Availability::Unavailable: return "Dynamic (unavailable)";
-    default: return "Dynamic (checking...)";
+    case Availability::Supported: return N_("Dynamic");
+    case Availability::Unavailable: return N_("Dynamic (unavailable)");
+    default: return N_("Dynamic (checking...)");
     }
 }
 }

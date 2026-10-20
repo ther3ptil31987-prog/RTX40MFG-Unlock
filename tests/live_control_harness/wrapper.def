@@ -1,6 +1,0 @@
-EXPORTS
-    slGetPluginFunction
-    FakeSetOptions
-    FakeGetState
-    FakeUiRecompositionEnabled
-    WrapperSignature

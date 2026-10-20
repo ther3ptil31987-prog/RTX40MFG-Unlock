@@ -12,6 +12,12 @@
 // (2, saved by older builds) is not offered and behaves as Game. Presentation
 // flags are never changed, TEST presents are never changed, and NVIDIA Control
 // Panel V-Sync overrides still take priority in the driver.
+//
+// Vulkan fixes the present mode when a swapchain is created. Off replaces a
+// FIFO or FIFO_RELAXED mode in the application's vkCreateSwapchainKHR with
+// IMMEDIATE, else MAILBOX, only when the surface lists that mode; no other
+// creation field changes. A change therefore applies to the game's next
+// swapchain, and the status says so until then.
 namespace vsync_control
 {
 enum class Mode : uint32_t { eGame = 0, eOff = 1, eOn = 2 };
@@ -31,6 +37,11 @@ enum class Failure : uint32_t
     eGenerationChanged,
     ePresentFailed,
     eConcurrentPresent,
+    // Vulkan (appended; the status publishes these values).
+    eSwapchainRecreationPending,
+    ePresentModeUnavailable,
+    eSwapchainUnsupported,
+    eSwapchainCreateFailed,
 };
 
 struct Snapshot
@@ -49,6 +60,15 @@ struct Snapshot
     Failure failure = Failure::eNoApplicationSwapchain;
     int32_t presentResult = 0;
     uint64_t configurationGeneration = 0;
+    // The application's latest live Vulkan swapchain is the presentation the
+    // fields above describe; the intervals then stay 0 and the present modes
+    // (VkPresentModeKHR values) hold what the game asked for and what was
+    // created. presentResult is that creation's VkResult.
+    bool vulkanSwapchain = false;
+    // The Vulkan swapchain creation wrapper is installed.
+    bool vulkanHook = false;
+    uint32_t originalPresentMode = 0;
+    uint32_t submittedPresentMode = 0;
 };
 
 // Worker: the saved mode (0 game, 1 off, 2 on). Cheap when unchanged.
@@ -72,6 +92,10 @@ inline const char* FailureName(Failure failure) noexcept
     case Failure::eGenerationChanged: return "generation-changed";
     case Failure::ePresentFailed: return "present-not-accepted";
     case Failure::eConcurrentPresent: return "concurrent-present";
+    case Failure::eSwapchainRecreationPending: return "swapchain-recreation-pending";
+    case Failure::ePresentModeUnavailable: return "present-mode-unavailable";
+    case Failure::eSwapchainUnsupported: return "swapchain-shape-unsupported";
+    case Failure::eSwapchainCreateFailed: return "swapchain-create-failed";
     }
     return "unknown";
 }
@@ -91,4 +115,41 @@ struct Submission
 Submission BeforeApplicationPresent(uint32_t interval, uint32_t flags,
     bool principal) noexcept;
 void AfterApplicationPresent(const Submission& submission, HRESULT result) noexcept;
+
+// Vulkan present modes (VkPresentModeKHR values).
+constexpr uint32_t kPresentModeImmediate = 0;
+constexpr uint32_t kPresentModeMailbox = 1;
+constexpr uint32_t kPresentModeFifo = 2;
+constexpr uint32_t kPresentModeFifoRelaxed = 3;
+
+struct VulkanSurfaceModes
+{
+    // The surface's present modes were read for this creation.
+    bool queried = false;
+    bool immediate = false;
+    bool mailbox = false;
+    // The creation chain constrains or lists present modes itself
+    // (VkSwapchainPresentModesCreateInfoEXT), or the read failed.
+    bool unsupported = false;
+};
+
+struct VulkanSwapchainSubmission
+{
+    uint32_t presentMode = 0;
+    uint32_t originalPresentMode = 0;
+    uint64_t configurationGeneration = 0;
+    Failure failure = Failure::eNone;
+    bool changed = false;
+};
+
+// The current request is Off: the caller reads the surface's modes only then.
+bool OffRequested() noexcept;
+void VulkanSwapchainHookInstalled() noexcept;
+// The application's vkCreateSwapchainKHR on a tracked device, before and after
+// the call down the chain. swapchain is the created handle (0 on failure).
+VulkanSwapchainSubmission BeforeVulkanSwapchain(uint32_t presentMode,
+    const VulkanSurfaceModes& modes) noexcept;
+void AfterVulkanSwapchain(const VulkanSwapchainSubmission& submission,
+    int32_t result, uint64_t swapchain) noexcept;
+void VulkanSwapchainDestroyed(uint64_t swapchain) noexcept;
 }

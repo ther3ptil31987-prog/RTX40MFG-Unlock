@@ -43,7 +43,7 @@ void LogSdkModule(void* value, const char* kind) noexcept
         if (!n || n >= path.size()) return;
         path.resize(n);
         uint16_t major{},minor{},patch{};
-        if (!strcmp(kind,"fg")) {
+        if (!strcmp(kind,"fg") || !strcmp(kind,"intel_native_fg")) {
             const auto get = reinterpret_cast<decltype(&xefgSwapChainGetVersion)>(GetProcAddress(module,"xefgSwapChainGetVersion"));
             xefg_swapchain_version_t v{}; if (!get || get(&v)!=0) return;
             major=v.major; minor=v.minor; patch=v.patch;

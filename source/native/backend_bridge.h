@@ -43,8 +43,3 @@ using MfgUnlockBackendQueryInterfaceFn = BOOL (WINAPI*)(
     uint32_t requestedAbiVersion, MfgUnlockBackendInterface* output,
     uint32_t outputSize);
 
-#if defined(MFG_UNLOCK_BACKEND_BRIDGE)
-extern "C" __declspec(dllexport) BOOL WINAPI
-MfgUnlockBackendQueryInterface(uint32_t requestedAbiVersion,
-    MfgUnlockBackendInterface* output, uint32_t outputSize);
-#endif

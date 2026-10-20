@@ -1,0 +1,12 @@
+# Runtime test fixture. Not shipped.
+msgid ""
+msgstr ""
+"Language: zz-Hant\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"X-MFG-Native-Name: 測試\n"
+"X-MFG-English-Name: Hant test\n"
+"X-MFG-Match: zz-Hant zz-TW\n"
+"X-MFG-Fonts: msjh.ttc:0\n"
+
+msgid "Diagnostics"
+msgstr "診斷"

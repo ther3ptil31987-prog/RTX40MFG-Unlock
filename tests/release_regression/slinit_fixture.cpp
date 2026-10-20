@@ -46,8 +46,26 @@ extern "C" __declspec(dllexport) sl::Result slUpgradeInterface(void** baseInterf
 }
 extern "C" __declspec(dllexport) unsigned WINAPI FixtureUpgradeCalls(){return upgrades.load();}
 // Counts calls so the entry is long enough for a relocated entry detour.
+// With a probe wrapper set, it also records whether that wrapper's maximum
+// clamp was already patched when this call began: sl.dlss_g's
+// slOnPluginStartup reads its maximum inside slSetD3DDevice.
 static std::atomic<unsigned> deviceSets{0};
-extern "C" __declspec(dllexport) sl::Result slSetD3DDevice(void*){++deviceSets;return sl::Result::eOk;}
+static std::atomic<HMODULE> probeWrapper{nullptr};
+static std::atomic<int> wrapperAtDeviceSet{-1};
+extern "C" __declspec(dllexport) void WINAPI FixtureProbeWrapper(HMODULE wrapper){probeWrapper=wrapper;}
+extern "C" __declspec(dllexport) int WINAPI FixtureWrapperAtDeviceSet(){return wrapperAtDeviceSet.load();}
+#if defined(FIXTURE_HOTPATCH_SLINIT)
+extern "C" sl::Result FixtureSlSetD3DDeviceBody(void*) {
+#else
+extern "C" __declspec(dllexport) sl::Result slSetD3DDevice(void*) {
+#endif
+    if(HMODULE wrapper=probeWrapper.load()){
+        using ReadFn=int(WINAPI*)();
+        auto read=reinterpret_cast<ReadFn>(GetProcAddress(wrapper,"FixtureClampPatched"));
+        wrapperAtDeviceSet=read?read():-2;
+    }
+    ++deviceSets;return sl::Result::eOk;
+}
 extern "C" __declspec(dllexport) unsigned WINAPI FixtureDeviceSets(){return deviceSets.load();}
 static unsigned lookupMode = 0;
 extern "C" __declspec(dllexport) void FixtureLookupMode(unsigned mode){lookupMode=mode;}

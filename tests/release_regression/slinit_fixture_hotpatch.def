@@ -1,5 +1,6 @@
 EXPORTS
 slInit=slInitHotpatchable
+slSetD3DDevice=slSetD3DDeviceHotpatchable
 CreateDXGIFactory=FixtureFactory
 CreateDXGIFactory1=FixtureFactory1
 CreateDXGIFactory2=FixtureFactory2

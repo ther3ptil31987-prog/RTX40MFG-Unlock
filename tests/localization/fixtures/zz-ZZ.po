@@ -1,0 +1,25 @@
+# Runtime test fixture. Not shipped.
+msgid ""
+msgstr ""
+"Language: zz_ZZ\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"X-MFG-Native-Name: Zedish\n"
+"X-MFG-English-Name: Zedish (test)\n"
+"X-MFG-Match: zz-ZZ zz-Latn\n"
+
+msgid "Diagnostics"
+msgstr "Zdiagnostics"
+
+#, c-format
+msgid "Preset %s is saved."
+msgstr "Zpreset %s zsaved."
+
+msgid "Untranslated"
+msgstr ""
+
+#, fuzzy
+msgid "Fuzzy"
+msgstr "Zfuzzy"
+
+msgid "Line one\nline two"
+msgstr "Zline one\nzline two"

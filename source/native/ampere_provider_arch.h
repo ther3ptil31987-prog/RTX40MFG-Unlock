@@ -3,7 +3,8 @@
 #include <cstddef>
 #include <cstdint>
 
-// RTX 30 support declared by the DLSS-G provider itself.
+// RTX 20/30 admission declared by the DLSS-G provider itself. GPU-program
+// preparation and capacity remain separate gates; this declaration is insufficient.
 //
 // Every audited DLSS-G provider (310.1.0 through 310.9.1, game, NGX OTA and
 // driver copies) declares Ada as its minimum architecture in two places:
@@ -13,16 +14,20 @@
 //  - NVSDK_NGX_D3D12_GetFeatureRequirements, whose request record stores the
 //    FG feature id (0x0B) followed by the minimum architecture (0x190), which
 //    Streamline reads as the plugin's minimum GPU architecture.
-// On a system with an RTX 30 GPU both immediates are rewritten in process
-// memory to 0x170, so NGX and Streamline admit Ampere natively. No NVIDIA
-// file, driver or Streamline code is modified. Nothing changes on other GPUs.
+// NVSDK_NGX_VULKAN_GetFeatureRequirements stores the same record for Vulkan
+// hosts (310.9.16 included); it is declared as well when present.
+// On a system with an RTX 30 GPU these immediates are rewritten in process
+// memory to 0x170 (Ampere) or 0x160 (Turing RTX), so NGX and Streamline admit
+// the architecture. No NVIDIA file, driver or Streamline code is modified.
 namespace ampere_provider_arch
 {
 inline constexpr uint32_t kAdaArchitecture = 0x190;
 inline constexpr uint32_t kAmpereArchitecture = 0x170;
+inline constexpr uint32_t kTuringArchitecture = 0x160;
 inline constexpr uint32_t kFrameGenerationFeature = 0x0B;
 inline constexpr char kArchitectureExport[] = "NVSDK_NGX_GetGPUArchitecture";
 inline constexpr char kRequirementsExport[] = "NVSDK_NGX_D3D12_GetFeatureRequirements";
+inline constexpr char kVulkanRequirementsExport[] = "NVSDK_NGX_VULKAN_GetFeatureRequirements";
 
 // mov eax, imm32; ret
 constexpr bool ArchitectureExportIs(const uint8_t* code, uint32_t architecture) noexcept
@@ -43,6 +48,13 @@ constexpr bool IsAmpereRtx(uint32_t architecture, uint32_t implementation) noexc
             || implementation == 6 || implementation == 7);
 }
 
+constexpr bool IsTuringRtx(uint32_t architecture, uint32_t implementation) noexcept
+{
+    // TU102/104/106 have tensor cores; TU116/117 (GTX 16) do not.
+    return architecture == kTuringArchitecture && (implementation == 2 || implementation == 4 || implementation == 6);
+}
+constexpr bool IsTranslatedRtx(uint32_t architecture, uint32_t implementation) noexcept
+{ return IsAmpereRtx(architecture, implementation) || IsTuringRtx(architecture, implementation); }
 static_assert(IsAmpereRtx(0x170, 2) && IsAmpereRtx(0x170, 7));
 static_assert(!IsAmpereRtx(0x170, 0) && !IsAmpereRtx(0x170, 0xB) && !IsAmpereRtx(0x190, 2));
 
@@ -65,10 +77,24 @@ enum class Outcome : uint32_t
 };
 const char* OutcomeName(Outcome outcome) noexcept;
 
-// Detects an RTX 30 GPU through NVAPI and arms the declaration when one is
+// The Vulkan record is optional: a provider without the export, or with an
+// unrecognized one, keeps its D3D12 declaration. A Vulkan host on RTX 30 also
+// needs eDeclared or eAlreadyDeclared here.
+enum class VulkanOutcome : uint32_t
+{
+    eNotChecked = 0,
+    eDeclared = 1,
+    eAlreadyDeclared = 2,
+    eAbsent = 3,
+    eShapeMismatch = 4,
+    ePublicationFailed = 5,
+};
+const char* VulkanOutcomeName(VulkanOutcome outcome) noexcept;
+
+// Detects an RTX 20/30 GPU through NVAPI and arms the declaration when one is
 // present. Loads nvapi64.dll: never call this under the loader lock.
 bool DetectAndArm() noexcept;
-// Arms the declaration for an established RTX 30 GPU (IsAmpereRtx). Used by
+// Arms the declaration for an established RTX GPU (IsTranslatedRtx). Used by
 // DetectAndArm after its NVAPI check, and directly by validation harnesses.
 void Arm(uint32_t architecture, uint32_t implementation) noexcept;
 bool Armed() noexcept;
@@ -94,6 +120,11 @@ struct Snapshot
     uint64_t publicationFailures = 0;
     Outcome last = Outcome::eNotArmed;
     HMODULE lastModule = nullptr;
+    VulkanOutcome lastVulkan = VulkanOutcome::eNotChecked;
+    uint64_t vulkanDeclared = 0;
+    // Detection's NVAPI ids taken from the driver implementation's factory
+    // (adapter_discovery::NvapiTargets::redirected); log evidence only.
+    uint32_t nvapiRedirected = 0;
 };
 Snapshot Read() noexcept;
 }

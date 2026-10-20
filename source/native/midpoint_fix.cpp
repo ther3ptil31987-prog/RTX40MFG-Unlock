@@ -1,7 +1,8 @@
 #include "midpoint_fix.h"
+#include "provider_image.h"
+#include "vulkan_physical_device.h"
+#include "sha256_util.h"
 #include "dlssg_provider_policy.h"
-#include "output_pull_experiment.h"
-#include "prev2curr_experiment.h"
 
 #include <bcrypt.h>
 #include <d3d12.h>
@@ -21,6 +22,15 @@ namespace midpoint_fix
 {
 namespace
 {
+using provider_image::SameName;
+using provider_image::SafeCopy;
+using provider_image::SafeRead;
+using provider_image::ReadU16;
+using provider_image::ReadU32;
+using provider_image::ReadU64;
+using provider_image::ImageSize;
+using provider_image::FindUniqueBytes;
+using provider_image::PackLuid;
 constexpr size_t kKernelCount = 25;
 // DLSS-G 310.9.16 registers BlendCandidatesFGLite (Preset C) at slot 1: 26 named kernels.
 constexpr size_t kMaximumKernelCount = 26;
@@ -231,13 +241,6 @@ constexpr TemporalProviderProfile k310916TemporalProfile{
     15,
 };
 
-constexpr bool SameName(const char* a, const char* b) noexcept
-{
-    if (!a || !b) return false;
-    for (; *a || *b; ++a, ++b)
-        if (*a != *b) return false;
-    return true;
-}
 
 static_assert([] {
     if (!SameName(k310916KernelNames[0], k3109KernelNames[0])
@@ -353,99 +356,17 @@ void Log(const wchar_t* format, ...) noexcept
     callback(message);
 }
 
-bool SafeCopy(void* destination, const void* source, size_t bytes) noexcept
-{
-    if (!destination || !source || bytes == 0)
-        return false;
-    __try
-    {
-        std::memcpy(destination, source, bytes);
-        return true;
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER)
-    {
-        return false;
-    }
-}
 
-template <typename T>
-bool SafeRead(uintptr_t address, T& value) noexcept
-{
-    return SafeCopy(&value, reinterpret_cast<const void*>(address),
-        sizeof(value));
-}
 
-uint16_t ReadU16(const uint8_t* bytes) noexcept
-{
-    uint16_t value = 0;
-    std::memcpy(&value, bytes, sizeof(value));
-    return value;
-}
 
-uint32_t ReadU32(const uint8_t* bytes) noexcept
-{
-    uint32_t value = 0;
-    std::memcpy(&value, bytes, sizeof(value));
-    return value;
-}
 
-uint64_t ReadU64(const uint8_t* bytes) noexcept
-{
-    uint64_t value = 0;
-    std::memcpy(&value, bytes, sizeof(value));
-    return value;
-}
 
 bool Sha256Equals(const uint8_t* bytes, size_t count,
     const char* expected) noexcept
 {
-    if (!bytes || count == 0 || count > ULONG_MAX || !expected
-        || std::strlen(expected) != 64)
-        return false;
-
-    BCRYPT_ALG_HANDLE algorithm = nullptr;
-    std::array<uint8_t, 32> digest{};
-    NTSTATUS status = BCryptOpenAlgorithmProvider(&algorithm,
-        BCRYPT_SHA256_ALGORITHM, nullptr, 0);
-    if (status >= 0)
-    {
-        status = BCryptHash(algorithm, nullptr, 0,
-            const_cast<PUCHAR>(bytes), static_cast<ULONG>(count),
-            digest.data(), static_cast<ULONG>(digest.size()));
-    }
-    if (algorithm)
-        BCryptCloseAlgorithmProvider(algorithm, 0);
-    if (status < 0)
-        return false;
-
-    static constexpr char kDigits[] = "0123456789ABCDEF";
-    for (size_t index = 0; index < digest.size(); ++index)
-    {
-        if (expected[index * 2] != kDigits[digest[index] >> 4]
-            || expected[index * 2 + 1] != kDigits[digest[index] & 0x0F])
-            return false;
-    }
-    return true;
+    return sha256_util::EqualsUpperHex(bytes, count, expected, ULONG_MAX);
 }
 
-bool ImageSize(HMODULE module, uint32_t& imageSize) noexcept
-{
-    imageSize = 0;
-    const uintptr_t base = reinterpret_cast<uintptr_t>(module);
-    IMAGE_DOS_HEADER dos{};
-    if (!base || !SafeRead(base, dos) || dos.e_magic != IMAGE_DOS_SIGNATURE
-        || dos.e_lfanew <= 0
-        || static_cast<uintptr_t>(dos.e_lfanew) > UINTPTR_MAX - base)
-        return false;
-    IMAGE_NT_HEADERS64 nt{};
-    if (!SafeRead(base + static_cast<uintptr_t>(dos.e_lfanew), nt)
-        || nt.Signature != IMAGE_NT_SIGNATURE
-        || nt.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC
-        || nt.OptionalHeader.SizeOfImage < sizeof(nt))
-        return false;
-    imageSize = nt.OptionalHeader.SizeOfImage;
-    return true;
-}
 
 bool IsReadOnlyImageAddress(HMODULE module, uintptr_t address) noexcept
 {
@@ -681,33 +602,11 @@ bool DecompressNvidiaLz(const uint8_t* input, size_t inputSize,
     return inputOffset == inputSize && outputOffset == outputSize;
 }
 
-size_t FindUniqueBytes(const uint8_t* bytes, size_t count,
-    const char* marker, size_t markerBytes) noexcept
-{
-    if (!bytes || !marker || markerBytes == 0 || markerBytes > count)
-        return SIZE_MAX;
-    size_t match = SIZE_MAX;
-    for (size_t offset = 0; offset + markerBytes <= count; ++offset)
-    {
-        if (std::memcmp(bytes + offset, marker, markerBytes) != 0)
-            continue;
-        if (match != SIZE_MAX)
-            return SIZE_MAX;
-        match = offset;
-    }
-    return match;
-}
-
-#include "interm_scatter_experiment.inl"
 
 bool BuildTemporalFatbin(uint8_t* fatbin, uint8_t* scratch,
     const TemporalProviderProfile& profile, uint32_t& outputBytes,
     Failure& failure) noexcept
 {
-    if (const auto* scatter = SelectedIntermScatterProfile(profile))
-        return BuildIntermScatterFatbin(fatbin, kOutputCapacity, scratch,
-            kScratchCapacity, *scatter, outputBytes, failure);
-
     constexpr size_t kOuterHeaderBytes = 16;
     constexpr size_t kSm120EntryOffset = kOuterHeaderBytes;
     constexpr size_t kSm89HeaderBytes = 104;
@@ -961,44 +860,10 @@ PublishResult PublishPointer(uintptr_t address, uintptr_t expected,
     return {false, true};
 }
 
-uint64_t PackLuid(const LUID& luid) noexcept
-{
-    return static_cast<uint64_t>(luid.LowPart)
-        | (static_cast<uint64_t>(static_cast<uint32_t>(luid.HighPart)) << 32);
-}
 
 bool VerifyAdaAdapter(const LUID& activeLuid, int& major,
     int& minor) noexcept;
 void SetFailure(Failure failure) noexcept;
-
-// Only the prefix consumed by vkGetPhysicalDeviceProperties2 is represented
-// here. Keeping the Vulkan loader dynamic avoids adding a Vulkan SDK/runtime
-// import to the universal core, while the fixed Vulkan ABI offsets are checked
-// below. The opaque properties storage is larger than VkPhysicalDeviceProperties.
-struct VulkanPhysicalDeviceIdProperties
-{
-    uint32_t sType = 1000071004u;
-    uint32_t padding = 0;
-    void* pNext = nullptr;
-    std::array<uint8_t, 16> deviceUuid{};
-    std::array<uint8_t, 16> driverUuid{};
-    std::array<uint8_t, 8> deviceLuid{};
-    uint32_t deviceNodeMask = 0;
-    uint32_t deviceLuidValid = 0;
-};
-
-struct VulkanPhysicalDeviceProperties2
-{
-    uint32_t sType = 1000059001u;
-    uint32_t padding = 0;
-    void* pNext = nullptr;
-    alignas(8) std::array<uint8_t, 1024> properties{};
-};
-
-static_assert(offsetof(VulkanPhysicalDeviceIdProperties, pNext) == 8);
-static_assert(offsetof(VulkanPhysicalDeviceIdProperties, deviceLuid) == 48);
-static_assert(offsetof(VulkanPhysicalDeviceProperties2, pNext) == 8);
-static_assert(offsetof(VulkanPhysicalDeviceProperties2, properties) == 16);
 
 void RejectAdapterUnavailable() noexcept
 {
@@ -1124,54 +989,13 @@ bool ObserveD3D12Device(void* device) noexcept
 
 bool ObserveVulkanPhysicalDevice(void* physicalDevice) noexcept
 {
-    if (!physicalDevice)
-    {
-        RejectAdapterUnavailable();
-        return false;
-    }
-    using GetPhysicalDeviceProperties2 = void (WINAPI*)(
-        void*, VulkanPhysicalDeviceProperties2*);
-    HMODULE vulkan = LoadLibraryExW(L"vulkan-1.dll", nullptr,
-        LOAD_LIBRARY_SEARCH_SYSTEM32);
-    auto* getProperties = vulkan
-        ? reinterpret_cast<GetPhysicalDeviceProperties2>(
-            GetProcAddress(vulkan, "vkGetPhysicalDeviceProperties2"))
-        : nullptr;
-    if (!getProperties && vulkan)
-    {
-        getProperties = reinterpret_cast<GetPhysicalDeviceProperties2>(
-            GetProcAddress(vulkan, "vkGetPhysicalDeviceProperties2KHR"));
-    }
-    if (!getProperties)
-    {
-        if (vulkan)
-            FreeLibrary(vulkan);
-        RejectAdapterUnavailable();
-        return false;
-    }
-
-    VulkanPhysicalDeviceIdProperties identity{};
-    VulkanPhysicalDeviceProperties2 properties{};
-    properties.pNext = &identity;
-    bool queried = false;
-    __try
-    {
-        getProperties(physicalDevice, &properties);
-        queried = identity.deviceLuidValid != 0;
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER)
-    {
-        queried = false;
-    }
-    FreeLibrary(vulkan);
-    if (!queried)
-    {
-        RejectAdapterUnavailable();
-        return false;
-    }
-
+    // A reported zero LUID still goes to the adapter verification.
     LUID luid{};
-    std::memcpy(&luid, identity.deviceLuid.data(), sizeof(luid));
+    if (!vulkan_physical_device::QueryReportedLuid(physicalDevice, luid))
+    {
+        RejectAdapterUnavailable();
+        return false;
+    }
     return ObserveAdapterLuid(luid, L"Vulkan");
 }
 
@@ -1241,9 +1065,7 @@ bool PatchProvider(HMODULE module, const wchar_t* suppliedPath) noexcept
         ProfileForVersion(providerVersion);
     if (!profile)
         return fail(Failure::eProviderVersion);
-    const auto* scatterProfile = SelectedIntermScatterProfile(*profile);
-    const char* const outputSha256 = scatterProfile
-        ? scatterProfile->outputSha256 : profile->outputFatbinSha256;
+    const char* const outputSha256 = profile->outputFatbinSha256;
     uint32_t imageSize = 0;
     if (!ImageSize(module, imageSize))
         return fail(Failure::eProviderLayout);
@@ -1262,10 +1084,6 @@ bool PatchProvider(HMODULE module, const wchar_t* suppliedPath) noexcept
         || originalDescriptor < base || originalDescriptor > end - kDescriptorBytes
         || !SafeCopy(descriptor.data(),
             reinterpret_cast<const void*>(originalDescriptor), descriptor.size()))
-        return fail(Failure::eProviderLayout);
-    if (scatterProfile && (ReadU32(descriptor.data() + 32) != 324
-        || ReadU32(descriptor.data() + 36) != 1
-        || ReadU32(descriptor.data() + 40) != 1))
         return fail(Failure::eProviderLayout);
     uintptr_t originalFatbin = 0;
     uint32_t suppliedSize = 0;
@@ -1363,25 +1181,11 @@ bool PatchProvider(HMODULE module, const wchar_t* suppliedPath) noexcept
     gAllocation = allocation;
     gReady.store(true, std::memory_order_release);
     SetFailure(Failure::eNone);
-#if MFG_UNLOCK_INTERM_SCATTER_EXPERIMENT
-    if (scatterProfile)
-        Log(L"INTERM_SCATTER variant=candidate ready=1 published=1 slot=9 "
-            L"entryRva=0x%zX sourceSha256=%hs selectedSha256=%hs "
-            L"block=324,1,1 temporalOffset=32 provider=%s",
-            descriptorEntry - base, scatterProfile->sourceSha256,
-            outputSha256, path);
-    else
-        Log(L"INTERM_SCATTER variant=baseline ready=0 temporalReady=1 "
-            L"reason=profile-not-covered slot=%zu provider=%s",
-            profile->temporalSlot, path);
-#endif
     Log(L"D157 midpoint fix published at provider RVA 0x%zX: %s",
         static_cast<size_t>(descriptorEntry - base), path);
     return true;
 }
 
-#include "output_pull_experiment.inl"
-#include "prev2curr_experiment.inl"
 #include "output_pull_mask.inl"
 
 uint64_t AdapterLuid() noexcept { return gAdapterLuid.load(std::memory_order_acquire); }

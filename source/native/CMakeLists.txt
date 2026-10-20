@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(RTX40MFGNative VERSION 1.5.0.937 LANGUAGES C CXX ASM_MASM)
+project(RTX40MFGNative VERSION 1.6.1.1021 LANGUAGES C CXX ASM_MASM)
 option(MFG_UNLOCK_OVERLAY_SKIP_GPU_WORK "Isolated comparison: keep proxies/input but skip UI GPU work" OFF)
 option(MFG_UNLOCK_NGX_CREATE_RESULT_DIAGNOSTICS "Bounded NGX runtime Create results without DRED or new hooks" OFF)
 option(MFG_UNLOCK_GPU_FAULT_CAPTURE "Isolated local DRED and NGX result diagnostics" OFF)
@@ -39,66 +39,39 @@ option(MFG_UNLOCK_OUTPUT_PULL_MASK_OCCUPANCY
 if(MFG_UNLOCK_OUTPUT_PULL_MASK_OCCUPANCY AND NOT MFG_UNLOCK_OUTPUT_PULL_MASK_ONLY)
     message(FATAL_ERROR "The OutputPull mask occupancy candidate requires the mask-only path")
 endif()
-option(MFG_UNLOCK_OUTPUT_PULL_EXPERIMENT
-    "Use the exact-profile OutputPull backport plus six-block occupancy hint" OFF)
-if(MFG_UNLOCK_OUTPUT_PULL_MASK_ONLY AND MFG_UNLOCK_OUTPUT_PULL_EXPERIMENT)
-    message(FATAL_ERROR "Do not enable two publishers for the OutputPull descriptor")
-endif()
-option(MFG_UNLOCK_OUTPUT_PULL_TELEMETRY
-    "Write low-overhead OutputPull A/B provenance and FG activity telemetry" OFF)
-option(MFG_UNLOCK_PREV2CURR_EXPERIMENT
-    "Add the exact-profile Prev2CurrUnpackPull backport to the OutputPull experiment" OFF)
-if(MFG_UNLOCK_PREV2CURR_EXPERIMENT AND NOT MFG_UNLOCK_OUTPUT_PULL_EXPERIMENT)
-    message(FATAL_ERROR "The Prev2Curr experiment requires the OutputPull candidate")
-endif()
-option(MFG_UNLOCK_INTERM_SCATTER_EXPERIMENT
-    "Use the full exact-profile temporal scatter backport with both pull experiments" OFF)
-if(MFG_UNLOCK_INTERM_SCATTER_EXPERIMENT AND
-    (NOT MFG_UNLOCK_OUTPUT_PULL_EXPERIMENT OR NOT MFG_UNLOCK_PREV2CURR_EXPERIMENT))
-    message(FATAL_ERROR "The temporal scatter experiment requires the OutputPull and Prev2Curr candidates")
-endif()
 set(IMGUI_ROOT "" CACHE PATH
     "Path to the Dear ImGui source tree used by that ReShade version")
 
-option(MFG_UNLOCK_RUNTIME_GPU_SELECTION "Build one renamable Ada and experimental Ampere module" ON)
-if(NOT MFG_UNLOCK_RUNTIME_GPU_SELECTION)
-    message(FATAL_ERROR "This isolated unified source requires MFG_UNLOCK_RUNTIME_GPU_SELECTION=ON")
-endif()
-if(MFG_UNLOCK_OUTPUT_PULL_EXPERIMENT OR MFG_UNLOCK_OUTPUT_PULL_TELEMETRY
-   OR MFG_UNLOCK_PREV2CURR_EXPERIMENT OR MFG_UNLOCK_INTERM_SCATTER_EXPERIMENT)
-    message(FATAL_ERROR "Keep kernel experiments out of the unified build")
-endif()
 include(ampere_native_cache.cmake)
 if(NOT MFG_AMPERE_EMBEDDED_KERNELS)
     message(FATAL_ERROR "The unified distribution requires embedded SM86 kernels")
 endif()
-add_compile_definitions(MFG_UNLOCK_RUNTIME_GPU_SELECTION=1 MFG_UNLOCK_AMPERE_MFG=0)
 
 set(MFG_UNLOCK_CORE_SOURCES
     patcher.cpp
     optiscaler_host.cpp
     midpoint_fix.cpp
+    blackwell_gpu.cpp
     gpu_dispatch.cpp
     ampere_gpu.cpp
     ampere_cuda_program.cpp
     ampere_native_cache.cpp
     ampere_mask_transform.cpp
     ampere_backend.cpp
+    ampere_flip_metering.cpp
     ampere_wrapper_capacity.cpp
     ampere_provider_arch.cpp
     dlssg_provider_selection.cpp
     dlssg_provider_policy.cpp
     dlssg_preset.cpp
+    dlss_sr.cpp
     reflex_control.cpp
     vsync_control.cpp
     entry_detour.cpp
     entry_detour.asm
     nvidia_mfg_policy.cpp
     temporal_interval_trace.cpp
-    hudless_probe.cpp
-    hudless_visualizer.cpp
     fault_capture.cpp
-    output_pull_telemetry.cpp
 )
 
 option(MFG_UNLOCK_BUILD_SINGLE_MODULE "Build integrated backend and ImGui UI" ON)
@@ -130,6 +103,12 @@ if(MFG_UNLOCK_BUILD_SINGLE_MODULE)
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
         generate_build_inputs.py proxy_exports.txt generated_sha256.json ui_color.frag
         "${IMGUI_ROOT}/backends/imgui_impl_dx12.cpp" "${GLSLANG_VALIDATOR}")
+    # Menu translations: every locale/<code>.po is validated and compiled in (locale/README.md).
+    execute_process(COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/generate_locale.py" generate
+        --locale "${CMAKE_CURRENT_SOURCE_DIR}/locale" --output "${MFG_GENERATED}"
+        COMMAND_ERROR_IS_FATAL ANY)
+    file(GLOB MFG_LOCALE_CATALOGS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/locale/*.po")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS generate_locale.py ${MFG_LOCALE_CATALOGS})
     include_directories("${MFG_GENERATED}")
     set(MFG_XESS_SOURCES)
     set(MFG_XESS_RESOURCES)
@@ -156,13 +135,30 @@ if(MFG_UNLOCK_BUILD_SINGLE_MODULE)
             --dxc "${MFG_DXC}" --source "${CMAKE_CURRENT_SOURCE_DIR}" --output "${MFG_GENERATED}"
             COMMAND_ERROR_IS_FATAL ANY)
         set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-            xess/generate_xess_shaders.py xess/port/splat_motion_aware.hlsl)
+            xess/generate_xess_shaders.py xess/port/splat_motion_aware.hlsl xess/port/unet_conv.hlsl)
+        # V1.5.1 tensorcore.1: the ported model's int8 layers as CUDA kernels (xess/cuda), compiled by the pinned
+        # CUDA Toolkit 13.2 nvcc in the build's MSVC toolset environment; the generator pins compiler and output.
+        set(MFG_CUDA_ROOT "" CACHE PATH "CUDA Toolkit 13.2 directory (bin/nvcc.exe) for the XeFG tensor-core kernels")
+        if(NOT EXISTS "${MFG_CUDA_ROOT}/bin/nvcc.exe")
+            message(FATAL_ERROR "Set MFG_CUDA_ROOT to the pinned CUDA Toolkit 13.2")
+        endif()
+        string(REGEX MATCH "VCToolsVersion=([0-9.]+)" MFG_VC_TOOLS_MATCH "${CMAKE_VS_GLOBALS}")
+        if(NOT CMAKE_MATCH_1 OR NOT CMAKE_GENERATOR_INSTANCE)
+            message(FATAL_ERROR "The XeFG tensor-core kernels need CMAKE_GENERATOR_INSTANCE and VCToolsVersion (build.ps1 sets both)")
+        endif()
+        execute_process(COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/xess/cuda/generate_cuda_layers.py"
+            --nvcc "${MFG_CUDA_ROOT}/bin/nvcc.exe" --vcvars "${CMAKE_GENERATOR_INSTANCE}/VC/Auxiliary/Build/vcvars64.bat"
+            --vcvars-ver "${CMAKE_MATCH_1}" --source "${CMAKE_CURRENT_SOURCE_DIR}" --output "${MFG_GENERATED}"
+            COMMAND_ERROR_IS_FATAL ANY)
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+            xess/cuda/generate_cuda_layers.py xess/cuda/xefg_cuda_layers.cu xess/cuda/xefg_cuda_params.h)
         # beta.8: XeSS MFG under OptiScaler only (no standalone route, Reflex bridge or Intel native control).
         set(MFG_XESS_SOURCES
             xess/xess_mod.cpp xess/universal_hooks.cpp xess/internal_api_guards.asm
             xess/sdk_pacing.cpp xess/game_profile.cpp xess/runtime_payload.cpp xess/xess_runtime.cpp
-            xess/present_capture.cpp xess/host_unlock.cpp xess/motion_fill.cpp xess/hudless_match.cpp)
-        set(MFG_XESS_RESOURCES "${MFG_GENERATED}/embedded_xess_programs.rc" "${MFG_GENERATED}/embedded_xess_shaders.rc")
+            xess/host_unlock.cpp xess/intel_native.cpp xess/motion_fill.cpp xess/hudless_match.cpp xess/cuda/cuda_route.cpp)
+        set(MFG_XESS_RESOURCES "${MFG_GENERATED}/embedded_xess_programs.rc" "${MFG_GENERATED}/embedded_xess_shaders.rc"
+            "${MFG_GENERATED}/embedded_xefg_cuda.rc")
     endif()
 
     add_library(MfgSingleMinHook STATIC
@@ -196,7 +192,8 @@ if(MFG_UNLOCK_BUILD_SINGLE_MODULE)
     set(MFG_SINGLE_CORE_SOURCES ${MFG_UNLOCK_CORE_SOURCES})
     add_library(MfgSingleObjects OBJECT ${MFG_SINGLE_CORE_SOURCES}
         single_module.cpp single_overlay.cpp overlay_application_imports.cpp overlay_platform.cpp caller_scoped_import.cpp
-        overlay_dx12.cpp overlay_dxgi_proxy.cpp overlay_adapter_parent.cpp overlay_vulkan.cpp overlay_install.cpp reshade_frontend.cpp
+        overlay_dx12.cpp overlay_dxgi_proxy.cpp overlay_adapter_parent.cpp gpu_name_override.cpp overlay_vulkan.cpp overlay_install.cpp reshade_frontend.cpp
+        localization.cpp
         witcher_dots/geometry.cpp witcher_dots/shader_ir.cpp witcher_dots/shader_cache.cpp
         witcher_dots/game_profile.cpp witcher_dots/game_discovery.cpp
         witcher_dots/gpu_runtime.cpp witcher_dots/witcher_dots.cpp
@@ -215,15 +212,9 @@ if(MFG_UNLOCK_BUILD_SINGLE_MODULE)
         MFG_UNLOCK_OVERLAY_TEST_FAULTS=$<BOOL:${MFG_UNLOCK_OVERLAY_TEST_FAULTS}>
         MFG_UNLOCK_XESS=$<BOOL:${MFG_UNLOCK_XESS}>
         UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN ImTextureID=ImU64
-        MFG_UNLOCK_SINGLE_MODULE_UI=1 MFG_UNLOCK_UNIVERSAL_CONFIG=1
-        MFG_UNLOCK_RESHADE_UI_CLIENT=1 MFG_UNLOCK_V12_UNIVERSAL_UI=1
         VK_USE_PLATFORM_WIN32_KHR=1 VK_NO_PROTOTYPES=1 IMGUI_IMPL_VULKAN_NO_PROTOTYPES=1
         MFG_UNLOCK_OUTPUT_PULL_MASK_ONLY=$<BOOL:${MFG_UNLOCK_OUTPUT_PULL_MASK_ONLY}>
-        MFG_UNLOCK_OUTPUT_PULL_MASK_OCCUPANCY=$<BOOL:${MFG_UNLOCK_OUTPUT_PULL_MASK_OCCUPANCY}>
-        MFG_UNLOCK_OUTPUT_PULL_EXPERIMENT=$<BOOL:${MFG_UNLOCK_OUTPUT_PULL_EXPERIMENT}>
-        MFG_UNLOCK_OUTPUT_PULL_TELEMETRY=$<BOOL:${MFG_UNLOCK_OUTPUT_PULL_TELEMETRY}>
-        MFG_UNLOCK_PREV2CURR_EXPERIMENT=$<BOOL:${MFG_UNLOCK_PREV2CURR_EXPERIMENT}>
-        MFG_UNLOCK_INTERM_SCATTER_EXPERIMENT=$<BOOL:${MFG_UNLOCK_INTERM_SCATTER_EXPERIMENT}>)
+        MFG_UNLOCK_OUTPUT_PULL_MASK_OCCUPANCY=$<BOOL:${MFG_UNLOCK_OUTPUT_PULL_MASK_OCCUPANCY}>)
     target_include_directories(MfgSingleObjects PRIVATE
         "${MFG_GENERATED}"
         "${STREAMLINE_ROOT}/include" "${STREAMLINE_ROOT}/external/ngx-sdk/include"

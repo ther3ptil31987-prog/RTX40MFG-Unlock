@@ -43,11 +43,55 @@ int main()
         && !shared.DuplicateOutput(3919, 2, 3, 0x9C0), "frame, count and index refusals are not reuse");
     shared.Complete(3919, 2, 2, 0x9C0, true);
     Check(shared.failed && !shared.DuplicateOutput(3919, 2, 2, 0x9C0), "a failed interval reports no further reuse");
+    // Flip-metering opt-in: while SetFlipConfig reports metering, an output may
+    // repeat within the interval (RTX 40 / sl.dlss_g 2.14.1: every index shares one).
+    Batch metered;
+    metered.Complete(3919, 2, 1, 0x9C0, true, true);
+    Check(metered.RepeatsOutput(0x9C0) && !metered.RepeatsOutput(0xA00), "a repeat is identified within the interval");
+    Check(metered.Accepts(3919, 2, 2, 0x9C0, true) && !metered.Accepts(3919, 2, 2, 0x9C0, false),
+        "a repeated output is admitted only while flip-metered");
+    metered.Complete(3919, 2, 2, 0x9C0, true, true);
+    Check(!metered.failed && metered.submitted == 2 && metered.BetweenIntervals(), "a flip-metered shared-output interval completes");
+    Check(!metered.RepeatsOutput(0x9C0), "a completed interval reports no repeat");
+    Batch shared6;
+    for (int i = 1; i <= 5; ++i) shared6.Complete(77, 5, i, 0xB00, true, true);
+    Check(!shared6.failed && shared6.submitted == 5 && shared6.generated == 5, "6x with one shared output completes while flip-metered");
+    Batch order;
+    order.Complete(80, 3, 1, 0xC00, true, true);
+    Check(!order.Accepts(80, 3, 3, 0xC00, true) && !order.Accepts(81, 3, 2, 0xC00, true)
+        && !order.Accepts(80, 2, 2, 0xC00, true) && !order.Accepts(80, 3, 2, 0, true),
+        "flip-metered admission keeps index order, frame, count and non-null output rules");
+    order.Complete(80, 3, 2, 0xC00, true, false);
+    Check(order.failed, "a repeat completed without flip metering fails the interval");
+    Check(!order.Accepts(80, 3, 3, 0xC00, true) && order.Accepts(81, 3, 1, 0xC00, true),
+        "a failed interval still recovers only at index 1 of a newer frame");
+    ampere_policy::Feature unobserved{};
+    Check(unobserved.LatchRepeatedOutput(false), "without an observed SetFlipConfig a repeat latches at once");
+    ampere_policy::Feature observed{};
+    bool latchedEarly = false;
+    for (uint32_t i = 0; i < ampere_policy::Feature::kUnmeteredRepeatAllowance; ++i)
+        latchedEarly |= observed.LatchRepeatedOutput(true);
+    Check(!latchedEarly && observed.LatchRepeatedOutput(true),
+        "while observing, unmetered repeats latch only past the allowance");
+    observed.handle = 1;
+    Check(observed.Release(true) && observed.unmeteredRepeats == 0, "release clears the allowance with the feature");
     Batch finished;
     finished.Complete(50, 1, 1, 0x100, true);
     Check(!finished.DuplicateOutput(50, 1, 1, 0x100) && !finished.DuplicateOutput(51, 1, 1, 0x100),
         "2x reusing its surface on the next frame is not reuse");
     Check(!Batch{}.DuplicateOutput(1, 2, 2, 0x100), "an unstarted interval has no reuse");
+    // Presentation buffers are re-acquired only between intervals.
+    Batch boundary;
+    Check(boundary.BetweenIntervals(), "before the first interval no interval is in progress");
+    boundary.Complete(60, 3, 1, 0x100, true);
+    Check(!boundary.BetweenIntervals(), "a started interval is in progress");
+    boundary.Complete(60, 3, 2, 0x200, true);
+    Check(!boundary.BetweenIntervals(), "a partly submitted interval is in progress");
+    boundary.Complete(60, 3, 3, 0x300, true);
+    Check(boundary.BetweenIntervals(), "a completed interval is not in progress");
+    boundary.Complete(61, 3, 1, 0x100, true);
+    boundary.Fail(61, 3, 2);
+    Check(boundary.BetweenIntervals(), "a failed interval is not in progress");
     ampere_policy::Feature latched{};
     Check(!latched.outputReuseLatched, "a new feature starts unlatched");
     ampere_policy::Feature feature{};

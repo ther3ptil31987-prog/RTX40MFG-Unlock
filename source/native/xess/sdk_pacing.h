@@ -15,29 +15,27 @@ bool Install(HMODULE provider, std::string& failure) noexcept;
 // Called under the backend's context lock after a successful SDK initialization;
 // presentation callbacks never take that context lock. Plain owner: extra outputs go
 // through the SDK's own pacing wait; deadlines follow the DLSS-G batch interval
-// (sdk_pacing_dlssg.h). observe (diagnostic capture): the presentation queue and the
-// capture-only Present1 slot are resolved, so the final-present capture sees this owner's
-// outputs. Pacing and the native swap chain's buffer count are unchanged either way.
-bool Register(void* handle, uint64_t generation, ID3D12Device* device, std::string& failure, bool observe = false) noexcept;
-// dev.37 diagnostic final-present capture (xess/present_capture.h). beforeOutput runs for
-// every native Present of an observed owner, on the presenting thread, before the SDK's
-// native call: eFirst/eExtra/eReal are the outputs of a generating batch (first opens it,
-// real closes it); eOther is any other Present on that presenter (frame generation off).
-// queue is the SDK's presentation queue; presentId the high half of the SDK frame value,
-// which is the XeLL PRESENT_START frame ID XeFG read for the batch, not the game's
-// SetPresentId value (dev.35 Witcher log: 2146 vs 2). beforePresent1 runs right before the
-// owner's native swap chain Present1 (not a test Present) reaches DXGI's own Present1 or,
-// on a layered swap chain (dev.49, OptiScaler), the layer's, with that swap chain.
-enum class OutputKind : uint32_t { eFirst = 0, eExtra = 1, eReal = 2, eOther = 3 };
-struct PresentCaptureHooks
-{
-    void (*beforeOutput)(OutputKind kind, uint32_t presentId, ID3D12CommandQueue* queue) noexcept;
-    void (*beforePresent1)(IDXGISwapChain1* swapchain) noexcept;
-};
-// The table must stay valid for the process lifetime; nullptr stops the calls.
-void SetPresentCapture(const PresentCaptureHooks* hooks) noexcept;
+// (sdk_pacing_dlssg.h). The native swap chain's buffer count is unchanged. flipmeter.1:
+// the SDK's presentation queue is also resolved for flip metering; without it the
+// owner keeps plain pacing (log flip_metering_queue).
+bool Register(void* handle, uint64_t generation, ID3D12Device* device, std::string& failure) noexcept;
 // Clears the owner's DLSS-G batch-interval history on an accepted enable/count/resize transition.
 void Reset(void* handle, uint64_t generation) noexcept;
 // The SDK has joined its presenter threads before a successful Destroy returns.
 void Unregister(void* handle, uint64_t generation) noexcept;
+// flipmeter.1 (test build): NVIDIA driver flip metering for the plain owner, as sl.dlss_g uses it
+// (presentFrame -> setFlipConfig, 2.14.1 0x5F040). Right before the first Present of each batch the
+// SDK's presentation queue gets NvAPI_D3D12_SetFlipConfig with nFramesPerBatch = presented = the
+// batch's outputs and timePerBatchMs = the DLSS-G batch-interval estimate (sdk_pacing_dlssg.h); any
+// other Present on that presenter (frame generation off) turns it off again. While the driver accepts
+// it with independent flip, each deadline after the batch's first output follows the configured
+// spacing and is released innerLeadNs early, so the display hardware, not the presenting thread's
+// wake-up, places the flip. setFlipConfig: the NVIDIA driver's NvAPI_D3D12_SetFlipConfig, resolved by
+// the caller on an NVIDIA adapter (never a fakenvapi); nullptr keeps the path off. enabled: the user's
+// switch, which Page Up toggles live (logged as flip_metering_toggle) after SetFlipToggleHotkey(true).
+using SetFlipConfigFunction = int (__cdecl*)(IUnknown* queue, UINT vidPnSourceId, void* config);
+void SetFlipMetering(SetFlipConfigFunction setFlipConfig, bool enabled, int64_t innerLeadNs) noexcept;
+// V1.5.1: Page Up toggles the switch live only after the user's opt-in (OptiScaler.ini [XeFG]
+// XeFGFlipMeteringHotkey = on); off by default, as Page Up is also OptiScaler's FPS overlay key.
+void SetFlipToggleHotkey(bool enabled) noexcept;
 }

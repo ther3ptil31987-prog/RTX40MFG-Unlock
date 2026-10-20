@@ -14,7 +14,7 @@ constexpr D3D12_RESOURCE_STATES kTextureState = D3D12_RESOURCE_STATE_NON_PIXEL_S
     | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE; // the game's own motion tag state (192)
 constexpr UINT kConstants = 24;
 
-// Compiled at run time by the system compiler (no link dependency), as hudless_visualizer does.
+// Compiled at run time by the system compiler (no link dependency).
 // Root: b0 constants, t0 depth (plane 0, R32 rows), t1 game motion (RGBA16F rows), u0 our motion.
 constexpr char kShader[] = R"(
 cbuffer Fill : register(b0)
@@ -377,8 +377,7 @@ bool Filler::OnMotion(ID3D12GraphicsCommandList* list, uint32_t frame, const xef
     catch (...) { reason = "exception"; return false; }
 }
 
-bool Filler::Submit(uint32_t& frame, xefg_swapchain_d3d12_resource_data_t& tag, const Capture& capture,
-    const char*& reason) noexcept
+bool Filler::Submit(uint32_t& frame, xefg_swapchain_d3d12_resource_data_t& tag, const char*& reason) noexcept
 {
     reason = nullptr;
     if (!pending_ || !current_) { reason = "nothing_pending"; return false; }
@@ -427,7 +426,6 @@ bool Filler::Submit(uint32_t& frame, xefg_swapchain_d3d12_resource_data_t& tag, 
         tag.resourceBase = slot.base; tag.resourceSize = slot.size;
         tag.pResource = slot.texture.Get();
         tag.incomingState = kTextureState;
-        if (capture) capture(list, frame, tag);
         if (FAILED(list->Close())) { broken_ = true; reason = "list_close"; return false; }
         ID3D12CommandList* lists[] = {list};
         queue_->ExecuteCommandLists(1, lists);

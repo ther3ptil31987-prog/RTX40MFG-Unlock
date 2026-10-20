@@ -1,0 +1,778 @@
+# MFG Unlocker menu, Simplified Chinese.
+# Fonts: Microsoft YaHei UI (msyh.ttc face 1), else SimSun; both ship with Windows.
+msgid ""
+msgstr ""
+"Project-Id-Version: MFG Unlocker\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"X-MFG-Native-Name: 简体中文\n"
+"X-MFG-English-Name: Simplified Chinese\n"
+"X-MFG-Match: zh-CN zh-SG zh-Hans\n"
+"X-MFG-Fonts: msyh.ttc:1 simsun.ttc:0\n"
+
+msgid "Auto (%s)"
+msgstr "自动（%s）"
+
+msgid "Menu language"
+msgstr "菜单语言"
+
+msgid "Pin"
+msgstr "固定"
+
+msgid ""
+"Keeps this panel on screen, see-through and click-through.\n"
+"%s brings the menu back."
+msgstr ""
+"将此面板固定在屏幕上（半透明、鼠标穿透）。\n"
+"按 %s 重新打开菜单。"
+
+msgid "Pinned  |  %s brings the menu back"
+msgstr "已固定  |  按 %s 重新打开菜单"
+
+msgid "Menu key: %s"
+msgstr "菜单键：%s"
+
+msgid "Press a key... Esc cancels"
+msgstr "请按任意键…（Esc 取消）"
+
+msgid "Cancel"
+msgstr "取消"
+
+msgid "Change key"
+msgstr "更改按键"
+
+msgid "The new shortcut works for this session, but could not be saved."
+msgstr "新快捷键仅在本次运行中有效，未能保存到配置文件。"
+
+msgid "The language works for this session, but could not be saved."
+msgstr "语言设置仅在本次运行中有效，未能保存到配置文件。"
+
+msgid "MFG Unlocker  |  %s opens the menu"
+msgstr "MFG Unlocker  |  按 %s 打开菜单"
+
+msgid ""
+"Shows the real and DLSS frame rates in the top-left corner\n"
+"while the menu is closed. Saved for the next launch."
+msgstr ""
+"菜单关闭时在左上角显示真实帧率和 DLSS 帧率。\n"
+"下次启动时保留此设置。"
+
+msgid "DLSS-G preset"
+msgstr "DLSS-G 预设"
+
+msgid "Original"
+msgstr "默认"
+
+msgid "observed"
+msgstr "已检测到"
+
+msgid "waiting for the provider"
+msgstr "正在等待 DLSS-G 读取预设"
+
+msgid "Preset %s"
+msgstr "预设 %s"
+
+msgid "Game / driver"
+msgstr "游戏 / 驱动"
+
+msgid "managed by the game or driver"
+msgstr "由游戏或驱动管理"
+
+msgid "needs DLSS-G 310.9.16; game / driver in use"
+msgstr "需要 DLSS-G 310.9.16；当前使用游戏 / 驱动预设"
+
+msgid "override supplied"
+msgstr "已应用覆盖"
+
+msgid "override unavailable"
+msgstr "覆盖不可用"
+
+msgid "This DLSS-G provider supports its original preset only. Preset B stays saved for providers that support it."
+msgstr "此 DLSS-G 版本仅支持其默认预设。预设 B 会继续保存，供支持它的 DLSS-G 版本使用。"
+
+msgid "This DLSS-G provider supports its original preset only."
+msgstr "此 DLSS-G 版本仅支持其默认预设。"
+
+msgid "Restarting frame generation with the new preset..."
+msgstr "正在使用新预设重启帧生成…"
+
+msgid "The game / driver preset is saved. Restart the game to use it."
+msgstr "游戏 / 驱动预设已保存。重启游戏后生效。"
+
+msgid "Preset %s is saved. Restart the game to use it."
+msgstr "预设 %s 已保存。重启游戏后生效。"
+
+msgid "Preset C needs DLSS-G 310.9.16 or newer (NVIDIA app). This game's frame generation keeps the game / driver preset."
+msgstr "预设 C 需要 DLSS-G 310.9.16 或更高版本（可通过 NVIDIA App 获取）。此游戏的帧生成将继续使用游戏 / 驱动预设。"
+
+msgid "The preset selection could not be saved."
+msgstr "无法保存预设选择。"
+
+msgid "Game / driver default"
+msgstr "游戏 / 驱动默认"
+
+msgid "Preset C (performance)"
+msgstr "预设 C（性能）"
+
+msgid "Original preset"
+msgstr "默认预设"
+
+msgid ""
+"The DLSS frame generation model preset.\n"
+"Preset C is NVIDIA's lighter Frame Generation mode. It needs DLSS-G 310.9.16 or newer,\n"
+"from the NVIDIA app's DLSS override; other providers keep the game / driver preset.\n"
+"A change made while frame generation runs restarts it once, with a short pause;\n"
+"some older DLSS-G versions apply it after a game restart."
+msgstr ""
+"DLSS 帧生成模型预设。\n"
+"预设 C 是 NVIDIA 较轻量的帧生成模式，需要 DLSS-G 310.9.16 或更高版本，\n"
+"可通过 NVIDIA App 的“DLSS 优设”获取；其他 DLSS-G 版本沿用游戏 / 驱动预设。\n"
+"帧生成运行时更改会让帧生成重启一次，画面短暂停顿；\n"
+"部分较旧的 DLSS-G 版本需重启游戏后生效。"
+
+msgid "Performance"
+msgstr "性能"
+
+msgid "Balanced"
+msgstr "平衡"
+
+msgid "Quality"
+msgstr "质量"
+
+msgid "Ultra Performance"
+msgstr "超级性能"
+
+msgid "Ultra Quality"
+msgstr "超高质量"
+
+msgid "DLSS RR"
+msgstr "DLSS RR"
+
+msgid "DLSS SR"
+msgstr "DLSS SR"
+
+msgid "RR preset"
+msgstr "RR 预设"
+
+msgid "SR preset"
+msgstr "SR 预设"
+
+msgid "Running"
+msgstr "运行中"
+
+msgid "Idle"
+msgstr "空闲"
+
+msgid "not evaluated in the last second"
+msgstr "过去一秒内未运行"
+
+msgid "Not detected"
+msgstr "未检测到"
+
+msgid "waiting for the game to create DLSS"
+msgstr "正在等待游戏创建 DLSS"
+
+msgid "NVIDIA app override: latest"
+msgstr "NVIDIA App 覆盖：最新"
+
+msgid "NVIDIA app override: %s"
+msgstr "NVIDIA App 覆盖：%s"
+
+msgid "sent as the game's preset hint"
+msgstr "作为游戏的预设提示发送"
+
+msgid "game hint: %s"
+msgstr "游戏提示：%s"
+
+msgid "DLSS default for this mode"
+msgstr "此模式的 DLSS 默认值"
+
+msgid ""
+"The DLSS Ray Reconstruction model preset.\n"
+"D is NVIDIA's transformer model; E is the newer transformer model, which games with a\n"
+"depth-of-field guide need. F is NVIDIA's second-generation model (RR2) and needs driver 580\n"
+"or newer; DLSS versions without a preset use their default.\n"
+"A change applies at once while DLSS runs. A preset selected when the game starts also\n"
+"replaces an NVIDIA app preset override for that session."
+msgstr ""
+"DLSS 光线重建模型预设。\n"
+"D 是 NVIDIA 的 Transformer 模型；E 是较新的 Transformer 模型，\n"
+"使用景深引导的游戏需要它。F 是 NVIDIA 的第二代模型（RR2），需要 580\n"
+"或更新的驱动；没有对应预设的 DLSS 版本会使用其默认预设。\n"
+"DLSS 运行时更改会立即生效。游戏启动时已选择的预设\n"
+"还会在该会话中替代 NVIDIA App 的预设覆盖。"
+
+msgid ""
+"The DLSS Super Resolution model preset.\n"
+"K is NVIDIA's transformer model with the best image quality; J is similar with a little\n"
+"less ghosting and more flicker. L and M are the newer transformer presets NVIDIA uses for\n"
+"Ultra Performance and Performance; DLSS versions without them use their default.\n"
+"A change applies at once while DLSS runs. A preset selected when the game starts also\n"
+"replaces an NVIDIA app preset override for that session."
+msgstr ""
+"DLSS 超分辨率模型预设。\n"
+"K 是 NVIDIA 的 Transformer 模型，画质最佳；J 与之类似，\n"
+"拖影略少但闪烁更多。L 和 M 是 NVIDIA 用于超级性能和性能模式的\n"
+"较新 Transformer 预设；没有它们的 DLSS 版本会使用其默认预设。\n"
+"DLSS 运行时更改会立即生效。游戏启动时已选择的预设\n"
+"还会在该会话中替代 NVIDIA App 的预设覆盖。"
+
+msgid "The DLSS RR preset could not be saved."
+msgstr "无法保存 DLSS RR 预设。"
+
+msgid "The DLSS SR preset could not be saved."
+msgstr "无法保存 DLSS SR 预设。"
+
+msgid "The NVIDIA app's DLSS preset override is active in this game session. Restart the game with a preset selected here to switch presets live."
+msgstr "NVIDIA App 的 DLSS 预设覆盖在本次游戏会话中生效。请在此处选择预设后重启游戏，即可在运行时切换预设。"
+
+msgid "The NVIDIA app's DLSS preset override is replaced in this session. It applies again after a restart with Game / driver selected."
+msgstr "NVIDIA App 的 DLSS 预设覆盖在本次会话中已被替换。选择“游戏 / 驱动”并重启后会重新生效。"
+
+msgid "The NVIDIA app's DLSS preset override could not be checked in this session. If one is set, it takes priority."
+msgstr "无法在本次会话中检查 NVIDIA App 的 DLSS 预设覆盖。如已设置，它将优先生效。"
+
+msgid "This game's DLSS cannot change its preset while running. The preset applies the next time the game starts DLSS (change the DLSS quality mode or restart the game)."
+msgstr "此游戏的 DLSS 无法在运行时更改预设。预设将在游戏下次启动 DLSS 时生效（更改 DLSS 质量模式或重启游戏）。"
+
+msgid "DLSS refused the new preset; the previous one stays in use."
+msgstr "DLSS 拒绝了新预设；仍在使用之前的预设。"
+
+msgid "Waiting to release the previous DLSS preset..."
+msgstr "正在等待释放之前的 DLSS 预设…"
+
+msgid "Switching DLSS Ray Reconstruction to the new preset..."
+msgstr "正在将 DLSS 光线重建切换到新预设…"
+
+msgid "Switching DLSS Super Resolution to the new preset..."
+msgstr "正在将 DLSS 超分辨率切换到新预设…"
+
+msgid "Waiting for the game's Reflex plugin."
+msgstr "正在等待游戏的 Reflex 插件。"
+
+msgid "The loaded Reflex plugin version is unsupported."
+msgstr "已加载的 Reflex 插件版本不受支持。"
+
+msgid "Reflex controls are unavailable for this plugin."
+msgstr "此插件不支持 Reflex 控制。"
+
+msgid "The Reflex limit is unavailable for the current FG runtime."
+msgstr "当前帧生成运行时无法使用 Reflex 帧率限制。"
+
+msgid "Waiting for game Reflex settings. Change the game's Reflex setting once to retry."
+msgstr "正在等待游戏的 Reflex 设置。请在游戏中更改一次 Reflex 设置以重试。"
+
+msgid "Waiting for the game's Reflex settings thread."
+msgstr "正在等待游戏的 Reflex 设置线程。"
+
+msgid "Waiting for Reflex availability."
+msgstr "正在检查 Reflex 是否可用。"
+
+msgid "Reflex is unavailable."
+msgstr "Reflex 不可用。"
+
+msgid "Restoring the game's Reflex limit..."
+msgstr "正在恢复游戏的 Reflex 帧率限制…"
+
+msgid "The game rejected the Reflex limit."
+msgstr "游戏拒绝了 Reflex 帧率限制。"
+
+msgid "The game's Reflex settings cannot be safely replayed."
+msgstr "无法安全地重新应用游戏的 Reflex 设置。"
+
+msgid "The Reflex plugin changed. Restart the game."
+msgstr "Reflex 插件已更改。请重启游戏。"
+
+msgid "Waiting for the next safe Reflex update."
+msgstr "正在等待下一个可安全更新 Reflex 的时机。"
+
+msgid "Waiting for the game to accept the Reflex limit."
+msgstr "正在等待游戏接受 Reflex 帧率限制。"
+
+msgid "Game"
+msgstr "游戏"
+
+msgid "Off"
+msgstr "关闭"
+
+msgid "V-Sync"
+msgstr "垂直同步"
+
+msgid ""
+"Off submits the game's frames without V-Sync.\n"
+"NVIDIA Control Panel V-Sync settings take priority."
+msgstr ""
+"“关闭”会在不开启垂直同步的情况下输出游戏画面。\n"
+"NVIDIA 控制面板中的垂直同步设置优先。"
+
+msgid "Reflex FPS limit"
+msgstr "Reflex 帧率限制"
+
+msgid ""
+"Caps the game's frame rate through Reflex.\n"
+"Paused while Dynamic MFG is on; the saved limit is kept."
+msgstr ""
+"通过 Reflex 限制游戏帧率。\n"
+"开启动态 MFG 时暂停；已保存的限制会保留。"
+
+msgid "The Reflex limit is paused while Dynamic MFG is on. The saved limit is kept."
+msgstr "开启动态 MFG 时，Reflex 帧率限制暂停。已保存的限制会保留。"
+
+msgid "The presentation settings could not be saved."
+msgstr "无法保存显示设置。"
+
+msgid "Off not applied"
+msgstr "关闭未生效"
+
+msgid "applies when the game recreates its swapchain"
+msgstr "游戏重新创建交换链后生效"
+
+msgid "the game already presents without V-Sync"
+msgstr "游戏本身已关闭垂直同步"
+
+msgid "Off requested"
+msgstr "已请求关闭"
+
+msgid "not available on this GPU or driver"
+msgstr "此 GPU 或驱动程序不支持"
+
+msgid "game interval %u submitted as 0"
+msgstr "游戏同步间隔 %u 已改为 0"
+
+msgid "the game's last Present was not accepted"
+msgstr "游戏最近一次 Present 未被接受"
+
+msgid "waiting for the game's swapchain"
+msgstr "正在等待游戏的交换链"
+
+msgid "Applying..."
+msgstr "正在应用…"
+
+msgid "Reflex limit"
+msgstr "Reflex 限制"
+
+msgid "accepted"
+msgstr "已接受"
+
+msgid "%d FPS requested"
+msgstr "已请求 %d FPS"
+
+msgid "restoring the game's Reflex limit"
+msgstr "正在恢复游戏的 Reflex 帧率限制"
+
+msgid "paused for Dynamic MFG"
+msgstr "因动态 MFG 暂停"
+
+msgid "Reflex status is temporarily unavailable."
+msgstr "Reflex 状态暂时不可用。"
+
+msgid "Path traced hair"
+msgstr "路径追踪毛发"
+
+msgid "State"
+msgstr "状态"
+
+msgid "Unknown"
+msgstr "未知"
+
+msgid "Disabled"
+msgstr "已禁用"
+
+msgid "Waiting for early device"
+msgstr "正在等待设备初始化"
+
+msgid "Preparing"
+msgstr "正在准备"
+
+msgid "Unsupported game build"
+msgstr "不支持的游戏版本"
+
+msgid "Unsupported GPU"
+msgstr "不支持的 GPU"
+
+msgid "Native LSS"
+msgstr "原生 LSS"
+
+msgid "Unavailable"
+msgstr "不可用"
+
+msgid "Unsupported driver"
+msgstr "不支持的驱动"
+
+msgid "game Path Traced Hair setting"
+msgstr "游戏的路径追踪毛发设置"
+
+msgid "Active"
+msgstr "运行中"
+
+msgid "tracing converted hair"
+msgstr "正在追踪转换后的毛发"
+
+msgid "no hair traced in the last 2 s"
+msgstr "最近 2 秒未追踪毛发"
+
+msgid "Ready"
+msgstr "就绪"
+
+msgid "waiting for game hair"
+msgstr "正在等待游戏毛发"
+
+msgid "Turn it on or off with HairWorks and Path Traced Hair in the game's graphics settings."
+msgstr "在游戏图形设置中通过 HairWorks 和“路径追踪毛发”开启或关闭。"
+
+msgid "Traced hair"
+msgstr "已追踪毛发"
+
+msgid "%s updates"
+msgstr "%s 次更新"
+
+msgid "Builds"
+msgstr "构建"
+
+msgid "Hair diagnostics"
+msgstr "毛发诊断"
+
+msgid "Turn on frame generation in the game's settings (DLSS or XeSS)."
+msgstr "请在游戏设置中开启帧生成（DLSS 或 XeSS）。"
+
+msgid "Turn on frame generation in the game's settings (DLSS)."
+msgstr "请在游戏设置中开启帧生成（DLSS）。"
+
+msgid "Turn on frame generation in the game's settings (XeSS)."
+msgstr "请在游戏设置中开启帧生成（XeSS）。"
+
+msgid "Turn on DLSS or XeSS frame generation in the game's settings."
+msgstr "请在游戏设置中开启 DLSS 或 XeSS 帧生成。"
+
+msgid "Game FG"
+msgstr "游戏帧生成"
+
+msgid "GPU"
+msgstr "GPU"
+
+msgid "Waiting for a supported game GPU"
+msgstr "正在等待游戏使用受支持的 GPU"
+
+msgid "Game FG option"
+msgstr "游戏帧生成选项"
+
+msgid "Unlock"
+msgstr "解锁"
+
+msgid ""
+"For games that hide DLSS Frame Generation on RTX 30 cards, such as Wuthering Waves.\n"
+"The game then sees an NVIDIA GeForce RTX 4090. DLSS, Streamline, the driver and MFG Unlocker\n"
+"keep using your real GPU. The game's recommended settings may assume an RTX 4090.\n"
+"Online games with anti cheat may treat any mod as a risk. Applies after a game restart."
+msgstr ""
+"适用于在 RTX 30 显卡上隐藏 DLSS 帧生成选项的游戏，例如《鸣潮》。\n"
+"启用后，游戏会将显卡识别为 NVIDIA GeForce RTX 4090。DLSS、Streamline、驱动程序和 MFG Unlocker\n"
+"仍使用你的真实 GPU。游戏的推荐画质设置可能会按 RTX 4090 给出。\n"
+"带反作弊的在线游戏可能会将任何模组视为风险。重启游戏后生效。"
+
+msgid "The Game FG option could not be saved."
+msgstr "无法保存游戏帧生成选项。"
+
+msgid "Restart the game to unlock its Frame Generation option."
+msgstr "重启游戏后即可解锁帧生成选项。"
+
+msgid "Restart the game to report your real GPU again."
+msgstr "重启游戏后，游戏将重新识别你的真实 GPU。"
+
+msgid "The Game FG option could not be applied this session. See the log."
+msgstr "游戏帧生成选项未能在本次运行中应用。请查看日志。"
+
+msgid "The game sees an NVIDIA GeForce RTX 4090 this session."
+msgstr "本次运行中，游戏识别到的显卡为 NVIDIA GeForce RTX 4090。"
+
+msgid "This GPU is not an RTX 30 card; the game sees its real name."
+msgstr "此 GPU 不是 RTX 30 显卡；游戏识别到的是其真实型号。"
+
+msgid "MFG Unlocker multi-frame port"
+msgstr "MFG Unlocker 多帧移植模型"
+
+msgid "Intel 2x model"
+msgstr "Intel 2x 模型"
+
+msgid "Frame generation"
+msgstr "帧生成"
+
+msgid "XeSS frame generation support is unavailable in this build."
+msgstr "此版本不支持 XeSS 帧生成。"
+
+msgid "XeSS multi-frame generation needs OptiScaler, with XeFG as its frame generation output. Without it the game's XeSS frame generation runs at Intel's standard 2x."
+msgstr "XeSS 多帧生成需要 OptiScaler，并需将其帧生成输出设为 XeFG。否则，游戏的 XeSS 帧生成只会以 Intel 标准的 2x 运行。"
+
+msgid "XeSS multi-frame generation runs through OptiScaler. Set the frame generation ratio and the MFG model in OptiScaler's menu."
+msgstr "XeSS 多帧生成通过 OptiScaler 运行。请在 OptiScaler 菜单中设置帧生成倍率和 MFG 模型。"
+
+msgid "Display"
+msgstr "显示"
+
+msgid "Off submits the game's frames without V-Sync."
+msgstr "“关闭”会在不开启垂直同步的情况下输出游戏画面。"
+
+msgid "The V-Sync setting could not be saved."
+msgstr "无法保存垂直同步设置。"
+
+msgid "Status"
+msgstr "状态"
+
+msgid "%u generated frames capacity"
+msgstr "可容纳 %u 个生成帧"
+
+msgid "Applied"
+msgstr "已应用"
+
+msgid "Not verified"
+msgstr "未验证"
+
+msgid "Model"
+msgstr "模型"
+
+msgid "Tensor cores"
+msgstr "Tensor Core"
+
+msgid "On"
+msgstr "开启"
+
+msgid "the ported model's int8 layers run as CUDA kernels"
+msgstr "移植模型的 int8 层以 CUDA 内核运行"
+
+msgid "no layer has run yet"
+msgstr "尚未运行任何层"
+
+msgid "XeFGTensorCores = off in OptiScaler.ini"
+msgstr "OptiScaler.ini 中 XeFGTensorCores = off"
+
+msgid "presentation override is not verified"
+msgstr "尚未确认覆盖已生效"
+
+msgid "DLSS multi-frame generation needs an NVIDIA RTX GPU."
+msgstr "DLSS 多帧生成需要 NVIDIA RTX GPU。"
+
+msgid "DLSS multi-frame generation is unavailable on this GPU."
+msgstr "此 GPU 不支持 DLSS 多帧生成。"
+
+msgid "Advanced"
+msgstr "高级"
+
+msgid "XeSS diagnostics"
+msgstr "XeSS 诊断"
+
+msgid "Waiting for status"
+msgstr "正在等待状态"
+
+msgid "Waiting for current backend status. Saved settings are preserved."
+msgstr "正在等待后端的当前状态。已保存的设置会保留。"
+
+msgid "Not connected"
+msgstr "未连接"
+
+msgid "%s backend is not loaded."
+msgstr "%s 后端未加载。"
+
+msgid "The integrated core is unavailable. Check the startup log and restart the game with one %s module."
+msgstr "集成核心不可用。请检查启动日志，并仅使用一个 %s 模块重启游戏。"
+
+msgid "Paused"
+msgstr "已暂停"
+
+msgid "Live"
+msgstr "实时"
+
+msgid "The game changed graphics adapters. Restart the game to select a new GPU."
+msgstr "游戏更换了显卡。请重启游戏以选择新的 GPU。"
+
+msgid "RTX Remix detected. Frame generation and its multiplier are managed in the RTX Remix menu."
+msgstr "检测到 RTX Remix。帧生成及其倍率由 RTX Remix 菜单管理。"
+
+msgid "Provider patch"
+msgstr "DLSS-G 补丁"
+
+msgid "Ready at feature creation"
+msgstr "帧生成初始化时已就绪"
+
+msgid "Waiting for frame generation"
+msgstr "正在等待帧生成"
+
+msgid "5x MFG (experimental)"
+msgstr "5x MFG（实验性）"
+
+msgid "6x MFG (experimental)"
+msgstr "6x MFG（实验性）"
+
+msgid "Follow game"
+msgstr "跟随游戏"
+
+msgid "Mode"
+msgstr "模式"
+
+msgid "MFG mode"
+msgstr "MFG 模式"
+
+msgid ""
+"Follow game uses the game's own frame generation setting.\n"
+"Dynamic adjusts frame generation toward a target frame rate; it does not set a hard FPS limit."
+msgstr ""
+"“跟随游戏”使用游戏自身的帧生成设置。\n"
+"“动态”会自动调整帧生成倍率，使帧率接近目标帧率；不会硬性限制帧率。"
+
+msgid "Dynamic target"
+msgstr "动态目标"
+
+msgid "Display refresh rate"
+msgstr "显示器刷新率"
+
+msgid "Target FPS"
+msgstr "目标帧率"
+
+msgid "Dynamic MFG is unavailable with the current limit or runtime. Its full frame-generation range must fit the limit."
+msgstr "动态 MFG 在当前上限或运行时下不可用。其完整的帧生成倍率范围必须在上限之内。"
+
+msgid "Dynamic selection is saved; waiting for runtime support."
+msgstr "动态选项已保存；正在等待运行时支持。"
+
+msgid "Saved MFG request: %dx (unavailable in this session)"
+msgstr "已保存的 MFG 设置：%dx（本次运行不可用）"
+
+msgid "Request accepted, but the configuration was not saved."
+msgstr "请求已接受，但未能保存到配置文件。"
+
+msgid "The selection could not be applied or saved."
+msgstr "无法应用或保存所选项。"
+
+msgid "Latency and display"
+msgstr "延迟与显示"
+
+msgid "DLSS Ray Reconstruction"
+msgstr "DLSS 光线重建"
+
+msgid "DLSS Super Resolution"
+msgstr "DLSS 超分辨率"
+
+msgid "game intent: unknown"
+msgstr "游戏设置：未知"
+
+msgid "game intent: on"
+msgstr "游戏设置：开启"
+
+msgid "game intent: off"
+msgstr "游戏设置：关闭"
+
+msgid "FG state"
+msgstr "帧生成状态"
+
+msgid "Requested"
+msgstr "已请求"
+
+msgid "Dynamic"
+msgstr "动态"
+
+msgid "Dynamic, %ux"
+msgstr "动态，%ux"
+
+msgid "NVIDIA list unavailable"
+msgstr "NVIDIA 列表不可用"
+
+msgid "NVIDIA lists no MFG for this game"
+msgstr "NVIDIA 未对此游戏开放 MFG"
+
+msgid "game not on NVIDIA's list"
+msgstr "游戏不在 NVIDIA 列表中"
+
+msgid "NVIDIA lists %ux"
+msgstr "NVIDIA 列表：%ux"
+
+msgid "Limit"
+msgstr "上限"
+
+msgid "the current wrapper has no verified MFG override"
+msgstr "当前封装器没有经过验证的 MFG 覆盖"
+
+msgid "%dx (safe fallback)"
+msgstr "%dx（安全回退）"
+
+msgid "Waiting"
+msgstr "等待中"
+
+msgid "for an active DLSS-G wrapper"
+msgstr "尚未检测到正在使用的 DLSS-G 封装器"
+
+msgid "NVIDIA lists ordinary Frame Generation only. The mod keeps its override limit at 2x."
+msgstr "NVIDIA 仅为此游戏开放普通帧生成。本模组会将倍率上限保持在 2x。"
+
+msgid "The listed %ux ceiling requires a compatible runtime. The current limit is %dx."
+msgstr "列表中的 %ux 上限需要兼容的运行时。当前上限为 %dx。"
+
+msgid ""
+"The highest mode the current DLSS-G runtime supports, and the ceiling\n"
+"NVIDIA's override list gives this game."
+msgstr ""
+"当前 DLSS-G 运行时支持的最高模式，\n"
+"以及 NVIDIA 的 DLSS 优设列表为此游戏设定的上限。"
+
+msgid "%.1f real, %.1f DLSS"
+msgstr "真实 %.1f，DLSS %.1f"
+
+msgid "%.1f real, DLSS unavailable"
+msgstr "真实 %.1f，DLSS 不可用"
+
+msgid "Measuring..."
+msgstr "正在测量…"
+
+msgid "DLSS FG off"
+msgstr "DLSS 帧生成已关闭"
+
+msgid "waiting for an accepted Dynamic request"
+msgstr "正在等待动态请求被接受"
+
+msgid "applied: display refresh rate"
+msgstr "已应用：显示器刷新率"
+
+msgid "applied: %.2f FPS"
+msgstr "已应用：%.2f FPS"
+
+msgid "Restart with the matching single-module build. The current status protocol is older than this UI expects."
+msgstr "请使用匹配的单模块版本重启游戏。当前状态协议版本低于此界面的要求。"
+
+msgid "Frame generation stays under the game's control. This wrapper has no verified MFG override support."
+msgstr "帧生成仍由游戏控制。此封装器没有经过验证的 MFG 覆盖支持。"
+
+msgid "DLSS-G activity observed; waiting for the game's FG control calls."
+msgstr "已检测到 DLSS-G 活动；正在等待游戏的帧生成控制调用。"
+
+msgid "Waiting for the game to request frame generation."
+msgstr "正在等待游戏请求帧生成。"
+
+msgid "Waiting for an active DLSS-G pipeline."
+msgstr "正在等待活动的 DLSS-G 管线。"
+
+msgid "Toggle frame generation off then on, or restart the game, to recreate the pipeline with this selection."
+msgstr "请关闭再开启帧生成，或重启游戏，以使用此选项重建管线。"
+
+msgid "Diagnostics"
+msgstr "诊断"
+
+msgid "Status is temporarily unavailable; controls are paused."
+msgstr "状态暂不可用；选项已暂时锁定。"
+
+msgid "FPS status unavailable"
+msgstr "FPS 状态不可用"
+
+msgid "Real -- | DLSS --"
+msgstr "真实 -- | DLSS --"
+
+msgid "Real %.0f | DLSS %.0f"
+msgstr "真实 %.0f | DLSS %.0f"
+
+msgid "Real %.0f | DLSS --"
+msgstr "真实 %.0f | DLSS --"
+
+msgid "Dynamic (unavailable)"
+msgstr "动态（不可用）"
+
+msgid "Dynamic (checking...)"
+msgstr "动态（检查中…）"

@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cwchar>
+#include "ampere_provider_arch.h"
 
 namespace adapter_discovery
 {
@@ -28,7 +29,7 @@ using GetLogical = int(__cdecl*)(void*, void**);
 using GetLogicalInfo = int(__cdecl*)(void*, LogicalGpu*);
 struct Api { Initialize initialize{}; Enumerate enumerate{}; GetArchitecture architecture{}; GetLogical logical{}; GetLogicalInfo info{}; };
 
-inline bool MatchAmpere(const Api& api, const LUID& wanted) noexcept
+inline bool MatchAmpere(const Api& api, const LUID& wanted, uint32_t wantedArchitecture = 0x170) noexcept
 {
     if ((!wanted.LowPart && !wanted.HighPart) || !api.initialize || !api.enumerate
         || !api.architecture || !api.logical || !api.info || api.initialize() != 0) return false;
@@ -52,7 +53,8 @@ inline bool MatchAmpere(const Api& api, const LUID& wanted) noexcept
         Architecture architecture{sizeof(Architecture) | (2u << 16), 0, 0, 0};
         if (api.architecture(physical[i], &architecture) != 0) return false;
         ++matches;
-        ampere = architecture.architecture == 0x170;
+        ampere = architecture.architecture == wantedArchitecture
+            && (wantedArchitecture == 0x170 || ampere_provider_arch::IsTuringRtx(architecture.architecture, architecture.implementation));
     }
     return matches == 1 && ampere;
 }
@@ -78,6 +80,11 @@ struct ModuleReference
     {
         return !module && address && GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
             reinterpret_cast<LPCWSTR>(address), &module);
+    }
+    void Reset() noexcept
+    {
+        if (module) FreeLibrary(module);
+        module = nullptr;
     }
 };
 
@@ -155,13 +162,46 @@ inline bool OwnerFactoryMatches(HMODULE owner, uint32_t id, const void* target) 
     return OwnedCode(owner, reinterpret_cast<void*>(query)) && query(id) == target;
 }
 
-inline bool IsAmpere(const LUID& luid) noexcept
+inline bool NvapiOwnerModule(const wchar_t* systemDirectory, HMODULE module) noexcept
+{
+    std::array<wchar_t, kPathCapacity> path{};
+    const DWORD length = module ? GetModuleFileNameW(module, path.data(), static_cast<DWORD>(path.size())) : 0;
+    return length && length < path.size() && NvapiOwnerPath(systemDirectory, path.data());
+}
+
+// NVAPI entry points for discovery and the references that keep their owners
+// mapped while they are called.
+template<size_t N> struct NvapiTargets
+{
+    static_assert(N >= 1 && N <= 32);
+    ModuleReference dispatcher;
+    std::array<ModuleReference, N> owners;
+    std::array<void*, N> targets{};
+    // Bit i: ids[i] was taken from the driver implementation's own factory
+    // because the dispatcher's factory returned another module's code for it.
+    uint32_t redirected = 0;
+};
+
+// NVAPI is loaded only from System32 and its factory-owned code from the
+// trusted driver store. Recent drivers split the System32 dispatcher and its
+// actual factory-owned code in the driver store: retain that exact owner and
+// prove both factories agree, without accepting an arbitrary RX image.
+//
+// A layer can detour the dispatcher's nvapi_QueryInterface and hand back its
+// own wrapper for selected ids (OptiScaler returns its GetArchInfo hook). Such
+// an id is taken from the factory of the driver-store implementation that owns
+// an earlier id (on 617.42 the dispatcher keeps Initialize; Enumerate and
+// GetArchInfo are nvapi64_impl.dll's). The foreign wrapper is never called,
+// and the implementation must own the code its factory returns. Any other
+// failure resolves nothing.
+template<size_t N>
+bool ResolveNvapi(const std::array<uint32_t, N>& ids, NvapiTargets<N>& resolved) noexcept
 {
     std::array<wchar_t, kPathCapacity> systemDirectory{}, stubPath{}, loadedPath{};
     const UINT systemLength = GetSystemDirectoryW(systemDirectory.data(), static_cast<UINT>(systemDirectory.size()));
     if (!systemLength || systemLength >= systemDirectory.size()
         || swprintf_s(stubPath.data(), stubPath.size(), L"%ls\\nvapi64.dll", systemDirectory.data()) < 0) return false;
-    ModuleReference dispatcher;
+    auto& dispatcher = resolved.dispatcher;
     dispatcher.module = LoadLibraryExW(stubPath.data(), nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (!dispatcher.module) return false;
     // Never be the reference which unmaps NVAPI: hooks other modules placed on
@@ -174,26 +214,45 @@ inline bool IsAmpere(const LUID& luid) noexcept
         || !NvapiOwnerPath(systemDirectory.data(), loadedPath.data(), true)) return false;
     const auto query = reinterpret_cast<QueryInterface>(GetProcAddress(dispatcher.module, "nvapi_QueryInterface"));
     if (!OwnedCode(dispatcher.module, reinterpret_cast<void*>(query))) return false;
-    constexpr std::array<uint32_t, 5> ids{0x0150e828, 0xe5ac921f, 0xd8265d24, 0xadd604d1, 0x842b066e};
-    std::array<void*, ids.size()> targets{};
-    std::array<ModuleReference, ids.size()> owners{};
-    for (size_t i = 0; i < ids.size(); ++i)
+    HMODULE implementation = nullptr;
+    for (size_t i = 0; i < N; ++i)
     {
-        targets[i] = query(ids[i]);
-        if (!owners[i].Acquire(targets[i])) return false;
-        const DWORD ownerLength = GetModuleFileNameW(owners[i].module, loadedPath.data(), static_cast<DWORD>(loadedPath.size()));
-        // Recent drivers split the trusted System32 dispatcher and its actual
-        // factory-owned code in the driver store. Retain that exact owner and
-        // prove both factories agree, without accepting an arbitrary RX image.
-        if (!ownerLength || ownerLength >= loadedPath.size()
-            || !NvapiOwnerPath(systemDirectory.data(), loadedPath.data())
-            || !OwnerFactoryMatches(owners[i].module, ids[i], targets[i])
-            || !OwnedCode(dispatcher.module, reinterpret_cast<void*>(query)) || query(ids[i]) != targets[i]) return false;
+        auto& owner = resolved.owners[i];
+        void* target = query(ids[i]);
+        if (!target) return false;
+        if (owner.Acquire(target) && NvapiOwnerModule(systemDirectory.data(), owner.module))
+        {
+            if (!OwnedCode(dispatcher.module, reinterpret_cast<void*>(query)) || query(ids[i]) != target) return false;
+        }
+        else
+        {
+            // Without an earlier implementation-owned id there is no split
+            // driver factory to ask: the dispatcher's own is the detoured one.
+            owner.Reset();
+            if (!implementation) return false;
+            const auto own = reinterpret_cast<QueryInterface>(GetProcAddress(implementation, "nvapi_QueryInterface"));
+            if (!OwnedCode(implementation, reinterpret_cast<void*>(own))) return false;
+            target = own(ids[i]);
+            if (!owner.Acquire(target) || owner.module != implementation) return false;
+            resolved.redirected |= 1u << i;
+        }
+        if (!OwnerFactoryMatches(owner.module, ids[i], target)) return false;
+        if (!implementation && owner.module != dispatcher.module) implementation = owner.module;
+        resolved.targets[i] = target;
     }
+    return true;
+}
+
+inline bool IsAmpere(const LUID& luid, uint32_t wantedArchitecture = 0x170) noexcept
+{
+    constexpr std::array<uint32_t, 5> ids{0x0150e828, 0xe5ac921f, 0xd8265d24, 0xadd604d1, 0x842b066e};
+    NvapiTargets<ids.size()> resolved;
+    if (!ResolveNvapi(ids, resolved)) return false;
+    const auto& targets = resolved.targets;
     const Api api{reinterpret_cast<Initialize>(targets[0]), reinterpret_cast<Enumerate>(targets[1]),
         reinterpret_cast<GetArchitecture>(targets[2]), reinterpret_cast<GetLogical>(targets[3]),
         reinterpret_cast<GetLogicalInfo>(targets[4])};
-    return MatchAmpere(api, luid);
+    return MatchAmpere(api, luid, wantedArchitecture);
 }
 inline bool IsAmpereD3D12Device(void* source) noexcept
 {
@@ -214,6 +273,6 @@ inline bool IsAmpereD3D12Device(void* source) noexcept
     if (device) device->Release();
     // A probe on another family must not initialize CUDA or commit the global
     // adapter selection. Authoritative execution checks remain a later step.
-    return identified && IsAmpere(luid);
+    return identified && (IsAmpere(luid) || IsAmpere(luid, 0x160));
 }
 }

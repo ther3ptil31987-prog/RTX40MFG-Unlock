@@ -79,6 +79,37 @@ int wmain(int argc, wchar_t** argv)
         Check(ampere_wrapper::Read(layout, capacity) && capacity.bufferCount == n
             && capacity.maximumGeneratedFrames == layout.maximumGeneratedFrames, "actual ring count certifies only its selected fixed generated capacity");
         Check(ampere_wrapper::Matches(layout, capacity), "unchanged exact allocation survives frame-path revalidation");
+        Check(ampere_wrapper::RefreshedBuffers(capacity, capacity) == 0, "an unchanged allocation is not a buffer refresh");
+        // A swap-chain resize re-acquires every buffer object into the same vector.
+        for (unsigned i = 0; i < n; ++i) Put(storage, i * sizeof(uintptr_t), uintptr_t{0x7000 + i * 0x100});
+        ampere_wrapper::Capacity refreshed{};
+        Check(!ampere_wrapper::Matches(layout, capacity) && ampere_wrapper::Read(layout, refreshed)
+            && ampere_wrapper::RefreshedBuffers(capacity, refreshed) == n,
+            "a complete refill of the same ring is a refresh of every buffer");
+        Check(ampere_wrapper::Matches(layout, refreshed), "the refreshed snapshot revalidates on the frame path");
+        Put(storage, 0, uintptr_t{0x7777});
+        ampere_wrapper::Capacity partial{};
+        Check(ampere_wrapper::Read(layout, partial) && ampere_wrapper::RefreshedBuffers(refreshed, partial) == 1,
+            "a refill that replaces one buffer object reports one changed entry");
+        Put(context, swapchain, uintptr_t{0x1100});
+        ampere_wrapper::Capacity otherSwapchain{};
+        Check(ampere_wrapper::Read(layout, otherSwapchain) && ampere_wrapper::RefreshedBuffers(refreshed, otherSwapchain) == 0,
+            "buffers of another swap chain are never a refresh");
+        Put(context, swapchain, uintptr_t{0x1000});
+        auto changed = refreshed; changed.buffersBegin += sizeof(uintptr_t); changed.buffersEnd += sizeof(uintptr_t);
+        Check(ampere_wrapper::RefreshedBuffers(capacity, changed) == 0, "moved vector storage is never a refresh");
+        changed = refreshed; changed.buffersCapacity += sizeof(uintptr_t);
+        Check(ampere_wrapper::RefreshedBuffers(capacity, changed) == 0, "reallocated vector capacity is never a refresh");
+        changed = refreshed; changed.bufferCount = n - 1;
+        Check(ampere_wrapper::RefreshedBuffers(capacity, changed) == 0, "a changed buffer count is never a refresh");
+        changed = refreshed; changed.maximumGeneratedFrames ^= 4u;
+        Check(ampere_wrapper::RefreshedBuffers(capacity, changed) == 0, "a changed generated maximum is never a refresh");
+        changed = refreshed; changed.context += 0x10; changed.ringOwner += 0x10;
+        Check(ampere_wrapper::RefreshedBuffers(capacity, changed) == 0, "another wrapper context is never a refresh");
+        auto empty = capacity; empty.context = 0;
+        Check(ampere_wrapper::RefreshedBuffers(empty, refreshed) == 0, "no stored allocation proof means no refresh");
+        for (unsigned i = 0; i < n; ++i) Put(storage, i * sizeof(uintptr_t), uintptr_t{0x2000 + i * 0x100});
+        Check(ampere_wrapper::Matches(layout, capacity), "fixture restores the original buffer objects");
         Put(storage, 0, uintptr_t{0x9999});
         Check(!ampere_wrapper::Matches(layout, capacity), "replacing one presentation resource invalidates the feature snapshot");
         Put(storage, 0, uintptr_t{0});

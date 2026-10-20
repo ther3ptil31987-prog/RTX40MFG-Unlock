@@ -13,6 +13,9 @@ struct State
     BOOL initialized = FALSE, enabled = FALSE;
     uint32_t applied = 0, capacity = 0, framesPresented = 0, adapterVendor = 0, gpuVendorId = 0;
     uint32_t modelActive = 0; // 0 none yet, 1 our port of Intel's MFG model, 2 XeFG's 2x model
+    // tensorcore.1: the port's int8 layers on tensor cores: 0 not decided, 1 active, 2 unavailable, 3 off.
+    uint32_t tensorCores = 0, tensorCoreLaunches = 0, tensorCoreFallbacks = 0;
+    std::string tensorCoreReason;
     std::string runtimeFailure, status, adapter;
     std::string activeFrameGeneration = "none";
 };
@@ -35,6 +38,10 @@ State Read(const std::string& text, BoolReader boolean, IntegerReader integer, S
     integer(text, "xessFramesPresented", next.framesPresented);
     integer(text, "xessAdapterVendor", next.adapterVendor);
     integer(text, "xessModelActive", next.modelActive);
+    integer(text, "xessTensorCores", next.tensorCores);
+    integer(text, "xessTensorCoreLaunches", next.tensorCoreLaunches);
+    integer(text, "xessTensorCoreFallbacks", next.tensorCoreFallbacks);
+    string(text, "xessTensorCoreReason", next.tensorCoreReason);
     string(text, "xessRuntimeFailure", next.runtimeFailure);
     string(text, "xessStatus", next.status);
     string(text, "xessAdapter", next.adapter);
@@ -51,10 +58,13 @@ inline uint32_t Vendor(const State& state) noexcept
 // turned on this session (lastActive). Before the game has turned either on,
 // XeSS shows on non-NVIDIA GPUs, in games offering only XeSS, and on NVIDIA
 // GPUs the DLSS backend checked and found without DLSS MFG (gpuFamily 1 Ada,
-// 2 Ampere experimental); DLSS shows otherwise.
+// 2 Ampere, 4 Turing RTX, 5 Blackwell RTX); DLSS shows otherwise.
 enum class Section { Dlss, Xess };
 constexpr uint32_t kNvidiaVendor = 0x10de;
-inline bool DlssMfgFamily(uint32_t gpuFamily) noexcept { return gpuFamily == 1 || gpuFamily == 2; }
+inline bool DlssMfgFamily(uint32_t gpuFamily) noexcept
+{
+    return gpuFamily == 1 || gpuFamily == 2 || gpuFamily == 4 || gpuFamily == 5;
+}
 inline Section SettingsSection(const State& state, const std::string& lastActive, bool dlssOffered,
     uint32_t gpuFamily) noexcept
 {

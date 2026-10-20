@@ -1,6 +1,7 @@
 #include "shaders.h"
 #include "converter_source.h"
 #include "checked_memory.h"
+#include "../sha256_util.h"
 #include <bcrypt.h>
 #include <filesystem>
 #include <fstream>
@@ -23,24 +24,9 @@ bool Result(IDxcOperationResult* r,ComPtr<IDxcBlob>& blob,std::string& error) {
 }
 }
 std::array<uint8_t,32> Sha256(std::span<const std::byte> bytes) {
-    std::array<uint8_t,32> output{};
-    BCRYPT_ALG_HANDLE algorithm{};BCRYPT_HASH_HANDLE hash{};
-    DWORD objectSize{},used{};std::vector<unsigned char> object;
-    if(BCryptOpenAlgorithmProvider(&algorithm,BCRYPT_SHA256_ALGORITHM,nullptr,0)<0)return {};
-    if(BCryptGetProperty(algorithm,BCRYPT_OBJECT_LENGTH,reinterpret_cast<PUCHAR>(&objectSize),sizeof(objectSize),&used,0)>=0) {
-        object.resize(objectSize);
-        if(BCryptCreateHash(algorithm,&hash,object.data(),objectSize,nullptr,0,0)>=0) {
-            size_t at=0;bool ok=true;
-            while(at<bytes.size()) {
-                const auto n=static_cast<ULONG>(std::min<size_t>(bytes.size()-at,1u<<20));
-                if(BCryptHashData(hash,reinterpret_cast<PUCHAR>(const_cast<std::byte*>(bytes.data()+at)),n,0)<0){ok=false;break;}
-                at+=n;
-            }
-            if(!ok||BCryptFinishHash(hash,output.data(),static_cast<ULONG>(output.size()),0)<0)output={};
-            BCryptDestroyHash(hash);
-        }
-    }
-    BCryptCloseAlgorithmProvider(algorithm,0);return output;
+    sha256_util::Digest output{};
+    sha256_util::Compute(bytes.data(),bytes.size(),output); // all zero on failure
+    return output;
 }
 bool HashEquals(std::span<const std::byte> bytes,const char* expected) {
     if(!expected||strlen(expected)!=64)return false;

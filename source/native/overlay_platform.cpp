@@ -5,6 +5,7 @@
 #include "standalone_ui.h"
 #include "single_hotkey.h"
 #include "ui_host.h"
+#include "localization.h"
 #include <backends/imgui_impl_win32.h>
 #include <imgui_internal.h>
 #include <Windowsx.h>
@@ -76,6 +77,80 @@ const char* PanelTitle()
 // Builds up to 1.5.0-beta.5 saved the panel as "DLSS MFG".
 constexpr const char* kLegacyPanelName = "DLSS MFG";
 
+// Menu language: one process-wide choice in RTX40MFG-UI.ini [Overlay] Language
+// (auto, en or a catalog code). Render-thread state, protected by gUiMutex.
+bool gLanguageLoaded = false;
+bool gLanguageSaveFailed = false;
+
+void LoadLanguage()
+{
+    if (gLanguageLoaded) return;
+    gLanguageLoaded = true;
+    const auto preferences = standalone_ui::SettingsPath("RTX40MFG-UI.ini");
+    wchar_t saved[64]{};
+    if (!preferences.empty())
+        GetPrivateProfileStringW(L"Overlay", L"Language", L"", saved, static_cast<DWORD>(std::size(saved)), preferences.c_str());
+    char setting[64]{};
+    WideCharToMultiByte(CP_UTF8, 0, saved, -1, setting, static_cast<int>(sizeof(setting)), nullptr, nullptr);
+    l10n::Select(setting);
+}
+
+void SelectLanguage(const char* setting)
+{
+    l10n::Select(setting);
+    const auto preferences = standalone_ui::SettingsPath("RTX40MFG-UI.ini");
+    gLanguageSaveFailed = preferences.empty() || !WritePrivateProfileStringW(L"Overlay", L"Language",
+        standalone_ui::Wide(l10n::Selection().c_str()).c_str(), preferences.c_str());
+}
+
+// True when the current font draws every character of a UTF-8 name.
+bool Drawable(const char* text)
+{
+    ImFont* font = ImGui::GetFont();
+    for (const char* at = text; *at;)
+    {
+        unsigned int codepoint = 0;
+        const int length = ImTextCharFromUtf8(&codepoint, at, nullptr);
+        if (length <= 0) return false;
+        at += length;
+        if (codepoint > 0x7F && (codepoint > 0xFFFF || !font->IsGlyphInFont(static_cast<ImWchar>(codepoint))))
+            return false;
+    }
+    return true;
+}
+
+// A catalog's own name when the current font can draw it, else its English name.
+const char* LanguageName(const l10n::Catalog* catalog)
+{
+    if (!catalog) return "English";
+    return Drawable(catalog->nativeName) ? catalog->nativeName : catalog->englishName;
+}
+
+void DrawLanguagePicker()
+{
+    const auto& selection = l10n::Selection();
+    char automatic[96]{};
+    snprintf(automatic, sizeof(automatic), l10n::T("Auto (%s)"), LanguageName(l10n::AutoCatalog()));
+    float width = std::max(ImGui::CalcTextSize(automatic).x, ImGui::CalcTextSize("English").x);
+    for (size_t i = 0; i < l10n::CatalogCount(); ++i)
+        width = std::max(width, ImGui::CalcTextSize(LanguageName(&l10n::CatalogAt(i))).x);
+    ImGui::SetNextItemWidth(width + ImGui::GetFrameHeight() + 2.0f*ImGui::GetStyle().FramePadding.x);
+    const bool open = ImGui::BeginCombo("##menulanguage",
+        selection == l10n::kAuto ? automatic : LanguageName(l10n::Selected()));
+    ImGui::SetItemTooltip("%s", l10n::T("Menu language"));
+    if (!open) return;
+    if (ImGui::Selectable(automatic, selection == l10n::kAuto)) SelectLanguage(l10n::kAuto);
+    if (ImGui::Selectable("English", selection == l10n::kEnglish)) SelectLanguage(l10n::kEnglish);
+    for (size_t i = 0; i < l10n::CatalogCount(); ++i)
+    {
+        const auto& catalog = l10n::CatalogAt(i);
+        ImGui::PushID(catalog.code);
+        if (ImGui::Selectable(LanguageName(&catalog), selection == catalog.code)) SelectLanguage(catalog.code);
+        ImGui::PopID();
+    }
+    ImGui::EndCombo();
+}
+
 bool Foreground(HWND window) noexcept
 {
     const HWND foreground = GetForegroundWindow();
@@ -102,6 +177,7 @@ void SetVisible(bool visible, HWND window)
         if (found == gWindows.end() || !found->second.clients) return;
     }
     const bool previous = gVisible.exchange(visible, std::memory_order_acq_rel);
+    if (visible) gPinned.store(false, std::memory_order_release);
     if (!visible) gMenuKey.CancelBinding();
     gWantMouse.store(visible, std::memory_order_release);
     gWantKeyboard.store(visible, std::memory_order_release);
@@ -825,6 +901,9 @@ bool PlatformState::Initialize(HWND hwnd)
         fontConfig.SizePixels = 16.0f;
         io.FontDefault = io.Fonts->AddFontDefault(&fontConfig);
     }
+    baseFont = io.FontDefault;
+    catalogFonts.clear();
+    catalogFontStates.clear();
     if (!ImGui_ImplWin32_Init(hwnd))
     {
         ImGui::DestroyContext(context);
@@ -883,8 +962,94 @@ void PlatformState::Shutdown()
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext(context);
     context = nullptr;
+    baseFont = nullptr;
+    catalogFonts.clear();
+    catalogFontStates.clear();
     ImGui::SetCurrentContext(previous);
     window = nullptr;
+}
+
+// A catalog's font: the Latin UI font with the first installed face the catalog
+// lists merged over it. Each catalog gets its own, so languages that share
+// characters (Chinese, Japanese) keep their own glyph forms. Built outside a
+// frame on first display; used only if it draws every glyph the catalog has.
+ImFont* PlatformState::CatalogFont(size_t index)
+{
+    const size_t count = l10n::CatalogCount();
+    if (catalogFontStates.size() != count)
+    {
+        catalogFonts.assign(count, nullptr);
+        catalogFontStates.assign(count, 0);
+    }
+    if (index >= count) return nullptr;
+    if (catalogFontStates[index]) return catalogFonts[index];
+    const auto& catalog = l10n::CatalogAt(index);
+    auto& io = ImGui::GetIO();
+    ImFont* font = baseFont;
+    std::wstring used = L"UI font";
+    if (catalog.fontCount)
+    {
+        font = nullptr;
+        used.clear();
+        wchar_t windowsPath[MAX_PATH]{};
+        const UINT length = GetWindowsDirectoryW(windowsPath, MAX_PATH);
+        const auto fonts = length && length < MAX_PATH
+            ? std::filesystem::path(windowsPath)/L"Fonts" : std::filesystem::path();
+        ImFontConfig config;
+        config.Flags |= ImFontFlags_NoLoadError;
+        if (!fonts.empty())
+        {
+            const auto latin = (fonts/L"segoeui.ttf").u8string();
+            font = io.Fonts->AddFontFromFileTTF(reinterpret_cast<const char*>(latin.c_str()), 16.0f, &config);
+        }
+        if (!font)
+        {
+            config.SizePixels = 16.0f;
+            font = io.Fonts->AddFontDefault(&config);
+        }
+        for (size_t i = 0; font && !fonts.empty() && i < catalog.fontCount; ++i)
+        {
+            const auto path = fonts/catalog.fonts[i].file;
+            std::error_code error;
+            if (!std::filesystem::is_regular_file(path, error)) continue;
+            ImFontConfig merge;
+            merge.Flags |= ImFontFlags_NoLoadError;
+            merge.MergeMode = true;
+            merge.DstFont = font;
+            merge.FontNo = catalog.fonts[i].face;
+            const auto file = path.u8string();
+            if (io.Fonts->AddFontFromFileTTF(reinterpret_cast<const char*>(file.c_str()), 16.0f, &merge))
+            {
+                used = catalog.fonts[i].file;
+                break;
+            }
+        }
+    }
+    bool covers = font != nullptr;
+    for (size_t i = 0; covers && i < catalog.glyphCount; ++i)
+        covers = font->IsGlyphInFont(static_cast<ImWchar>(catalog.glyphs[i]));
+    if (!covers && font && font != baseFont) io.Fonts->RemoveFont(font);
+    catalogFonts[index] = covers ? font : nullptr;
+    catalogFontStates[index] = covers ? 1 : 2;
+    wchar_t line[256]{};
+    swprintf_s(line, L"UI language %S: %s (%s)", catalog.code,
+        covers ? L"font ready" : L"no installed font draws every character; the menu stays English",
+        used.empty() ? L"no listed font found" : used.c_str());
+    single_module::Log(line);
+    return catalogFonts[index];
+}
+
+// Before ImGui::NewFrame: T() and the default font follow the selected catalog
+// once its font is ready, else English.
+void PlatformState::PrepareLanguage()
+{
+    LoadLanguage();
+    const l10n::Catalog* selected = l10n::Selected();
+    ImFont* font = nullptr;
+    for (size_t i = 0; selected && i < l10n::CatalogCount(); ++i)
+        if (&l10n::CatalogAt(i) == selected) font = CatalogFont(i);
+    l10n::SetDisplayed(font ? selected : nullptr);
+    ImGui::GetIO().FontDefault = font ? font : baseFont;
 }
 
 bool PlatformState::WantsFrame() const noexcept
@@ -924,6 +1089,7 @@ bool PlatformState::WantsFrame() const noexcept
     }
     if (context && inputAttached) mouse_route::Refresh(window, foreground);
     return context && inputAttached && IsWindow(window) && (gVisible.load(std::memory_order_acquire)
+        || gPinned.load(std::memory_order_acquire) || standalone_ui::PinnedFps()
         || GetTickCount64() - firstFrame < 7000);
 }
 
@@ -974,8 +1140,14 @@ bool PlatformState::NewFrame(uint32_t outputWidth, uint32_t outputHeight)
         }
         else ImGui_ImplWin32_WndProcHandler(window, input.message, input.wparam, input.lparam);
     }
-    ImGui_ImplWin32_NewFrame();
     auto& io = ImGui::GetIO();
+    // A closed menu (startup hint, pinned views) stays on screen during play.
+    // The backend still reads the cursor while the game is focused, so take no
+    // mouse, draw no cursor and leave the game's cursor shape alone.
+    io.MouseDrawCursor = visible;
+    if (visible) io.ConfigFlags &= ~(ImGuiConfigFlags_NoMouse | ImGuiConfigFlags_NoMouseCursorChange);
+    else io.ConfigFlags |= ImGuiConfigFlags_NoMouse | ImGuiConfigFlags_NoMouseCursorChange;
+    ImGui_ImplWin32_NewFrame();
     // The backend reads the cursor only while it tracks no window area. When
     // the hook drives the mouse, its last cursor is the position.
     if (visible && mouse_route::Serving(window) && Foreground(window))
@@ -999,6 +1171,7 @@ bool PlatformState::NewFrame(uint32_t outputWidth, uint32_t outputHeight)
     // enlarge the software cursor at the final output resolution.
     ImGui::GetStyle().MouseCursorScale = 1.0f
         / std::max(scaling.framebufferX, scaling.framebufferY);
+    PrepareLanguage();
     ImGui::NewFrame();
     return true;
 }
@@ -1012,12 +1185,41 @@ void PlatformState::Draw()
         gShortcutSaveFailed = path.empty() || !WritePrivateProfileStringW(
             L"Overlay", L"ToggleKey", value.c_str(), path.c_str());
     }
-    bool open = gVisible.load(std::memory_order_acquire);
-    if (open)
+    const bool visible = gVisible.load(std::memory_order_acquire);
+    bool open = visible;
+    const bool pinned = !open && gPinned.load(std::memory_order_acquire);
+    const float margin = 16.0f*uiScale;
+    float cornerBottom = margin; // the startup hint goes below the FPS readout
+    if (!open && !pinned && standalone_ui::PinnedFps())
+    {
+        // A compact one-line pill in the menu's own style: its panel colour and
+        // rounding, a small inset, and a thin accent in the title-bar blue. The
+        // minimum size override keeps it one text line tall.
+        const float inset = 8.0f*uiScale;
+        ImGui::SetNextWindowPos(ImVec2(inset, inset), ImGuiCond_Always);
+        ImGui::SetNextWindowBgAlpha(0.7f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f*uiScale, 2.0f*uiScale));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowMinSize, ImVec2(1.0f, 1.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, ImGui::GetStyle().FrameRounding);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+        if (ImGui::Begin("##RTX40MFG pinned fps", nullptr,
+            ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs
+            | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav))
+        {
+            const ImVec2 position = ImGui::GetWindowPos(), size = ImGui::GetWindowSize();
+            const float edge = 3.0f*uiScale, width = 2.0f*uiScale;
+            ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(position.x+edge, position.y+edge),
+                ImVec2(position.x+edge+width, position.y+size.y-edge), ImGui::GetColorU32(ImGuiCol_TitleBgActive), width);
+            standalone_ui::DrawPinnedFps();
+            cornerBottom = std::max(margin, position.y + size.y + ImGui::GetStyle().ItemSpacing.y);
+        }
+        ImGui::End();
+        ImGui::PopStyleVar(4);
+    }
+    if (open || pinned)
     {
         const bool rescaleLayout = !layoutPrepared || std::abs(layoutScale-uiScale) > 0.0001f;
         const auto display = ImGui::GetIO().DisplaySize;
-        const float margin = 16.0f*uiScale;
         const ImVec2 maximum(std::max(32.0f, display.x-2.0f*margin), std::max(32.0f, display.y-2.0f*margin));
         ImGui::SetNextWindowSizeConstraints(
             ImVec2(std::min(360.0f*uiScale, maximum.x), std::min(180.0f*uiScale, maximum.y)), maximum);
@@ -1044,31 +1246,68 @@ void PlatformState::Draw()
             ImGui::SetNextWindowSize(size, ImGuiCond_Always);
             ImGui::SetNextWindowPos(position, ImGuiCond_Always);
         }
-        if (ImGui::Begin(PanelTitle(), &open))
+        if (pinned) ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 0.55f);
+        const auto flags = pinned ? ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoMove
+            | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse : ImGuiWindowFlags_None;
+        if (ImGui::Begin(PanelTitle(), pinned ? nullptr : &open, flags))
         {
+            // Keep the pin control in the title bar so scrolled settings can
+            // be pinned without returning to the top of the content.
+            if (!pinned)
+            {
+                auto* panel = ImGui::GetCurrentWindow();
+                const auto cursor = ImGui::GetCursorScreenPos();
+                const char* pin = l10n::Label("Pin");
+                const float width = ImGui::CalcTextSize(pin, nullptr, true).x + 2*ImGui::GetStyle().FramePadding.x;
+                const auto title = panel->TitleBarRect();
+                ImGui::PushClipRect(title.Min, title.Max, false);
+                // SmallButton has no vertical padding: centre its text line in the title bar.
+                ImGui::SetCursorScreenPos(ImVec2(title.Max.x-width-title.GetHeight()-8*uiScale,
+                    title.Min.y + std::max(0.0f, 0.5f*(title.GetHeight()-ImGui::GetTextLineHeight()))));
+                if (ImGui::SmallButton(pin))
+                {
+                    gPinned.store(true, std::memory_order_release);
+                    open = false;
+                }
+                ImGui::SetItemTooltip(l10n::T("Keeps this panel on screen, see-through and click-through.\n"
+                    "%s brings the menu back."), KeyLabel().c_str());
+                ImGui::SetCursorScreenPos(cursor);
+                ImGui::PopClipRect();
+            }
             // The settings scroll; the footer keeps the menu key and status in view.
             const auto& style = ImGui::GetStyle();
             float footer = 2.0f*style.ItemSpacing.y + 1.0f + ImGui::GetFrameHeight();
             if (gShortcutSaveFailed) footer += 2.0f*ImGui::GetTextLineHeightWithSpacing();
+            if (gLanguageSaveFailed) footer += 2.0f*ImGui::GetTextLineHeightWithSpacing();
             if (ImGui::BeginChild("##settings", ImVec2(0.0f, -footer), ImGuiChildFlags_NavFlattened))
                 standalone_ui::Draw();
             ImGui::EndChild();
             ImGui::Separator();
             ImGui::AlignTextToFramePadding();
-            ImGui::Text("Menu key: %s", KeyLabel().c_str());
-            ImGui::SameLine();
-            if (gMenuKey.Binding())
+            if (pinned)
+                ImGui::Text(l10n::T("Pinned  |  %s brings the menu back"), KeyLabel().c_str());
+            else
             {
-                ImGui::TextUnformatted("Press a key... Esc cancels");
+                ImGui::Text(l10n::T("Menu key: %s"), KeyLabel().c_str());
                 ImGui::SameLine();
-                if (ImGui::Button("Cancel")) gMenuKey.CancelBinding();
+                if (gMenuKey.Binding())
+                {
+                    ImGui::TextUnformatted(l10n::T("Press a key... Esc cancels"));
+                    ImGui::SameLine();
+                    if (ImGui::Button(l10n::Label("Cancel"))) gMenuKey.CancelBinding();
+                }
+                else if (ImGui::Button(l10n::Label("Change key"))) gMenuKey.BeginBinding();
+                ImGui::SameLine();
+                DrawLanguagePicker();
             }
-            else if (ImGui::Button("Change key")) gMenuKey.BeginBinding();
             standalone_ui::DrawFooterStatus();
             if (gShortcutSaveFailed)
-                ImGui::TextWrapped("The new shortcut works for this session, but could not be saved.");
+                ImGui::TextWrapped("%s", l10n::T("The new shortcut works for this session, but could not be saved."));
+            if (gLanguageSaveFailed)
+                ImGui::TextWrapped("%s", l10n::T("The language works for this session, but could not be saved."));
         }
         ImGui::End();
+        if (pinned) ImGui::PopStyleVar();
         if (gFirstLaunchSavePending)
         {
             // Persist only after the full menu has reached Draw, never merely
@@ -1093,17 +1332,17 @@ void PlatformState::Draw()
                 WritePrivateProfileStringW(L"Overlay", L"LayoutScale", value.c_str(), preferences.c_str());
             }
         }
-        if (!open) SetVisible(false, window);
+        if (visible && !open) SetVisible(false, window);
     }
     else if (GetTickCount64() - firstFrame < 7000)
     {
-        ImGui::SetNextWindowPos(ImVec2(16.0f*uiScale, 16.0f*uiScale), ImGuiCond_Always);
+        ImGui::SetNextWindowPos(ImVec2(margin, cornerBottom), ImGuiCond_Always);
         ImGui::SetNextWindowBgAlpha(0.85f);
         if (ImGui::Begin("##RTX40MFG startup", nullptr,
             ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize
             | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoSavedSettings))
         {
-            ImGui::Text("MFG Unlocker  |  %s opens the menu", KeyLabel().c_str());
+            ImGui::Text(l10n::T("MFG Unlocker  |  %s opens the menu"), KeyLabel().c_str());
         }
         ImGui::End();
     }

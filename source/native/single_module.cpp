@@ -7,6 +7,10 @@
 #include "optiscaler_host.h"
 #include "proxy_generated/proxy_export_names.h"
 #include "proxy_generated/renamable_names.h"
+#if MFG_UNLOCK_XESS
+#include "xess/xess_mod.h"
+#include "xess/cuda/cuda_route.h"
+#endif
 
 #include <delayimp.h>
 #include <intrin.h>
@@ -197,7 +201,8 @@ bool SelectProxyExports(HMODULE module, uint32_t family) noexcept
     if (directory.VirtualAddress >= size || directory.Size < sizeof(IMAGE_EXPORT_DIRECTORY)
         || directory.Size > size - directory.VirtualAddress) return false;
     const auto exports = reinterpret_cast<const IMAGE_EXPORT_DIRECTORY*>(base + directory.VirtualAddress);
-    constexpr uint32_t kLegacyLimit = 427, kNamedBase = 1024, kPublicLast = 4099;
+    // Public exports are ordinals 4096.. (generate_build_inputs.py); 4100 = XeFGModelName.
+    constexpr uint32_t kLegacyLimit = 427, kNamedBase = 1024, kPublicLast = 4100;
     if (exports->Base != 1 || exports->NumberOfFunctions != kPublicLast
         || exports->AddressOfFunctions >= size
         || exports->NumberOfFunctions > (size - exports->AddressOfFunctions) / sizeof(DWORD)
@@ -666,4 +671,21 @@ extern "C" __declspec(dllexport) __declspec(noinline) void InitializeASI()
     single_module::Log(optiscaler_host::AcceptPluginCaller(caller)
         ? L"OptiScaler plugin host accepted (InitializeASI)."
         : L"InitializeASI caller is not OptiScaler; ignored.");
+}
+
+// Optional ASI plugin export OptiScaler's XeFG card shows as "XeFG Model" (OptiScaler fork, xefgmodelname.1).
+// "2X": XeFG's own 2x model (XeFGModel = default; OptiScaler's stock label for it); "port": our ported MFG model;
+// "CUDA-port": the ported model with its int8 layers run on tensor cores. Empty until XeFG has been created
+// (OptiScaler then shows its stock label). Called from OptiScaler's menu every frame it is open: reads published
+// state only.
+extern "C" __declspec(dllexport) __declspec(noinline) const char* XeFGModelName()
+{
+#if MFG_UNLOCK_XESS
+    if (gDuplicate || !gOwnsBackend) return "";
+    const auto snapshot = xess_mod::ReadSnapshot();
+    const uint32_t model = snapshot ? snapshot->modelActive : 0;
+    if (model == 2) return "2X";
+    if (model == 1) return xefg_cuda::Launched() ? "CUDA-port" : "port";
+#endif
+    return "";
 }

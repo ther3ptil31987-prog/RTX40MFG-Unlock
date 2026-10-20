@@ -1,16 +1,20 @@
 #include "ampere_backend.h"
 #include "fault_capture.h"
 #include "ngx_runtime_dispatch.h"
-#if MFG_UNLOCK_RUNTIME_GPU_SELECTION
 #include "gpu_dispatch.h"
-#endif
 #include "ampere_patterns.h"
 #include "ampere_provider_arch.h"
 #include "adapter_discovery.h"
 #include "ampere_host_contracts.h"
 #include "ampere_policy.h"
+#include "ampere_startup_requirements.h"
+#include "ampere_flip_metering.h"
+#include "ampere_vulkan_output.h"
 #include "dlssg_provider_policy.h"
+#include "dlssg_provider_selection.h"
 #include "dlssg_preset.h"
+#include "dlss_sr.h"
+#include "fg_lifetime_tracker.h"
 #if MFG_UNLOCK_OUTPUT_PULL_MASK_ONLY
 #include "midpoint_fix.h"
 #endif
@@ -43,6 +47,13 @@ using ReleaseFn = NVSDK_NGX_Result(NVSDK_CONV*)(NVSDK_NGX_Handle*);
 using RequirementsFn = NVSDK_NGX_Result(NVSDK_CONV*)(IDXGIAdapter*, const NVSDK_NGX_FeatureDiscoveryInfo*, NVSDK_NGX_FeatureRequirement*);
 using ParametersFn = NVSDK_NGX_Result(NVSDK_CONV*)(NVSDK_NGX_Parameter**);
 using PresetFn = bool(*)(uint32_t, uint32_t*);
+// NGX Vulkan entries (VkCommandBuffer, VkDevice, VkInstance and VkPhysicalDevice
+// are opaque here; no Vulkan SDK header is added to the core).
+using VkCreateFn = NVSDK_NGX_Result(NVSDK_CONV*)(void*, NVSDK_NGX_Feature, const NVSDK_NGX_Parameter*, NVSDK_NGX_Handle**);
+using VkCreate1Fn = NVSDK_NGX_Result(NVSDK_CONV*)(void*, void*, NVSDK_NGX_Feature, const NVSDK_NGX_Parameter*, NVSDK_NGX_Handle**);
+using VkEvaluateFn = NVSDK_NGX_Result(NVSDK_CONV*)(void*, const NVSDK_NGX_Handle*, const NVSDK_NGX_Parameter*, PFN_NVSDK_NGX_ProgressCallback);
+using VkRequirementsFn = NVSDK_NGX_Result(NVSDK_CONV*)(void*, void*, const NVSDK_NGX_FeatureDiscoveryInfo*, NVSDK_NGX_FeatureRequirement*);
+using VulkanOutput = ampere_vulkan_output::Output;
 
 struct Image
 {
@@ -83,6 +94,11 @@ std::atomic<LogCallback> gLog{nullptr};
 std::atomic<bool> gFatal{false}, gStartupComplete{false};
 std::atomic<bool> gEarlyInit{false};
 std::atomic<bool> gD3D12Confirmed{false};
+// Vulkan: the verified VkPhysicalDevice confirms the adapter; gVulkanDevice is
+// the host's VkDevice on it (identity only; the host owns its lifetime).
+std::atomic<bool> gVulkanConfirmed{false};
+std::atomic<uintptr_t> gVulkanDevice{0};
+bool DeviceConfirmed() noexcept { return gD3D12Confirmed.load() || gVulkanConfirmed.load(); }
 std::atomic<uint32_t> gFailure{100};
 std::atomic<uint32_t> gFatalFailure{0};
 std::atomic<uint64_t> gPresetQueries{0}, gEvaluations{0}, gRejections{0};
@@ -102,11 +118,18 @@ std::atomic<uint64_t> gActiveWrapperGeneration{0};
 std::atomic_flag gWrapperWriter = ATOMIC_FLAG_INIT;
 std::atomic<int32_t> gLastCreateCount{-1};
 std::atomic<uint64_t> gCreatedFeatures{0}, gSubmittedBatches{0};
-std::atomic<uint64_t> gFailedBatches{0}, gRecoveredBatches{0}, gOutputReuseLatches{0};
+std::atomic<uint64_t> gFailedBatches{0}, gRecoveredBatches{0}, gOutputReuseLatches{0}, gFlipMeteredRepeats{0};
+std::atomic<uint64_t> gBufferRefreshes{0};
 std::atomic<uint64_t> gCreateAttempts{0}, gCreateBlockedBeforeProvider{0}, gEvaluateAttempts{0};
 std::atomic<bool> gPipelineCreateObserved{false};
 std::atomic<uint64_t> gCandidateProviderVersion{0};
+// V1.6.0 live preset switching: FG lifetime on the runtime route.
+fg_lifetime::Tracker<> gFgLifetime;
 ampere_diagnostics::Failures gFailures;
+// FG requirement queries during slInit/startup on an RTX 30/20 system. The
+// first few are logged: Streamline keeps or drops sl.dlss_g on this answer.
+constexpr uint32_t kStartupRequirementReports = 8;
+std::atomic<uint32_t> gStartupRequirementQueries{0}, gInitRequirementQueries{0};
 thread_local unsigned gStartupDepth = 0;
 thread_local unsigned gPreparationDepth = 0;
 std::atomic<PreparationBoundaryResolver> gPreparationBoundaryResolver{nullptr};
@@ -313,6 +336,10 @@ struct Route
     ampere_wrapper::Layout wrapperLayout{};
     entry_detour::Handle create{}, evaluate{}, release{}, requirements{}, parameters{}, preset{};
     entry_detour::ForwardPreCall beforeCreate{}, beforeEvaluate{};
+    // NGX Vulkan entries of the same module. Create/Create1/Evaluate are the
+    // patcher's forwarding entries (its pre-calls are kept for the RTX 30 thunks).
+    entry_detour::Handle vkCreate{}, vkCreate1{}, vkEvaluate{}, vkRelease{}, vkRequirements{}, vkParameters{};
+    entry_detour::ForwardPreCall vkBeforeCreate{}, vkBeforeCreate1{}, vkBeforeEvaluate{};
     Patch availability{};
     std::array<ampere_policy::Feature, 16> features{};
     uint64_t nextFeatureLifetime = 0;
@@ -348,6 +375,32 @@ struct Route
     uint64_t nextOtherFeatureLifetime = 0;
 };
 std::array<Route, kRoutes> gRoutes{};
+
+// Create entry kinds of one API; Vulkan hosts may enter either Create or Create1.
+bool RuntimeCreateKind(entry_detour::Kind kind, GraphicsApi api) noexcept
+{
+    return api == GraphicsApi::eVulkan
+        ? kind == entry_detour::Kind::eNgxRuntimeVulkanCreateFeature || kind == entry_detour::Kind::eNgxRuntimeVulkanCreateFeature1
+        : kind == entry_detour::Kind::eNgxRuntimeD3D12CreateFeature;
+}
+bool ProviderCreateKind(entry_detour::Kind kind, GraphicsApi api) noexcept
+{
+    return api == GraphicsApi::eVulkan
+        ? kind == entry_detour::Kind::eNgxVulkanCreateFeature || kind == entry_detour::Kind::eNgxVulkanCreateFeature1
+        : kind == entry_detour::Kind::eNgxD3D12CreateFeature;
+}
+// The single current Create entry of `owner` for this API (Vulkan: Create1 is
+// preferred, as Streamline enters it first). An empty snapshot when ambiguous.
+entry_detour::Snapshot CreateEntry(HMODULE owner, bool runtime, GraphicsApi api) noexcept
+{
+    using entry_detour::Kind;
+    if (api != GraphicsApi::eVulkan)
+        return entry_detour::ReadSnapshot(runtime ? Kind::eNgxRuntimeD3D12CreateFeature : Kind::eNgxD3D12CreateFeature, owner);
+    const auto create1 = entry_detour::ReadSnapshot(
+        runtime ? Kind::eNgxRuntimeVulkanCreateFeature1 : Kind::eNgxVulkanCreateFeature1, owner);
+    return create1.current ? create1 : entry_detour::ReadSnapshot(
+        runtime ? Kind::eNgxRuntimeVulkanCreateFeature : Kind::eNgxVulkanCreateFeature, owner);
+}
 struct CreateAttemptProof
 {
     entry_detour::Handle runtimeCreate{}, providerCreate{};
@@ -357,6 +410,7 @@ struct CreateAttemptProof
     ampere_wrapper::Layout layout{};
     ampere_wrapper::Capacity capacity{};
     bool active = false, valid = false;
+    GraphicsApi api = GraphicsApi::eD3D12;
 };
 std::mutex gCreateAttemptMutex;
 std::array<CreateAttemptProof, 64> gCreateAttemptsInProgress{};
@@ -369,10 +423,10 @@ bool CreateAttemptProofCurrent(const CreateAttemptProof& proof) noexcept
         || !proof.publication || !proof.luid) return false;
     const auto runtime = entry_detour::ReadSnapshot(proof.runtimeCreate);
     const auto provider = entry_detour::ReadSnapshot(proof.providerCreate);
-    return runtime.current && runtime.kind == entry_detour::Kind::eNgxRuntimeD3D12CreateFeature
+    return runtime.current && RuntimeCreateKind(runtime.kind, proof.api)
         && reinterpret_cast<uintptr_t>(runtime.owner) == proof.runtime
         && runtime.generation == proof.runtimeGeneration
-        && provider.current && provider.kind == entry_detour::Kind::eNgxD3D12CreateFeature
+        && provider.current && ProviderCreateKind(provider.kind, proof.api)
         && reinterpret_cast<uintptr_t>(provider.owner) == proof.provider
         && provider.generation == proof.providerGeneration
         && proof.provider == reinterpret_cast<uintptr_t>(ampere_gpu::Provider())
@@ -390,6 +444,8 @@ struct CreateAttemptScope
 {
     size_t slot = SIZE_MAX;
     explicit CreateAttemptScope(const Route& runtime) noexcept
+        : CreateAttemptScope(runtime, runtime.create, GraphicsApi::eD3D12) {}
+    CreateAttemptScope(const Route& runtime, entry_detour::Handle create, GraphicsApi api) noexcept
     {
         std::lock_guard lock(gCreateAttemptMutex);
         if (gCurrentCreateAttempt != SIZE_MAX) return;
@@ -398,11 +454,12 @@ struct CreateAttemptScope
             auto& proof = gCreateAttemptsInProgress[i];
             if (proof.active) continue;
             proof = {};
-            proof.runtimeCreate = runtime.create;
+            proof.runtimeCreate = create;
             proof.runtime = reinterpret_cast<uintptr_t>(runtime.module);
             proof.runtimeGeneration = runtime.generation;
             proof.publication = ampere_gpu::Publication();
             proof.luid = ampere_gpu::AdapterLuid();
+            proof.api = api;
             proof.active = proof.valid = true;
             slot = gCurrentCreateAttempt = i;
             break;
@@ -445,7 +502,7 @@ void AbortCurrentCreateAttempt() noexcept
     gCurrentCreateAttempt = SIZE_MAX;
 }
 
-bool BindCurrentCreateProvider(const Route& provider) noexcept
+bool BindCurrentCreateProvider(const Route& provider, entry_detour::Handle create) noexcept
 {
     std::lock_guard lock(gCreateAttemptMutex);
     if (gCurrentCreateAttempt == SIZE_MAX) return false;
@@ -453,7 +510,7 @@ bool BindCurrentCreateProvider(const Route& provider) noexcept
     if (!proof.active || !proof.valid) return false;
     const auto owner = reinterpret_cast<uintptr_t>(provider.module);
     if (proof.provider && (proof.provider != owner || proof.providerGeneration != provider.generation
-        || proof.providerCreate != provider.create))
+        || proof.providerCreate != create))
     { proof.valid = false; return false; }
     const uint64_t publication = ampere_gpu::Publication();
     if (ampere_gpu::Provider() != provider.module || !publication
@@ -465,7 +522,7 @@ bool BindCurrentCreateProvider(const Route& provider) noexcept
     proof.publication = publication;
     proof.provider = owner;
     proof.providerGeneration = provider.generation;
-    proof.providerCreate = provider.create;
+    proof.providerCreate = create;
     return true;
 }
 
@@ -499,7 +556,9 @@ struct EvaluationInput
 {
     int count = 0, index = 0;
     uint64_t frame = 0;
-    ID3D12Resource* output = nullptr;
+    // Output identity: the ID3D12Resource, or for Vulkan the VkImage behind
+    // the NVSDK_NGX_Resource_VK view (its descriptor can be per call).
+    void* output = nullptr;
     bool operator==(const EvaluationInput&) const = default;
 };
 struct EvaluationReads
@@ -509,10 +568,11 @@ struct EvaluationReads
 };
 thread_local EvaluationInput gEvaluationInput{};
 
-NVSDK_NGX_Result InvokeCreate(Route& route, CreateFn original,
-    ID3D12GraphicsCommandList* command, NVSDK_NGX_Feature feature,
-    const NVSDK_NGX_Parameter* parameters, NVSDK_NGX_Handle** output, Route*& provider,
-    Route& wrapper, const ampere_wrapper::Capacity& capacity, uint64_t& createAttemptToken)
+// The D3D12 and Vulkan calls differ only in the NGX entry call (`forward`).
+// Ownership TLS, SEH completion and batch failure bookkeeping are the same.
+template<class Forward>
+NVSDK_NGX_Result InvokeCreate(Route& route, Route*& provider, Route& wrapper,
+    const ampere_wrapper::Capacity& capacity, uint64_t& createAttemptToken, Forward forward)
 {
     NVSDK_NGX_Result result = kRejected;
     bool completed = false;
@@ -522,11 +582,7 @@ NVSDK_NGX_Result InvokeCreate(Route& route, CreateFn original,
     gCallingWrapper = &wrapper; gCreatingCapacity = capacity;
     __try
     {
-        const auto dispatch = route.runtime ? ngx_runtime_dispatch::Read(entry_detour::ReadSnapshot(route.create),
-            static_cast<uint32_t>(feature), gCreatingDispatch) : ngx_runtime_dispatch::ReadResult::eUnrecognized;
-        if (dispatch == ngx_runtime_dispatch::ReadResult::eInvalid)
-            Reject(ampere_diagnostics::kRuntimeDispatchFailure);
-        else result = original(command, feature, parameters, output);
+        result = forward();
         createAttemptToken = CurrentCreateAttemptToken();
         completed = true;
     }
@@ -551,7 +607,9 @@ NVSDK_NGX_Result InvokeRelease(Route& route, ReleaseFn original, NVSDK_NGX_Handl
     __finally { --gReleaseDepth; gCallingRuntime = nullptr; gCallingFeature = nullptr; }
 }
 
-NVSDK_NGX_Result InvokeEvaluate(Route& route, EvaluateFn original, ID3D12GraphicsCommandList* command,
+// EvaluateFn with an ID3D12GraphicsCommandList, or VkEvaluateFn with a VkCommandBuffer.
+template<class EvaluateEntry, class Command>
+NVSDK_NGX_Result InvokeEvaluate(Route& route, EvaluateEntry original, Command* command,
     const NVSDK_NGX_Handle* handle, const NVSDK_NGX_Parameter* parameters, PFN_NVSDK_NGX_ProgressCallback callback,
     ampere_policy::Feature& feature, bool& providerExecuted)
 {
@@ -567,6 +625,22 @@ NVSDK_NGX_Result InvokeEvaluate(Route& route, EvaluateFn original, ID3D12Graphic
         --gEvaluateDepth; gCallingRuntime = nullptr; gCallingFeature = nullptr;
     }
 }
+
+struct VulkanCreateCall
+{
+    VkCreateFn create{};
+    VkCreate1Fn create1{};
+    void* device = nullptr;
+    void* command = nullptr;
+    NVSDK_NGX_Feature feature{};
+    const NVSDK_NGX_Parameter* parameters = nullptr;
+    NVSDK_NGX_Handle** output = nullptr;
+    NVSDK_NGX_Result Forward() const
+    {
+        return create1 ? create1(device, command, feature, parameters, output)
+            : create(command, feature, parameters, output);
+    }
+};
 
 template<class F> F Original(entry_detour::Handle handle) noexcept
 {
@@ -669,10 +743,13 @@ size_t FindActiveOtherFeature(const Route& route, uintptr_t handle) noexcept
 FeatureLifetimeEvent LifetimeEvent(FeatureLifetimePhase phase,
     const ampere_policy::Feature& feature) noexcept
 {
+    // D3D12 features predate the API field and keep its zero value.
+    const GraphicsApi api = feature.api == static_cast<uint32_t>(GraphicsApi::eVulkan)
+        ? GraphicsApi::eVulkan : GraphicsApi::eD3D12;
     return {phase, feature.handle, feature.lifetime, feature.owner, feature.generation,
         feature.provider, feature.providerGeneration, feature.wrapper,
         feature.wrapperGeneration, feature.publication, feature.luid,
-        feature.createdGeneratedFrames, feature.createAttemptToken};
+        feature.createdGeneratedFrames, feature.createAttemptToken, static_cast<uint32_t>(api)};
 }
 
 void NotifyFeatureLifetime(const FeatureLifetimeEvent& event) noexcept
@@ -763,6 +840,35 @@ bool FeatureCapacityCurrent(const ampere_policy::Feature& feature) noexcept
         && ampere_wrapper::Matches(wrapper->wrapperLayout, feature.capacity);
 }
 
+// The wrapper re-acquires its presentation buffers when the game resizes the
+// swap chain or changes its fullscreen state, without a new Create (Star Wars
+// Outlaws does this before its first FG frame). The exact feature keeps its
+// allocation proof only between intervals, when a fresh stable read of the same
+// ring differs from the stored one in the buffer entries alone. Any other
+// allocation change still fails closed until Release and a new Create.
+void RefreshPresentationBuffers(const Route& route, ampere_policy::Feature& feature,
+    uint64_t publication, uint64_t adapter) noexcept
+{
+    const auto* wrapper = ActiveWrapper();
+    if (gCreateDepth || gEvaluateDepth || gReleaseDepth || !Ready() || !wrapper || !feature.batch.BetweenIntervals()
+        || !feature.Matches(feature.handle, reinterpret_cast<uintptr_t>(route.module), route.generation, publication, adapter)
+        || reinterpret_cast<uintptr_t>(wrapper->module) != feature.wrapper || wrapper->generation != feature.wrapperGeneration
+        || !ampere_policy::CapacityValid(feature.createdGeneratedFrames)
+        || feature.capacity.maximumGeneratedFrames != feature.createdGeneratedFrames
+        || ampere_wrapper::Matches(wrapper->wrapperLayout, feature.capacity)) return;
+    ampere_wrapper::Capacity current{};
+    if (!ampere_wrapper::Read(wrapper->wrapperLayout, current)) return;
+    const uint32_t changed = ampere_wrapper::RefreshedBuffers(feature.capacity, current);
+    if (!changed) return;
+    feature.capacity = current;
+    const uint64_t refreshes = gBufferRefreshes.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (refreshes > 8) return;
+    wchar_t detail[192]{};
+    swprintf_s(detail, L"Ampere wrapper presentation buffers re-acquired for the same swap chain: changed=%u/%u "
+        L"refreshes=%llu; exact feature kept", changed, current.bufferCount, static_cast<unsigned long long>(refreshes));
+    Report(detail);
+}
+
 bool ReadEvaluationInput(const NVSDK_NGX_Parameter* parameters, EvaluationInput& input,
     EvaluationReads* observation = nullptr, uint64_t legacySerial = 0) noexcept
 {
@@ -788,7 +894,7 @@ bool ReadEvaluationInput(const NVSDK_NGX_Parameter* parameters, EvaluationInput&
         // NGX parameters and the provider's temporal inputs are not rewritten.
         const bool legacyFrame = reads.frame != NVSDK_NGX_Result_Success && legacySerial != 0;
         if (legacyFrame) input.frame = legacySerial;
-        input.output = static_cast<ID3D12Resource*>(output);
+        input.output = output;
         return reads.count == NVSDK_NGX_Result_Success && reads.index == NVSDK_NGX_Result_Success
             && (reads.frame == NVSDK_NGX_Result_Success || legacyFrame) && reads.output == NVSDK_NGX_Result_Success
             && ampere_policy::EvaluationCountValid(input.count) && input.output != nullptr;
@@ -799,6 +905,20 @@ bool ReadEvaluationInput(const NVSDK_NGX_Parameter* parameters, EvaluationInput&
         if (observation) *observation = reads;
         return false;
     }
+}
+
+// The same parameter reads; the output descriptor is resolved to its VkImage
+// (ampere_vulkan_output.h). Sizes and format must then stay fixed per feature.
+bool ReadVulkanEvaluationInput(const NVSDK_NGX_Parameter* parameters, EvaluationInput& input,
+    VulkanOutput* view = nullptr, EvaluationReads* observation = nullptr, uint64_t legacySerial = 0) noexcept
+{
+    VulkanOutput resolved{};
+    if (view) *view = {};
+    if (!ReadEvaluationInput(parameters, input, observation, legacySerial)
+        || !ampere_vulkan_output::Read(input.output, resolved)) return false;
+    input.output = reinterpret_cast<void*>(static_cast<uintptr_t>(resolved.image));
+    if (view) *view = resolved;
+    return true;
 }
 
 void ReportEvaluationRejection(const Route& route, const ampere_policy::Feature& feature,
@@ -812,12 +932,12 @@ void ReportEvaluationRejection(const Route& route, const ampere_policy::Feature&
         L"get(count/index/frame/output)=%08X/%08X/%08X/%08X exception=%u "
         L"count=%d index=%d frame=%llu output=%p "
         L"batch(started/submitted/failed)=%u/%u/%u previousFrame=%llu firstOutput=%p "
-        L"depth(create/evaluate/release)=%u/%u/%u ready(d3d/adapter/program/startup/fatal)=%u/%u/%u/%u/%u",
+        L"depth(create/evaluate/release)=%u/%u/%u ready(device/adapter/program/startup/fatal)=%u/%u/%u/%u/%u",
         mask, reads.count, reads.index, reads.frame, reads.output, static_cast<unsigned>(reads.exception),
         input.count, input.index, input.frame, input.output,
         static_cast<unsigned>(feature.batch.started), feature.batch.submitted, static_cast<unsigned>(feature.batch.failed),
         feature.batch.frame, reinterpret_cast<void*>(feature.batch.outputs[0]), gCreateDepth, gEvaluateDepth, gReleaseDepth,
-        static_cast<unsigned>(gD3D12Confirmed.load()), static_cast<unsigned>(AdapterVerified()),
+        static_cast<unsigned>(DeviceConfirmed()), static_cast<unsigned>(AdapterVerified()),
         static_cast<unsigned>(ampere_gpu::Ready()), static_cast<unsigned>(gStartupComplete.load()),
         static_cast<unsigned>(gFatal.load()));
     Report(message);
@@ -1016,12 +1136,13 @@ template<size_t I> __declspec(noinline) bool Preset(uint32_t setting, uint32_t* 
         result = original(setting, value);
         if (result ? !AccessPresetValue(value, observed, false) : !WritablePresetValue(value)) return result;
     }
-    dlssg_preset::RecordProviderRead(provider, result, result ? observed : 0, overridden);
+    // Classified by caller (configuration or report read) once the route's
+    // reader is adopted for live switching (AdoptLivePresetReader).
+    dlssg_preset::RecordRouteRead(provider, caller, result, result ? observed : 0, overridden);
     gPresetQueries.fetch_add(1, std::memory_order_relaxed);
     return result;
 }
 
-#if MFG_UNLOCK_RUNTIME_GPU_SELECTION
 void ObserveCreateDevice(ID3D12GraphicsCommandList* command) noexcept
 {
     if (!command) return;
@@ -1034,26 +1155,29 @@ void ObserveCreateDevice(ID3D12GraphicsCommandList* command) noexcept
     __except (EXCEPTION_EXECUTE_HANDLER) {}
     if (device) device->Release();
 }
-#endif
 
 template<size_t I> NVSDK_NGX_Result NVSDK_CONV Create(ID3D12GraphicsCommandList* command,
     NVSDK_NGX_Feature feature, const NVSDK_NGX_Parameter* parameters, NVSDK_NGX_Handle** output)
 {
     std::unique_lock lock(gCalls);
     const bool frameGeneration = feature == NVSDK_NGX_Feature_FrameGeneration;
+    const bool trackedRoute = frameGeneration && gRoutes[I].runtime;
+    const bool runtimeOther = !frameGeneration && gRoutes[I].runtime && dlss_sr::Handles(feature);
+    fg_lifetime::CreateScope inFlight(gFgLifetime, trackedRoute);
     if (frameGeneration) gPipelineCreateObserved.store(true, std::memory_order_release);
     auto original = RouteOriginal<CreateFn>(gRoutes[I], gRoutes[I].create);
-#if MFG_UNLOCK_RUNTIME_GPU_SELECTION
     // The command list identifies the actual device even when a game does not
     // expose slSetD3DDevice. No backend is chosen by GPU name or enumeration order.
     if (frameGeneration) ObserveCreateDevice(command);
-    if (!gpu_dispatch::IsAmpere())
+    if (!gpu_dispatch::UsesTranslatedProgram())
     {
         if (!original) return NVSDK_NGX_Result_FAIL_NotInitialized;
         if (frameGeneration && gpu_dispatch::Selected() == gpu_dispatch::Family::eConflict) return kRejected;
-        if (frameGeneration || gpu_dispatch::IsAda())
+        // RTX 50 takes RTX 40's pass-through: its pre-call selects the provider
+        // and records the controls' evidence, but publishes no patch there.
+        if (frameGeneration || gpu_dispatch::UsesNativeProgram())
         {
-            const auto before = frameGeneration && gpu_dispatch::IsAda() ? gRoutes[I].beforeCreate : nullptr;
+            const auto before = frameGeneration && gpu_dispatch::UsesNativeProgram() ? gRoutes[I].beforeCreate : nullptr;
             const auto entry = gRoutes[I].create;
             lock.unlock();
             if (before) before(command, static_cast<uintptr_t>(feature), parameters, output,
@@ -1065,14 +1189,17 @@ template<size_t I> NVSDK_NGX_Result NVSDK_CONV Create(ID3D12GraphicsCommandList*
             // Ada/unmodified calls must not inherit Ampere's TLS lifecycle lock.
             fault_capture::NgxCall call(entry, _ReturnAddress(), command,
                 static_cast<uintptr_t>(feature), parameters);
-            const auto result = original(command, feature, parameters, output);
+            // DLSS SR/RR on the runtime route: detection and the SR preset selection.
+            const auto result = runtimeOther
+                ? dlss_sr::Create(I, original, command, feature, parameters, output)
+                : original(command, feature, parameters, output);
             call.Complete(static_cast<uint32_t>(result), reinterpret_cast<void* const*>(output));
+            if (trackedRoute) gFgLifetime.Created(I, CreatedHandle(result, output));
             return result;
         }
         // During pre-device startup, retain non-FG handles for Ampere's later
         // independent SR/RR pass-through. No parameter keys are used as identity.
     }
-#endif
     if (frameGeneration) gCreateAttempts.fetch_add(1, std::memory_order_relaxed);
     if (!original)
     {
@@ -1099,7 +1226,9 @@ template<size_t I> NVSDK_NGX_Result NVSDK_CONV Create(ID3D12GraphicsCommandList*
             reservation = SnapshotOtherFeature(I, route, slot);
         }
         lock.unlock();
-        const auto result = original(command, feature, parameters, output);
+        const auto result = runtimeOther
+            ? dlss_sr::Create(I, original, command, feature, parameters, output)
+            : original(command, feature, parameters, output);
         const uintptr_t created = CreatedHandle(result, output);
         lock.lock();
         if (auto* reserved = CurrentOtherFeature(reservation);
@@ -1162,8 +1291,14 @@ template<size_t I> NVSDK_NGX_Result NVSDK_CONV Create(ID3D12GraphicsCommandList*
     Route* provider = nullptr;
     attempt.forwarded = true;
     uint64_t createAttemptToken = 0;
-    const NVSDK_NGX_Result result = InvokeCreate(route, original, command, feature, parameters, output,
-        provider, *wrapper, capacity, createAttemptToken);
+    const NVSDK_NGX_Result result = InvokeCreate(route, provider, *wrapper, capacity, createAttemptToken,
+        [&]() -> NVSDK_NGX_Result {
+            const auto dispatch = route.runtime ? ngx_runtime_dispatch::Read(entry_detour::ReadSnapshot(route.create),
+                static_cast<uint32_t>(feature), gCreatingDispatch) : ngx_runtime_dispatch::ReadResult::eUnrecognized;
+            if (dispatch != ngx_runtime_dispatch::ReadResult::eInvalid) return original(command, feature, parameters, output);
+            Reject(ampere_diagnostics::kRuntimeDispatchFailure);
+            return kRejected;
+        });
     FeatureLifetimeEvent createdEvent{};
     bool notifyCreated = false;
     if (result == NVSDK_NGX_Result_Success && *output)
@@ -1194,6 +1329,7 @@ template<size_t I> NVSDK_NGX_Result NVSDK_CONV Create(ID3D12GraphicsCommandList*
             return kRejected;
         }
         gCreatedFeatures.fetch_add(1);
+        if (trackedRoute) gFgLifetime.Created(I, free->handle);
         // The owned legacy Create contract accepts only its sole value 1.
         // A successful real Create establishes the read; discovery alone does
         // not increment query counters or claim the modern B preset was used.
@@ -1222,28 +1358,47 @@ template<size_t I> NVSDK_NGX_Result NVSDK_CONV Create(ID3D12GraphicsCommandList*
     return result;
 }
 
+// The route's own native D3D12 or Vulkan Release (`entry`), with gCalls held.
+// ReadSnapshot().current re-checks the entry's first bytes and can read stale while the hook is live; a missing
+// original would skip NVIDIA's release and leak the feature's VRAM.
+ReleaseFn RouteRelease(const Route& route, entry_detour::Handle entry) noexcept
+{
+    auto original = RouteOriginal<ReleaseFn>(route, entry);
+    if (!original && !gpu_dispatch::UsesTranslatedProgram())
+    {
+        const auto state = entry_detour::ReadSnapshot(entry);
+        if (state.installed && state.original && state.owner == route.module)
+            original = reinterpret_cast<ReleaseFn>(state.original);
+    }
+    return original;
+}
+
 template<size_t I> NVSDK_NGX_Result NVSDK_CONV Evaluate(ID3D12GraphicsCommandList* command,
     const NVSDK_NGX_Handle* handle, const NVSDK_NGX_Parameter* parameters, PFN_NVSDK_NGX_ProgressCallback callback)
 {
     std::unique_lock lock(gCalls);
     auto original = RouteOriginal<EvaluateFn>(gRoutes[I], gRoutes[I].evaluate);
     if (!original) return NVSDK_NGX_Result_FAIL_NotInitialized;
-#if MFG_UNLOCK_RUNTIME_GPU_SELECTION
-    if (!gpu_dispatch::IsAmpere())
+    if (!gpu_dispatch::UsesTranslatedProgram())
     {
         if (gpu_dispatch::Selected() == gpu_dispatch::Family::eConflict) return kRejected;
-        const auto before = gpu_dispatch::IsAda() ? gRoutes[I].beforeEvaluate : nullptr;
+        const auto before = gpu_dispatch::UsesNativeProgram() ? gRoutes[I].beforeEvaluate : nullptr;
         const auto entry = gRoutes[I].evaluate;
+        const bool runtime = gRoutes[I].runtime && dlss_sr::Active();
+        const auto create = runtime ? RouteOriginal<CreateFn>(gRoutes[I], gRoutes[I].create) : nullptr;
+        const auto release = runtime ? RouteRelease(gRoutes[I], gRoutes[I].release) : nullptr;
         lock.unlock();
         if (before) before(command, reinterpret_cast<uintptr_t>(handle), parameters,
             reinterpret_cast<void*>(callback), 0, 0, entry, _ReturnAddress());
+        // A DLSS SR feature of the game may be evaluated through our replacement.
+        const NVSDK_NGX_Handle* target = runtime
+            ? dlss_sr::Evaluate(I, create, release, command, handle, parameters) : handle;
         fault_capture::NgxCall call(entry, _ReturnAddress(), command,
             reinterpret_cast<uintptr_t>(handle), parameters);
-        const auto result = original(command, handle, parameters, callback);
+        const auto result = original(command, target, parameters, callback);
         call.Complete(static_cast<uint32_t>(result));
         return result;
     }
-#endif
     const uintptr_t handleValue = reinterpret_cast<uintptr_t>(handle);
     size_t frameGenerationSlot = SIZE_MAX;
     {
@@ -1268,8 +1423,11 @@ template<size_t I> NVSDK_NGX_Result NVSDK_CONV Evaluate(ID3D12GraphicsCommandLis
         }
         if (lease.slot != SIZE_MAX)
         {
+            const auto create = RouteOriginal<CreateFn>(gRoutes[I], gRoutes[I].create);
+            const auto release = RouteRelease(gRoutes[I], gRoutes[I].release);
             lock.unlock();
-            const auto result = original(command, handle, parameters, callback);
+            const NVSDK_NGX_Handle* target = dlss_sr::Evaluate(I, create, release, command, handle, parameters);
+            const auto result = original(command, target, parameters, callback);
             lock.lock();
             if (auto* current = CurrentOtherFeature(lease);
                 current && current->Active(lease.handle) && current->activeCalls)
@@ -1289,13 +1447,18 @@ template<size_t I> NVSDK_NGX_Result NVSDK_CONV Evaluate(ID3D12GraphicsCommandLis
         && found->createdGeneratedFrames == 1 && found->evaluationSerial != UINT64_MAX;
     const uint64_t serial = found->evaluationSerial == UINT64_MAX ? 0 : ++found->evaluationSerial;
     const bool inputsValid = ReadEvaluationInput(parameters, input, &reads, legacyFrame ? serial : 0);
+    if (inputsValid && input.index == 1) RefreshPresentationBuffers(route, *found, publication, adapter);
+    // Read once, so admission and completion of this call agree (flip-metering path only).
+    const bool flipMetered = ampere_flip_metering::Active();
+    const bool repeatedOutput = inputsValid && found->batch.RepeatsOutput(reinterpret_cast<uintptr_t>(input.output));
     const uint32_t rejected = ((gCreateDepth || gEvaluateDepth || gReleaseDepth) ? 0x01u : 0)
         | (!Ready() ? 0x02u : 0)
         | (!inputsValid ? 0x04u : 0)
         | (!FeatureCapacityCurrent(*found) ? 0x08u : 0)
         | (!ampere_policy::CapacityValid(found->createdGeneratedFrames)
             || input.count > static_cast<int>(found->createdGeneratedFrames) ? 0x10u : 0)
-        | (!found->batch.Accepts(input.frame, input.count, input.index, reinterpret_cast<uintptr_t>(input.output)) ? 0x20u : 0)
+        | (!found->batch.Accepts(input.frame, input.count, input.index, reinterpret_cast<uintptr_t>(input.output),
+            flipMetered) ? 0x20u : 0)
         | (!found->Matches(reinterpret_cast<uintptr_t>(handle), reinterpret_cast<uintptr_t>(route.module),
             route.generation, publication, adapter) ? 0x40u : 0);
     if (rejected)
@@ -1304,9 +1467,14 @@ template<size_t I> NVSDK_NGX_Result NVSDK_CONV Evaluate(ID3D12GraphicsCommandLis
         // A wrapper that shares one output across the batch cannot present
         // distinct generated frames. Keep this feature at 2x instead of
         // re-certifying MFG on the next 2x batch (a 2x/3x alternation).
+        // With the flip-metering path observing SetFlipConfig, a refused
+        // repeat is the batch before the wrapper's first metered call; the
+        // next metered batch is admitted, so the feature is not latched
+        // (within a small allowance, ampere_policy::Feature).
         if (rejected == 0x20u && !found->outputReuseLatched
             && found->batch.DuplicateOutput(input.frame, input.count, input.index,
-                reinterpret_cast<uintptr_t>(input.output)))
+                reinterpret_cast<uintptr_t>(input.output))
+            && found->LatchRepeatedOutput(ampere_flip_metering::Observing()))
         {
             found->outputReuseLatched = true;
             gOutputReuseLatches.fetch_add(1, std::memory_order_relaxed);
@@ -1331,7 +1499,7 @@ template<size_t I> NVSDK_NGX_Result NVSDK_CONV Evaluate(ID3D12GraphicsCommandLis
     const LUID luid = device->GetAdapterLuid();
     D3D12_RESOURCE_DESC desc{};
     const bool outputValid = reinterpret_cast<uintptr_t>(device) == found->device
-        && OutputMatchesDevice(input.output, device, desc)
+        && OutputMatchesDevice(static_cast<ID3D12Resource*>(input.output), device, desc)
         && (!found->outputWidth || (found->outputWidth == desc.Width
             && found->outputHeight == desc.Height && found->outputFormat == desc.Format));
     device->Release();
@@ -1359,12 +1527,20 @@ template<size_t I> NVSDK_NGX_Result NVSDK_CONV Evaluate(ID3D12GraphicsCommandLis
     if (!FeatureCapacityCurrent(*found))
     { found->batch.Fail(input.frame, input.count, input.index); Reject(171); return kRejected; }
     found->batch.Complete(input.frame, input.count, input.index, reinterpret_cast<uintptr_t>(input.output),
-        result == NVSDK_NGX_Result_Success && providerExecuted);
+        result == NVSDK_NGX_Result_Success && providerExecuted, flipMetered);
     if (result == NVSDK_NGX_Result_Success)
     {
         if (!providerExecuted) { Reject(134); return kRejected; }
         if (found->batch.failed) { Reject(137); return kRejected; }
         found->evaluated = true; gEvaluations.fetch_add(1);
+        if (repeatedOutput && gFlipMeteredRepeats.fetch_add(1, std::memory_order_relaxed) == 0)
+        {
+            wchar_t detail[192]{};
+            swprintf_s(detail, L"Ampere flip-metered batch admitted: index %d reused an earlier output "
+                L"(count=%d frame=%llu); repeated outputs are admitted while SetFlipConfig reports metering",
+                input.index, input.count, static_cast<unsigned long long>(input.frame));
+            Report(detail);
+        }
         gCertifiedMaximum.store(found->outputReuseLatched ? 1u : found->createdGeneratedFrames,
             std::memory_order_release);
         if (input.index == input.count)
@@ -1383,53 +1559,12 @@ template<size_t I> NVSDK_NGX_Result NVSDK_CONV Evaluate(ID3D12GraphicsCommandLis
     return result;
 }
 
-template<size_t I> NVSDK_NGX_Result NVSDK_CONV Release(NVSDK_NGX_Handle* handle)
+// RTX 30 Release of an exact tracked FG feature, or of a tracked SR/RR feature,
+// for the D3D12 and the Vulkan ReleaseFeature of route I. gCalls is held.
+NVSDK_NGX_Result AmpereRelease(size_t I, std::unique_lock<std::recursive_mutex>& lock,
+    ReleaseFn original, NVSDK_NGX_Handle* handle)
 {
-    std::unique_lock lock(gCalls);
-    auto original = RouteOriginal<ReleaseFn>(gRoutes[I], gRoutes[I].release);
-#if MFG_UNLOCK_RUNTIME_GPU_SELECTION
-    // ReadSnapshot().current re-checks the entry's first bytes and can read stale while the hook is live; returning here would skip NVIDIA's release and leak the feature's VRAM.
-    if (!original && !gpu_dispatch::IsAmpere())
-    {
-        const auto state = entry_detour::ReadSnapshot(gRoutes[I].release);
-        if (state.installed && state.original && state.owner == gRoutes[I].module)
-            original = reinterpret_cast<ReleaseFn>(state.original);
-    }
-#endif
-    if (!original) return NVSDK_NGX_Result_FAIL_NotInitialized;
     const uintptr_t handleValue = reinterpret_cast<uintptr_t>(handle);
-#if MFG_UNLOCK_RUNTIME_GPU_SELECTION
-    if (!gpu_dispatch::IsAmpere())
-    {
-        OtherFeatureLease lease{};
-        const auto entry = gRoutes[I].release;
-        {
-            auto& route = gRoutes[I];
-            const size_t slot = FindActiveOtherFeature(route, handleValue);
-            if (slot != SIZE_MAX && route.otherFeatures[slot].activeCalls == 0)
-            {
-                route.otherFeatures[slot].state = Route::OtherFeature::State::eReleasing;
-                lease = SnapshotOtherFeature(I, route, slot, handleValue);
-            }
-        }
-        lock.unlock();
-        fault_capture::NgxCall call(entry, _ReturnAddress(), nullptr, handleValue, nullptr);
-        const auto result = original(handle);
-        call.Complete(static_cast<uint32_t>(result));
-        if (lease.slot != SIZE_MAX)
-        {
-            lock.lock();
-            if (auto* current = CurrentOtherFeature(lease);
-                current && current->state == Route::OtherFeature::State::eReleasing
-                    && current->handle == lease.handle)
-            {
-                if (result == NVSDK_NGX_Result_Success) current->Clear();
-                else current->state = Route::OtherFeature::State::eActive;
-            }
-        }
-        return result;
-    }
-#endif
     Route& route = gRoutes[I];
     for (auto& f : route.features)
     {
@@ -1443,6 +1578,7 @@ template<size_t I> NVSDK_NGX_Result NVSDK_CONV Release(NVSDK_NGX_Handle* handle)
             const FeatureLifetimeEvent event = LifetimeEvent(FeatureLifetimePhase::eReleased, f);
             if (f.Release(result == NVSDK_NGX_Result_Success))
             {
+                if (route.runtime) gFgLifetime.Released(I, handleValue);
                 gCertifiedMaximum.store(0, std::memory_order_release);
                 gPresentationBuffers.store(0, std::memory_order_release);
                 const bool notifyReleased = QueueFeatureLifetime(event);
@@ -1464,7 +1600,9 @@ template<size_t I> NVSDK_NGX_Result NVSDK_CONV Release(NVSDK_NGX_Handle* handle)
     // No reference or iterator into the growable table crosses this native
     // boundary. A concurrent Create can safely grow it or reuse the number.
     lock.unlock();
+    dlss_sr::BeforeRelease(I, original, handle);
     const auto result = original(handle);
+    dlss_sr::AfterRelease(I, handle, result);
     lock.lock();
     if (auto* current = CurrentOtherFeature(lease);
         current && current->state == Route::OtherFeature::State::eReleasing
@@ -1476,6 +1614,49 @@ template<size_t I> NVSDK_NGX_Result NVSDK_CONV Release(NVSDK_NGX_Handle* handle)
     return result;
 }
 
+template<size_t I> NVSDK_NGX_Result NVSDK_CONV Release(NVSDK_NGX_Handle* handle)
+{
+    std::unique_lock lock(gCalls);
+    const auto original = RouteRelease(gRoutes[I], gRoutes[I].release);
+    if (!original) return NVSDK_NGX_Result_FAIL_NotInitialized;
+    const uintptr_t handleValue = reinterpret_cast<uintptr_t>(handle);
+    if (!gpu_dispatch::UsesTranslatedProgram())
+    {
+        OtherFeatureLease lease{};
+        const auto entry = gRoutes[I].release;
+        {
+            auto& route = gRoutes[I];
+            const size_t slot = FindActiveOtherFeature(route, handleValue);
+            if (slot != SIZE_MAX && route.otherFeatures[slot].activeCalls == 0)
+            {
+                route.otherFeatures[slot].state = Route::OtherFeature::State::eReleasing;
+                lease = SnapshotOtherFeature(I, route, slot, handleValue);
+            }
+        }
+        const bool runtimeRoute = gRoutes[I].runtime;
+        lock.unlock();
+        if (runtimeRoute) dlss_sr::BeforeRelease(I, original, handle);
+        fault_capture::NgxCall call(entry, _ReturnAddress(), nullptr, handleValue, nullptr);
+        const auto result = original(handle);
+        call.Complete(static_cast<uint32_t>(result));
+        if (runtimeRoute) dlss_sr::AfterRelease(I, handle, result);
+        if (runtimeRoute && result == NVSDK_NGX_Result_Success) gFgLifetime.Released(I, handleValue);
+        if (lease.slot != SIZE_MAX)
+        {
+            lock.lock();
+            if (auto* current = CurrentOtherFeature(lease);
+                current && current->state == Route::OtherFeature::State::eReleasing
+                    && current->handle == lease.handle)
+            {
+                if (result == NVSDK_NGX_Result_Success) current->Clear();
+                else current->state = Route::OtherFeature::State::eActive;
+            }
+        }
+        return result;
+    }
+    return AmpereRelease(I, lock, original, handle);
+}
+
 NVSDK_NGX_Result NVSDK_CONV RejectProviderCall(void*, uintptr_t, const void*, void*) noexcept { return kRejected; }
 
 bool WINAPI ProviderGate(void* arg1, uintptr_t arg2, const void* arg3, void* arg4,
@@ -1485,13 +1666,12 @@ bool WINAPI ProviderGate(void* arg1, uintptr_t arg2, const void* arg3, void* arg
     if (attemptedEntry.current && attemptedEntry.kind == entry_detour::Kind::eNgxD3D12CreateFeature
         && arg2 == NVSDK_NGX_Feature_FrameGeneration)
         gPipelineCreateObserved.store(true, std::memory_order_release);
-#if MFG_UNLOCK_RUNTIME_GPU_SELECTION
     std::unique_lock callLock(gCalls);
     const auto selectedEntry = entry_detour::ReadSnapshot(entry);
     if (selectedEntry.kind == entry_detour::Kind::eNgxD3D12CreateFeature
         && arg2 == NVSDK_NGX_Feature_FrameGeneration)
         ObserveCreateDevice(static_cast<ID3D12GraphicsCommandList*>(arg1));
-    if (!gpu_dispatch::IsAmpere())
+    if (!gpu_dispatch::UsesTranslatedProgram())
     {
         const auto selectedRoute = std::find_if(gRoutes.begin(), gRoutes.end(), [&](const Route& candidate) {
             return !candidate.runtime && candidate.module == selectedEntry.owner
@@ -1500,7 +1680,12 @@ bool WINAPI ProviderGate(void* arg1, uintptr_t arg2, const void* arg3, void* arg
         if (gpu_dispatch::Selected() == gpu_dispatch::Family::eConflict)
             return selectedEntry.kind == entry_detour::Kind::eAmpereRelease;
         entry_detour::ForwardPreCall before = nullptr;
-        if (gpu_dispatch::IsAda())
+        // A provider FG Create outside every tracked runtime Create can leave a live
+        // feature the lifetime tracker never sees.
+        if (selectedEntry.kind == entry_detour::Kind::eNgxD3D12CreateFeature
+            && arg2 == NVSDK_NGX_Feature_FrameGeneration)
+            gFgLifetime.ObserveProviderCreate();
+        if (gpu_dispatch::UsesNativeProgram())
         {
             if (selectedEntry.kind == entry_detour::Kind::eNgxD3D12CreateFeature
                 && arg2 == NVSDK_NGX_Feature_FrameGeneration && selectedRoute->beforeCreate)
@@ -1519,7 +1704,6 @@ bool WINAPI ProviderGate(void* arg1, uintptr_t arg2, const void* arg3, void* arg
         fault_capture::ProviderForward(entry, caller, arg1, arg2, arg3);
         return true;
     }
-#endif
     // Tail forwarding keeps NVIDIA's real runtime caller on the stack.
     // Only a nested call belonging to our tracked runtime operation is admitted.
     HMODULE callerModule = nullptr;
@@ -1549,7 +1733,7 @@ bool WINAPI ProviderGate(void* arg1, uintptr_t arg2, const void* arg3, void* arg
             || !gCallingWrapper || !ampere_wrapper::Matches(gCallingWrapper->wrapperLayout, gCreatingCapacity)
             || (gCreatingProvider && gCreatingProvider != &route)) return Reject(162);
         if (!ampere_gpu::BindProvider(route.module)) return Reject(161);
-        if (!BindCurrentCreateProvider(route)) return Reject(162);
+        if (!BindCurrentCreateProvider(route, route.create)) return Reject(162);
         gCreatingProvider = &route;
         if (route.beforeCreate) route.beforeCreate(arg1, arg2, arg3, arg4, arg5, arg6, entry, caller);
         return true;
@@ -1580,6 +1764,87 @@ bool WINAPI ProviderGate(void* arg1, uintptr_t arg2, const void* arg3, void* arg
     return Reject(166);
 }
 
+// The RTX 30/20 predicates of one FG requirements query during slInit/startup.
+struct StartupRequirementScope
+{
+    // native: RTX 40/50, whose provider runs its own program and needs no answer here.
+    bool native = false, conflict = false, adapter = false, fatal = false;
+    bool Scoped() const noexcept { return !native && !conflict && adapter && !fatal; }
+};
+
+template<typename AdapterCheck>
+StartupRequirementScope ObserveStartupRequirementScope(AdapterCheck&& adapterMatches) noexcept
+{
+    StartupRequirementScope scope{};
+    scope.native = gpu_dispatch::UsesNativeProgram();
+    scope.conflict = gpu_dispatch::Selected() == gpu_dispatch::Family::eConflict;
+    scope.adapter = !scope.native && !scope.conflict && adapterMatches();
+    scope.fatal = gFatal.load();
+    return scope;
+}
+
+// The patcher's pre-slInit OTA scan selected an NVIDIA-signed provider whose
+// embedded version this route admits. It is mapped and verified at device setup.
+bool EligibleOtaProviderSelected() noexcept
+{
+    const auto selection = dlssg_provider_selection::Read();
+    return selection.prepared && selection.selected && selection.selected.nvidiaSigned
+        && dlssg_provider_policy::IsSupportedAmpereVersion(selection.selected.version);
+}
+
+ampere_startup_requirements::Answer DecideStartupRequirements(NVSDK_NGX_Result result,
+    const NVSDK_NGX_FeatureRequirement& native) noexcept
+{
+    ampere_startup_requirements::Query query{};
+    query.success = result == NVSDK_NGX_Result_Success;
+    query.adapterAnswer = native.FeatureSupported == NVSDK_NGX_FeatureSupportResult_AdapterUnsupported
+        || native.FeatureSupported == NVSDK_NGX_FeatureSupportResult_Supported;
+    query.featureMissing = result == NVSDK_NGX_Result_FAIL_FeatureNotSupported
+        || result == NVSDK_NGX_Result_FAIL_FeatureNotFound;
+    query.providerReady = ampere_gpu::Ready();
+    query.slInit = gInitDepth != 0;
+    query.eligibleOta = query.featureMissing && !query.providerReady && query.slInit && EligibleOtaProviderSelected();
+    return ampere_startup_requirements::Decide(query);
+}
+
+NVSDK_NGX_Result AnswerStartupRequirements(NVSDK_NGX_Result result, NVSDK_NGX_FeatureRequirement* requirements,
+    ampere_startup_requirements::Answer answer) noexcept
+{
+    using ampere_startup_requirements::Answer;
+    if (answer == Answer::eAdapterSupported)
+    {
+        requirements->FeatureSupported = NVSDK_NGX_FeatureSupportResult_Supported;
+        requirements->MinHWArchitecture = 0;
+        return result;
+    }
+    if (answer == Answer::eReadyProvider || answer == Answer::eEligibleOta)
+    {
+        // Restrict the requirements override to this verified FG startup.
+        *requirements = {};
+        requirements->FeatureSupported = NVSDK_NGX_FeatureSupportResult_Supported;
+        return NVSDK_NGX_Result_Success;
+    }
+    return result;
+}
+
+// Streamline unloads sl.dlss_g during slInit when this answer is unsupported
+// on every adapter; the log line is the only record of that decision.
+void ReportStartupRequirements(const wchar_t* api, const StartupRequirementScope& scope, NVSDK_NGX_Result result,
+    const NVSDK_NGX_FeatureRequirement& native, ampere_startup_requirements::Answer answer) noexcept
+{
+    if (!scope.Scoped() && !ampere_provider_arch::Armed()) return;
+    if (gInitDepth) gInitRequirementQueries.fetch_add(1, std::memory_order_relaxed);
+    if (gStartupRequirementQueries.fetch_add(1, std::memory_order_relaxed) >= kStartupRequirementReports) return;
+    wchar_t detail[384]{};
+    swprintf_s(detail, L"Ampere FG requirements (%ls, %ls): result=0x%08X featureSupported=%d minArchitecture=0x%X "
+        L"scoped=%u native=%u conflict=%u adapter=%u fatal=%u providerReady=%u answer=%hs",
+        api, gInitDepth ? L"slInit" : L"startup", static_cast<uint32_t>(result), static_cast<int>(native.FeatureSupported),
+        native.MinHWArchitecture, static_cast<unsigned>(scope.Scoped()), static_cast<unsigned>(scope.native),
+        static_cast<unsigned>(scope.conflict), static_cast<unsigned>(scope.adapter), static_cast<unsigned>(scope.fatal),
+        static_cast<unsigned>(ampere_gpu::Ready()), ampere_startup_requirements::AnswerName(answer));
+    Report(detail);
+}
+
 template<size_t I> NVSDK_NGX_Result NVSDK_CONV Requirements(IDXGIAdapter* adapter,
     const NVSDK_NGX_FeatureDiscoveryInfo* discovery, NVSDK_NGX_FeatureRequirement* requirements)
 {
@@ -1589,41 +1854,29 @@ template<size_t I> NVSDK_NGX_Result NVSDK_CONV Requirements(IDXGIAdapter* adapte
     // Streamline asks this during slInit, before a D3D12 device exists.
     // Verify only the adapter supplied to this FG query. Actual device LUID
     // confirmation remains mandatory before program publication and Create.
-    const bool scoped =
-#if MFG_UNLOCK_RUNTIME_GPU_SELECTION
-        !gpu_dispatch::IsAda() && gpu_dispatch::Selected() != gpu_dispatch::Family::eConflict &&
-#endif
-        (gInitDepth || gStartupDepth) && requirements && discovery
-        && discovery->FeatureID == NVSDK_NGX_Feature_FrameGeneration
-        && ampere_gpu::ObserveAdapter(adapter) && !gFatal.load();
-    if (!scoped)
+    const bool startupQuery = (gInitDepth || gStartupDepth) && requirements && discovery
+        && discovery->FeatureID == NVSDK_NGX_Feature_FrameGeneration;
+    if (!startupQuery)
     {
         // Non-FG and ordinary capability discovery is pure pass-through. It
         // must not serialize native code with feature callbacks on gCalls.
         lock.unlock();
         return original(adapter, discovery, requirements);
     }
-    const auto result = original(adapter, discovery, requirements);
-    if (gFatal.load()) return result;
-    if (result == NVSDK_NGX_Result_Success
-        && (requirements->FeatureSupported == NVSDK_NGX_FeatureSupportResult_AdapterUnsupported
-            || requirements->FeatureSupported == NVSDK_NGX_FeatureSupportResult_Supported))
+    const auto scope = ObserveStartupRequirementScope([&] { return ampere_gpu::ObserveAdapter(adapter); });
+    if (!scope.Scoped())
     {
-        requirements->FeatureSupported = NVSDK_NGX_FeatureSupportResult_Supported;
-        requirements->MinHWArchitecture = 0;
+        lock.unlock();
+        const auto result = original(adapter, discovery, requirements);
+        ReportStartupRequirements(L"d3d12", scope, result, *requirements, ampere_startup_requirements::Answer::eNative);
         return result;
     }
-    if (ampere_gpu::Ready()
-        && (result == NVSDK_NGX_Result_FAIL_FeatureNotSupported || result == NVSDK_NGX_Result_FAIL_FeatureNotFound))
-    {
-        // The actual eligible provider and its full SM86 program are present.
-        // Restrict the requirements override to this verified FG startup.
-        *requirements = {};
-        requirements->FeatureSupported = NVSDK_NGX_FeatureSupportResult_Supported;
-        return NVSDK_NGX_Result_Success;
-    }
-    // Do not invent a feature when the provider is absent or failed to load.
-    return result;
+    const auto result = original(adapter, discovery, requirements);
+    const auto native = *requirements;
+    const auto answer = gFatal.load() ? ampere_startup_requirements::Answer::eNative
+        : DecideStartupRequirements(result, native);
+    ReportStartupRequirements(L"d3d12", scope, result, native, answer);
+    return AnswerStartupRequirements(result, requirements, answer);
 }
 
 bool PublishStartupCapabilities(Route& route, NVSDK_NGX_Parameter* parameters) noexcept
@@ -1639,6 +1892,19 @@ bool PublishStartupCapabilities(Route& route, NVSDK_NGX_Parameter* parameters) n
                 : candidate.wrapperLayout.maximumGeneratedFrames;
     if (!ampere_policy::CapacityValid(bootstrapMaximum))
     {
+        // No DLSS-G wrapper reached device setup at all: Streamline dropped
+        // sl.dlss_g during slInit (or never loaded it). An unrecognized
+        // wrapper layout is reported when it is inspected and stays 170.
+        if (std::none_of(gRoutes.begin(), gRoutes.end(),
+                [](const Route& candidate) { return candidate.wrapperInspected; }))
+        {
+            wchar_t detail[256]{};
+            swprintf_s(detail, L"Ampere capability bootstrap refused: no Streamline DLSS-G plug-in reached device setup; "
+                L"RTX 30/20 FG requirements queries this run=%u",
+                gStartupRequirementQueries.load(std::memory_order_relaxed));
+            Report(detail);
+            return Reject(ampere_diagnostics::kStartupWrapperMissingFailure);
+        }
         // Bounded startup evidence: distinguish an absent pacer from a late,
         // unreadable or already allocated wrapper if the rig still refuses.
         for (const auto& candidate : gRoutes)
@@ -1686,16 +1952,16 @@ bool PublishStartupCapabilities(Route& route, NVSDK_NGX_Parameter* parameters) n
     __except (EXCEPTION_EXECUTE_HANDLER) { return Reject(154); }
 }
 
-template<size_t I> NVSDK_NGX_Result NVSDK_CONV Parameters(NVSDK_NGX_Parameter** output)
+// NVSDK_NGX_D3D12_GetCapabilityParameters and NVSDK_NGX_VULKAN_GetCapabilityParameters
+// share their signature and the RTX 30 startup bootstrap.
+template<size_t I, bool Vulkan = false> NVSDK_NGX_Result NVSDK_CONV Parameters(NVSDK_NGX_Parameter** output)
 {
     std::unique_lock lock(gCalls);
-    auto original = RouteOriginal<ParametersFn>(gRoutes[I], gRoutes[I].parameters);
+    auto original = RouteOriginal<ParametersFn>(gRoutes[I], Vulkan ? gRoutes[I].vkParameters : gRoutes[I].parameters);
     if (!original) return NVSDK_NGX_Result_FAIL_NotInitialized;
     const bool publishStartup = output && gStartupDepth
         && ampere_gpu::Ready() && AdapterVerified() && !gFatal.load()
-#if MFG_UNLOCK_RUNTIME_GPU_SELECTION
-        && gpu_dispatch::IsAmpere()
-#endif
+        && gpu_dispatch::UsesTranslatedProgram()
         ;
     if (!publishStartup)
     {
@@ -1718,7 +1984,437 @@ template<size_t I> NVSDK_NGX_Result NVSDK_CONV Parameters(NVSDK_NGX_Parameter** 
     return result;
 }
 
+// RTX 30 Vulkan route. The runtime's NGX Vulkan Create/Create1/Evaluate are the
+// patcher's forwarding entries; on RTX 30 its gate diverts every call to these
+// per-route thunks (the entries' rejected targets), which apply the D3D12
+// route's create, capacity, batch and lifetime rules. A VkCommandBuffer names
+// no device: the VkDevice observed on the verified VkPhysicalDevice takes the
+// command list's place, and the output view's VkImage the output resource's.
+void ReportVulkanEvaluationSubmissionFailure(const Route& route, const ampere_policy::Feature& feature,
+    void* command, const EvaluationInput& input, const EvaluationReads& reads, const VulkanOutput& output,
+    NVSDK_NGX_Result result, bool providerEntered) noexcept
+{
+    // One snapshot per exact feature lifetime, as for D3D12.
+    if (result == NVSDK_NGX_Result_Success && providerEntered) return;
+    wchar_t message[1024]{};
+    swprintf_s(message, L"Ampere first evaluation submission failure: call=NVSDK_NGX_VULKAN_EvaluateFeature "
+        L"result=0x%08X platformError=%u providerEntered=%u count=%d index=%d frame=%llu image=%p boundary=%u",
+        static_cast<uint32_t>(result), static_cast<unsigned>(result == NVSDK_NGX_Result_FAIL_PlatformError),
+        static_cast<unsigned>(providerEntered), input.count, input.index, input.frame, input.output, FailureCode());
+    Report(message);
+    for (HMODULE owner : {route.module, reinterpret_cast<HMODULE>(feature.provider), reinterpret_cast<HMODULE>(feature.wrapper)})
+    {
+        wchar_t path[2048]{};
+        dlssg_provider_policy::VersionTriplet version{};
+        const DWORD length = GetModuleFileNameW(owner, path, static_cast<DWORD>(std::size(path)));
+        const bool versionRead = length && length < std::size(path) && dlssg_provider_policy::ReadProviderVersion(path, version);
+        swprintf_s(message, L"Ampere evaluation failure module: owner=%p version=%u.%u.%u versionRead=%u path=%.800ls",
+            owner, version.major, version.minor, version.build, static_cast<unsigned>(versionRead), path);
+        Report(message);
+    }
+    swprintf_s(message, L"Ampere Vulkan evaluation failure device: commandBuffer=%p device=%p expectedDevice=%p "
+        L"luid=0x%llX handle=%p lifetime=%llu runtime=%p/%llu provider=%p/%llu wrapper=%p/%llu publication=0x%llX",
+        command, reinterpret_cast<void*>(gVulkanDevice.load()), reinterpret_cast<void*>(feature.device),
+        feature.luid, reinterpret_cast<void*>(feature.handle), feature.lifetime, route.module, route.generation,
+        reinterpret_cast<void*>(feature.provider), feature.providerGeneration,
+        reinterpret_cast<void*>(feature.wrapper), feature.wrapperGeneration, feature.publication);
+    Report(message);
+    swprintf_s(message, L"Ampere Vulkan evaluation failure output: image=0x%llX size=%ux%u format=%u "
+        L"get(count/index/frame/output)=%08X/%08X/%08X/%08X",
+        static_cast<unsigned long long>(output.image), output.width, output.height, output.format,
+        reads.count, reads.index, reads.frame, reads.output);
+    Report(message);
+}
+
+NVSDK_NGX_Result VulkanCreate(size_t I, VulkanCreateCall call, bool create1, const void* caller)
+{
+    std::unique_lock lock(gCalls);
+    Route& route = gRoutes[I];
+    const bool frameGeneration = call.feature == NVSDK_NGX_Feature_FrameGeneration;
+    if (frameGeneration) gPipelineCreateObserved.store(true, std::memory_order_release);
+    const entry_detour::Handle entry = create1 ? route.vkCreate1 : route.vkCreate;
+    const entry_detour::ForwardPreCall before = create1 ? route.vkBeforeCreate1 : route.vkBeforeCreate;
+    if (create1) call.create1 = RouteOriginal<VkCreate1Fn>(route, entry);
+    else call.create = RouteOriginal<VkCreateFn>(route, entry);
+    if (frameGeneration) gCreateAttempts.fetch_add(1, std::memory_order_relaxed);
+    if (create1 ? !call.create1 : !call.create)
+    {
+        if (frameGeneration)
+        {
+            gCreateBlockedBeforeProvider.fetch_add(1, std::memory_order_relaxed);
+            gFailures.Record(ampere_diagnostics::kCreateSubmissionFailure, NVSDK_NGX_Result_FAIL_NotInitialized);
+        }
+        return NVSDK_NGX_Result_FAIL_NotInitialized;
+    }
+    if (!frameGeneration)
+    {
+        // SR/RR identity is established at Create, as on D3D12.
+        OtherFeatureLease reservation{};
+        {
+            if (!route.runtime || !call.output) { Reject(126); return kRejected; }
+            const size_t slot = ReserveOtherFeature(route);
+            if (slot == SIZE_MAX) { Reject(126); return kRejected; }
+            reservation = SnapshotOtherFeature(I, route, slot);
+        }
+        lock.unlock();
+        const auto result = call.Forward();
+        const uintptr_t created = CreatedHandle(result, call.output);
+        lock.lock();
+        if (auto* reserved = CurrentOtherFeature(reservation);
+            reserved && reserved->state == Route::OtherFeature::State::eCreating)
+        {
+            if (result == NVSDK_NGX_Result_Success && created)
+            {
+                reserved->handle = created;
+                reserved->state = Route::OtherFeature::State::eActive;
+            }
+            else reserved->Clear();
+        }
+        return result;
+    }
+    struct Attempt
+    {
+        bool forwarded = false;
+        ~Attempt() { if (!forwarded) gCreateBlockedBeforeProvider.fetch_add(1, std::memory_order_relaxed); }
+    } attempt;
+    if (!call.output || !call.command || gCreateDepth || gEvaluateDepth || gReleaseDepth
+        || gCurrentCreateAttempt != SIZE_MAX
+        || !gStartupComplete.load() || gFatal.load()) { Reject(120); return kRejected; }
+    gCertifiedMaximum.store(0, std::memory_order_release);
+    *call.output = nullptr;
+    // CreateFeature1 names its VkDevice; CreateFeature uses the device the host
+    // initialized NGX with. Either must be the one observed on the adapter.
+    const uintptr_t device = gVulkanDevice.load(std::memory_order_acquire);
+    if (!gVulkanConfirmed.load() || !AdapterVerified() || !device || device == UINTPTR_MAX
+        || (create1 && reinterpret_cast<uintptr_t>(call.device) != device))
+    { Reject(121); return kRejected; }
+    const uint64_t packed = ampere_gpu::AdapterLuid();
+    CreateAttemptScope createAttempt(route, entry, GraphicsApi::eVulkan);
+    if (!createAttempt) { Reject(120); return kRejected; }
+    if (before)
+    {
+        if (create1)
+            before(call.device, reinterpret_cast<uintptr_t>(call.command),
+                reinterpret_cast<const void*>(static_cast<uintptr_t>(call.feature)),
+                const_cast<NVSDK_NGX_Parameter*>(call.parameters), reinterpret_cast<uintptr_t>(call.output), 0,
+                entry, caller);
+        else
+            before(call.command, static_cast<uintptr_t>(call.feature), call.parameters, call.output, 0, 0,
+                entry, caller);
+    }
+    ObserveCreationCount(call.parameters);
+    if (!Ready() || !ampere_policy::CapacityValid(route.startupMaximum)
+        || !call.parameters) { Reject(122); return kRejected; }
+    auto* wrapper = ActiveWrapper();
+    ampere_wrapper::Capacity capacity{};
+    const bool callerProven = wrapper && ampere_wrapper::CreationOnStack(wrapper->wrapperLayout);
+    const bool buffersProven = wrapper && ampere_wrapper::Read(wrapper->wrapperLayout, capacity);
+    if (!callerProven || !buffersProven || capacity.maximumGeneratedFrames != route.startupMaximum)
+    {
+        wchar_t message[176]{};
+        swprintf_s(message, L"Ampere MFG allocation rejected (Vulkan): wrapper=%p generation=%llu caller=%u buffers=%u",
+            wrapper ? wrapper->module : nullptr, wrapper ? wrapper->generation : 0,
+            static_cast<unsigned>(callerProven), static_cast<unsigned>(buffersProven));
+        Report(message);
+        gPresentationBuffers.store(0); Reject(171); return kRejected;
+    }
+    createAttempt.BindCapacity(*wrapper, capacity);
+    gPresentationBuffers.store(capacity.bufferCount);
+    auto free = std::find_if(route.features.begin(), route.features.end(), [](const auto& f) { return !f.handle; });
+    if (free == route.features.end()) { Reject(123); return kRejected; }
+    Route* provider = nullptr;
+    attempt.forwarded = true;
+    uint64_t createAttemptToken = 0;
+    // The runtime's Vulkan dispatch table has no recognized layout; the nested
+    // provider gate and its prepared-route checks bind the provider.
+    const NVSDK_NGX_Result result = InvokeCreate(route, provider, *wrapper, capacity, createAttemptToken,
+        [&] { return call.Forward(); });
+    FeatureLifetimeEvent createdEvent{};
+    bool notifyCreated = false;
+    if (result == NVSDK_NGX_Result_Success && *call.output)
+    {
+        uint64_t lifetime = ++route.nextFeatureLifetime;
+        if (!lifetime) lifetime = ++route.nextFeatureLifetime;
+        *free = {reinterpret_cast<uintptr_t>(*call.output), reinterpret_cast<uintptr_t>(route.module),
+            route.generation, ampere_gpu::Publication(), packed, false};
+        free->lifetime = lifetime;
+        free->provider = provider ? reinterpret_cast<uintptr_t>(provider->module) : 0;
+        free->providerGeneration = provider ? provider->generation : 0;
+        free->device = device;
+        free->api = static_cast<uint32_t>(GraphicsApi::eVulkan);
+        free->createdGeneratedFrames = capacity.maximumGeneratedFrames;
+        free->wrapper = reinterpret_cast<uintptr_t>(wrapper->module);
+        free->wrapperGeneration = wrapper->generation;
+        free->capacity = capacity;
+        free->createAttemptToken = createAttemptToken;
+        if (!provider || !createAttemptToken
+            || (!provider->legacyPresetReady && gPresetQueries.load() == 0)
+            || !FeatureCapacityCurrent(*free))
+        {
+            createAttempt.Finish();
+            gFatal.store(true);
+            Reject(125);
+            if (auto release = Original<ReleaseFn>(route.vkRelease))
+                free->Release(InvokeRelease(route, release, *call.output, *free) == NVSDK_NGX_Result_Success);
+            *call.output = nullptr;
+            return kRejected;
+        }
+        gCreatedFeatures.fetch_add(1);
+        if (provider->legacyPresetReady)
+            dlssg_preset::RecordProviderRead(provider->module, true, 1, false);
+        gFailures.Recover();
+        gFailure.store(0, std::memory_order_release);
+        gCertifiedMaximum.store(free->createdGeneratedFrames, std::memory_order_release);
+        wchar_t detail[224]{};
+        swprintf_s(detail, L"Ampere FG Create accepted (Vulkan): generatedCapacity=%u presentationBuffers=%u mode=%ls; "
+            L"exact feature tracked", free->createdGeneratedFrames, capacity.bufferCount,
+            free->createdGeneratedFrames == 1 ? L"legacy-2x" : L"MFG");
+        Report(detail);
+        createdEvent = LifetimeEvent(FeatureLifetimePhase::eCreated, *free);
+        notifyCreated = QueueFeatureLifetime(createdEvent, createAttempt.Read());
+    }
+    else if (result == NVSDK_NGX_Result_Success) { Reject(124); return kRejected; }
+    else gFailures.Record(ampere_diagnostics::kCreateSubmissionFailure, static_cast<uint32_t>(result));
+    createAttempt.Finish();
+    if (notifyCreated)
+    {
+        lock.unlock();
+        DrainFeatureLifetimeEvents();
+    }
+    return result;
+}
+
+NVSDK_NGX_Result VulkanEvaluate(size_t I, void* command, const NVSDK_NGX_Handle* handle,
+    const NVSDK_NGX_Parameter* parameters, PFN_NVSDK_NGX_ProgressCallback callback, const void* caller)
+{
+    std::unique_lock lock(gCalls);
+    auto original = RouteOriginal<VkEvaluateFn>(gRoutes[I], gRoutes[I].vkEvaluate);
+    if (!original) return NVSDK_NGX_Result_FAIL_NotInitialized;
+    const uintptr_t handleValue = reinterpret_cast<uintptr_t>(handle);
+    size_t frameGenerationSlot = SIZE_MAX;
+    {
+        const auto& route = gRoutes[I];
+        for (size_t slot = 0; slot != route.features.size(); ++slot)
+        {
+            if (route.features[slot].handle && route.features[slot].handle == handleValue)
+            { frameGenerationSlot = slot; break; }
+        }
+    }
+    if (frameGenerationSlot == SIZE_MAX)
+    {
+        OtherFeatureLease lease{};
+        {
+            auto& route = gRoutes[I];
+            const size_t slot = FindActiveOtherFeature(route, handleValue);
+            if (slot != SIZE_MAX && route.otherFeatures[slot].activeCalls != UINT32_MAX)
+            {
+                ++route.otherFeatures[slot].activeCalls;
+                lease = SnapshotOtherFeature(I, route, slot, handleValue);
+            }
+        }
+        if (lease.slot != SIZE_MAX)
+        {
+            lock.unlock();
+            const auto result = original(command, handle, parameters, callback);
+            lock.lock();
+            if (auto* current = CurrentOtherFeature(lease);
+                current && current->Active(lease.handle) && current->activeCalls)
+                --current->activeCalls;
+            return result;
+        }
+        Reject(130); return kRejected;
+    }
+    Route& route = gRoutes[I];
+    auto* found = &route.features[frameGenerationSlot];
+    gEvaluateAttempts.fetch_add(1, std::memory_order_relaxed);
+    EvaluationInput input{};
+    EvaluationReads reads{};
+    VulkanOutput view{};
+    const uint64_t publication = ampere_gpu::Publication(), adapter = ampere_gpu::AdapterLuid();
+    const auto* wrapper = ActiveWrapper();
+    const bool legacyFrame = wrapper && !wrapper->wrapperLayout.frameIdAvailable
+        && found->createdGeneratedFrames == 1 && found->evaluationSerial != UINT64_MAX;
+    const uint64_t serial = found->evaluationSerial == UINT64_MAX ? 0 : ++found->evaluationSerial;
+    const bool inputsValid = ReadVulkanEvaluationInput(parameters, input, &view, &reads, legacyFrame ? serial : 0);
+    if (inputsValid && input.index == 1) RefreshPresentationBuffers(route, *found, publication, adapter);
+    const bool flipMetered = ampere_flip_metering::Active();
+    const bool repeatedOutput = inputsValid && found->batch.RepeatsOutput(reinterpret_cast<uintptr_t>(input.output));
+    const uint32_t rejected = ((gCreateDepth || gEvaluateDepth || gReleaseDepth) ? 0x01u : 0)
+        | (!Ready() ? 0x02u : 0)
+        | (!inputsValid ? 0x04u : 0)
+        | (!FeatureCapacityCurrent(*found) ? 0x08u : 0)
+        | (!ampere_policy::CapacityValid(found->createdGeneratedFrames)
+            || input.count > static_cast<int>(found->createdGeneratedFrames) ? 0x10u : 0)
+        | (!found->batch.Accepts(input.frame, input.count, input.index, reinterpret_cast<uintptr_t>(input.output),
+            flipMetered) ? 0x20u : 0)
+        | (!found->Matches(reinterpret_cast<uintptr_t>(handle), reinterpret_cast<uintptr_t>(route.module),
+            route.generation, publication, adapter) ? 0x40u : 0);
+    if (rejected)
+    {
+        gCertifiedMaximum.store(0, std::memory_order_release);
+        if (rejected == 0x20u && !found->outputReuseLatched
+            && found->batch.DuplicateOutput(input.frame, input.count, input.index,
+                reinterpret_cast<uintptr_t>(input.output))
+            && found->LatchRepeatedOutput(ampere_flip_metering::Observing()))
+        {
+            found->outputReuseLatched = true;
+            gOutputReuseLatches.fetch_add(1, std::memory_order_relaxed);
+            wchar_t detail[224]{};
+            swprintf_s(detail, L"Ampere wrapper reused one output for generated frames 1..%d (count=%d frame=%llu); "
+                L"this feature stays at 2x until it is recreated", input.index, input.count,
+                static_cast<unsigned long long>(input.frame));
+            Report(detail);
+        }
+        if (!found->rejectionReported)
+        {
+            ReportEvaluationRejection(route, *found, input, reads, rejected, publication, adapter);
+            found->rejectionReported = true;
+        }
+        found->batch.failed = true; Reject(131); return kRejected;
+    }
+    // The feature's VkDevice is still the host's, on the same adapter, and the
+    // output image keeps the size and format of the feature's first output.
+    const bool outputValid = command && found->device == gVulkanDevice.load(std::memory_order_acquire)
+        && (!found->outputWidth || (found->outputWidth == view.width
+            && found->outputHeight == view.height && found->outputFormat == view.format));
+    if (found->luid != adapter || !outputValid)
+    { found->batch.Fail(input.frame, input.count, input.index); Reject(132); return kRejected; }
+    found->outputWidth = view.width; found->outputHeight = view.height; found->outputFormat = view.format;
+    if (route.vkBeforeEvaluate) route.vkBeforeEvaluate(command, reinterpret_cast<uintptr_t>(handle), parameters,
+        reinterpret_cast<void*>(callback), 0, 0, route.vkEvaluate, caller);
+    bool providerExecuted = false;
+    gEvaluationInput = input;
+    const auto result = InvokeEvaluate(route, original, command, handle, parameters, callback,
+        *found, providerExecuted);
+    if (result != NVSDK_NGX_Result_Success || !providerExecuted)
+    {
+        if (result != NVSDK_NGX_Result_Success)
+            gFailures.Record(ampere_diagnostics::kEvaluationSubmissionFailure, static_cast<uint32_t>(result));
+        gFailedBatches.fetch_add(1, std::memory_order_relaxed);
+        found->recoveryPending = true;
+        if (!found->submissionFailureReported)
+        {
+            ReportVulkanEvaluationSubmissionFailure(route, *found, command, input, reads, view, result, providerExecuted);
+            found->submissionFailureReported = true;
+        }
+    }
+    if (!FeatureCapacityCurrent(*found))
+    { found->batch.Fail(input.frame, input.count, input.index); Reject(171); return kRejected; }
+    found->batch.Complete(input.frame, input.count, input.index, reinterpret_cast<uintptr_t>(input.output),
+        result == NVSDK_NGX_Result_Success && providerExecuted, flipMetered);
+    if (result == NVSDK_NGX_Result_Success)
+    {
+        if (!providerExecuted) { Reject(134); return kRejected; }
+        if (found->batch.failed) { Reject(137); return kRejected; }
+        found->evaluated = true; gEvaluations.fetch_add(1);
+        if (repeatedOutput && gFlipMeteredRepeats.fetch_add(1, std::memory_order_relaxed) == 0)
+        {
+            wchar_t detail[192]{};
+            swprintf_s(detail, L"Ampere flip-metered batch admitted: index %d reused an earlier output "
+                L"(count=%d frame=%llu); repeated outputs are admitted while SetFlipConfig reports metering",
+                input.index, input.count, static_cast<unsigned long long>(input.frame));
+            Report(detail);
+        }
+        gCertifiedMaximum.store(found->outputReuseLatched ? 1u : found->createdGeneratedFrames,
+            std::memory_order_release);
+        if (input.index == input.count)
+        {
+            gSubmittedBatches.fetch_add(1);
+            if (found->recoveryPending)
+            {
+                gRecoveredBatches.fetch_add(1, std::memory_order_relaxed);
+                found->recoveryPending = false;
+            }
+            gFailures.Recover(); gFailure.store(0, std::memory_order_release);
+        }
+    }
+    return result;
+}
+
+// These thunks are the runtime entries' rejected targets: the patcher's gate
+// diverts here only on RTX 30, and any other call reaching them is a refusal.
+template<size_t I> NVSDK_NGX_Result NVSDK_CONV VkCreate(void* command, NVSDK_NGX_Feature feature,
+    const NVSDK_NGX_Parameter* parameters, NVSDK_NGX_Handle** output)
+{
+    if (!gpu_dispatch::UsesTranslatedProgram()) return kRejected;
+    VulkanCreateCall call{};
+    call.command = command; call.feature = feature; call.parameters = parameters; call.output = output;
+    return VulkanCreate(I, call, false, _ReturnAddress());
+}
+
+template<size_t I> NVSDK_NGX_Result NVSDK_CONV VkCreate1(void* device, void* command, NVSDK_NGX_Feature feature,
+    const NVSDK_NGX_Parameter* parameters, NVSDK_NGX_Handle** output)
+{
+    if (!gpu_dispatch::UsesTranslatedProgram()) return kRejected;
+    VulkanCreateCall call{};
+    call.device = device; call.command = command; call.feature = feature;
+    call.parameters = parameters; call.output = output;
+    return VulkanCreate(I, call, true, _ReturnAddress());
+}
+
+template<size_t I> NVSDK_NGX_Result NVSDK_CONV VkEvaluate(void* command, const NVSDK_NGX_Handle* handle,
+    const NVSDK_NGX_Parameter* parameters, PFN_NVSDK_NGX_ProgressCallback callback)
+{
+    if (!gpu_dispatch::UsesTranslatedProgram()) return kRejected;
+    return VulkanEvaluate(I, command, handle, parameters, callback, _ReturnAddress());
+}
+
+// Installed on RTX 30 systems only; other selected GPUs keep native forwarding.
+template<size_t I> NVSDK_NGX_Result NVSDK_CONV VkRelease(NVSDK_NGX_Handle* handle)
+{
+    std::unique_lock lock(gCalls);
+    const auto original = RouteRelease(gRoutes[I], gRoutes[I].vkRelease);
+    if (!original) return NVSDK_NGX_Result_FAIL_NotInitialized;
+    if (!gpu_dispatch::UsesTranslatedProgram())
+    {
+        lock.unlock();
+        return original(handle);
+    }
+    return AmpereRelease(I, lock, original, handle);
+}
+
+template<size_t I> NVSDK_NGX_Result NVSDK_CONV VkRequirements(void* instance, void* physicalDevice,
+    const NVSDK_NGX_FeatureDiscoveryInfo* discovery, NVSDK_NGX_FeatureRequirement* requirements)
+{
+    std::unique_lock lock(gCalls);
+    auto original = RouteOriginal<VkRequirementsFn>(gRoutes[I], gRoutes[I].vkRequirements);
+    if (!original) return NVSDK_NGX_Result_FAIL_NotInitialized;
+    // sl.common asks this during slInit with its own temporary instance. As
+    // for D3D12, only the queried adapter is verified here; the device LUID is
+    // still confirmed before program publication and Create.
+    const bool startupQuery = (gInitDepth || gStartupDepth) && requirements && discovery
+        && discovery->FeatureID == NVSDK_NGX_Feature_FrameGeneration;
+    if (!startupQuery)
+    {
+        lock.unlock();
+        return original(instance, physicalDevice, discovery, requirements);
+    }
+    const auto scope = ObserveStartupRequirementScope([&] { return ampere_gpu::ObserveVulkanAdapter(physicalDevice); });
+    if (!scope.Scoped())
+    {
+        lock.unlock();
+        const auto result = original(instance, physicalDevice, discovery, requirements);
+        ReportStartupRequirements(L"vulkan", scope, result, *requirements, ampere_startup_requirements::Answer::eNative);
+        return result;
+    }
+    const auto result = original(instance, physicalDevice, discovery, requirements);
+    const auto native = *requirements;
+    const auto answer = gFatal.load() ? ampere_startup_requirements::Answer::eNative
+        : DecideStartupRequirements(result, native);
+    ReportStartupRequirements(L"vulkan", scope, result, native, answer);
+    return AnswerStartupRequirements(result, requirements, answer);
+}
+
+template<size_t I> NVSDK_NGX_Result NVSDK_CONV VkParameters(NVSDK_NGX_Parameter** output)
+{ return Parameters<I, true>(output); }
+
 #define AMPERE_THUNKS(F) F<0>, F<1>, F<2>, F<3>, F<4>, F<5>, F<6>, F<7>
+constexpr std::array<VkCreateFn, kRoutes> kVkCreates{AMPERE_THUNKS(VkCreate)};
+constexpr std::array<VkCreate1Fn, kRoutes> kVkCreate1s{AMPERE_THUNKS(VkCreate1)};
+constexpr std::array<VkEvaluateFn, kRoutes> kVkEvaluates{AMPERE_THUNKS(VkEvaluate)};
+constexpr std::array<ReleaseFn, kRoutes> kVkReleases{AMPERE_THUNKS(VkRelease)};
+constexpr std::array<VkRequirementsFn, kRoutes> kVkRequirements{AMPERE_THUNKS(VkRequirements)};
+constexpr std::array<ParametersFn, kRoutes> kVkParameters{AMPERE_THUNKS(VkParameters)};
 constexpr std::array<CreateFn, kRoutes> kCreates{AMPERE_THUNKS(Create)};
 constexpr std::array<EvaluateFn, kRoutes> kEvaluates{AMPERE_THUNKS(Evaluate)};
 constexpr std::array<ReleaseFn, kRoutes> kReleases{AMPERE_THUNKS(Release)};
@@ -1745,7 +2441,39 @@ bool InstallExport(Route& route, const char* name, entry_detour::Kind kind, void
             || kind == entry_detour::Kind::eNgxD3D12EvaluateFeature || kind == entry_detour::Kind::eAmpereRelease))
         return entry_detour::InstallForwarding(kind, route.module, target, nullptr, trampoline,
             options, &handle, &ProviderGate, reinterpret_cast<void*>(&RejectProviderCall));
+    // The provider's Vulkan Release keeps NVIDIA's runtime caller too.
+    if (!route.runtime && kind == entry_detour::Kind::eAmpereVulkanRelease)
+        return entry_detour::InstallForwarding(kind, route.module, target, nullptr, trampoline,
+            options, &handle, &VulkanProviderGate, reinterpret_cast<void*>(&RejectProviderCall));
     return entry_detour::Install(kind, route.module, target, hook, trampoline, options, &handle);
+}
+
+// RTX 30 systems: the runtime's Vulkan Release (exact feature lifetime), its
+// Vulkan requirements and capability parameters (startup bootstrap). True when
+// every present export is covered; on other systems nothing is installed.
+bool InstallVulkanRuntime(Route& route, size_t index) noexcept
+{
+    if (!ampere_provider_arch::Armed()) return false;
+    bool covered = true;
+    if (GetProcAddress(route.module, "NVSDK_NGX_VULKAN_ReleaseFeature"))
+        covered = InstallExport(route, "NVSDK_NGX_VULKAN_ReleaseFeature", entry_detour::Kind::eAmpereVulkanRelease,
+            reinterpret_cast<void*>(kVkReleases[index]), route.vkRelease) && covered;
+    if (GetProcAddress(route.module, "NVSDK_NGX_VULKAN_GetFeatureRequirements"))
+        covered = InstallExport(route, "NVSDK_NGX_VULKAN_GetFeatureRequirements", entry_detour::Kind::eAmpereVulkanRequirements,
+            reinterpret_cast<void*>(kVkRequirements[index]), route.vkRequirements) && covered;
+    if (GetProcAddress(route.module, "NVSDK_NGX_VULKAN_GetCapabilityParameters"))
+        covered = InstallExport(route, "NVSDK_NGX_VULKAN_GetCapabilityParameters", entry_detour::Kind::eAmpereVulkanParameters,
+            reinterpret_cast<void*>(kVkParameters[index]), route.vkParameters) && covered;
+    return covered;
+}
+
+// RTX 30 systems: the provider's Vulkan Release, nested in a runtime Release.
+bool InstallVulkanProvider(Route& route) noexcept
+{
+    if (!ampere_provider_arch::Armed()) return false;
+    return !GetProcAddress(route.module, "NVSDK_NGX_VULKAN_ReleaseFeature")
+        || InstallExport(route, "NVSDK_NGX_VULKAN_ReleaseFeature", entry_detour::Kind::eAmpereVulkanRelease,
+            nullptr, route.vkRelease);
 }
 
 bool ReadOnlyImageSpan(const Image& image, uintptr_t address, size_t bytes) noexcept
@@ -1853,11 +2581,30 @@ void RetainLegacyPresetContract(size_t index, const Route& route) noexcept
     if (known) proof.generation.store(route.generation);
 }
 
+// The route's Create entry of one API (Vulkan: Create1 when current, else Create).
+entry_detour::Handle RouteCreate(const Route& route, GraphicsApi api) noexcept
+{
+    if (api != GraphicsApi::eVulkan) return route.create;
+    return RouteEntryCurrent(route, route.vkCreate1) ? route.vkCreate1 : route.vkCreate;
+}
+
+// Create, Evaluate and Release of the device's API all still belong to this route.
+bool RouteEntriesCurrent(const Route& route, GraphicsApi api) noexcept
+{
+    if (api == GraphicsApi::eVulkan)
+        return (RouteEntryCurrent(route, route.vkCreate) || RouteEntryCurrent(route, route.vkCreate1))
+            && RouteEntryCurrent(route, route.vkEvaluate) && RouteEntryCurrent(route, route.vkRelease);
+    return route.create && route.evaluate && route.release
+        && RouteEntryCurrent(route, route.create)
+        && RouteEntryCurrent(route, route.evaluate)
+        && RouteEntryCurrent(route, route.release);
+}
+
 bool RoutePresetCurrent(const Route& route) noexcept
 {
     if (!route.prepared || route.runtime || !route.module || !route.generation) return false;
     if (route.preset) return RouteEntryCurrent(route, route.preset);
-    if (!route.legacyPresetReady || !RouteEntryCurrent(route, route.create)) return false;
+    if (!route.legacyPresetReady || !RouteEntryCurrent(route, RouteCreate(route, DeviceApi()))) return false;
     // Admission belongs to this retained route, independently of which prepared
     // provider is currently selected for status or later feature creation.
     for (size_t i = 0; i < gRoutes.size(); ++i)
@@ -1931,6 +2678,24 @@ bool InstallPreset(Route& route, const Image& image) noexcept
     { gFatal.store(true); return Reject(143); }
     Report(L"Ampere FG preset query hook installed; selection is fixed at the first query; driver profiles unchanged");
     return true;
+}
+
+// V1.6.1: live DLSS-G preset switching on a prepared route. Its own reader hook
+// stays the reader's only owner; dlssg_preset adds the endpoint gates and the
+// configuration reset. Legacy (sole preset 1) routes stay restart-only.
+void AdoptLivePresetReader(const Route& route) noexcept
+{
+    if (!route.preset || route.legacyPresetReady || route.runtime) return;
+    const auto reader = entry_detour::ReadSnapshot(route.preset);
+    const uint64_t start = GetTickCount64();
+    const bool adopted = reader.current && dlssg_preset::AdoptRouteReader(route.module, reader.target,
+        route.generation, route.preset);
+    wchar_t detail[224]{};
+    swprintf_s(detail, L"Ampere FG preset live switch: %ls (module=%p generation=%llu, %llu ms)",
+        adopted ? L"configuration reset available" : L"configuration not established; a new preset applies after a restart",
+        route.module, static_cast<unsigned long long>(route.generation),
+        static_cast<unsigned long long>(GetTickCount64() - start));
+    Report(detail);
 }
 
 uintptr_t DirectMaximumDeviceGate(const Image& image, unsigned& matches,
@@ -2237,7 +3002,7 @@ FeatureCreatePendingState FeatureCreatePendingStatus(uint64_t token) noexcept
         if (!proof.provider || !proof.wrapper)
         {
             const auto runtime = entry_detour::ReadSnapshot(proof.runtimeCreate);
-            return Ready() && runtime.current && runtime.kind == entry_detour::Kind::eNgxRuntimeD3D12CreateFeature
+            return Ready() && runtime.current && RuntimeCreateKind(runtime.kind, proof.api)
                 && reinterpret_cast<uintptr_t>(runtime.owner) == proof.runtime
                 && runtime.generation == proof.runtimeGeneration ? State::eReadBusy : State::eInvalid;
         }
@@ -2305,10 +3070,10 @@ FeatureCreatePendingState FeatureCreatePendingStatus(uint64_t token) noexcept
     }
     if (released)
     {
-        const auto runtime = entry_detour::ReadSnapshot(entry_detour::Kind::eNgxRuntimeD3D12CreateFeature,
-            reinterpret_cast<HMODULE>(selected.runtime));
-        const auto provider = entry_detour::ReadSnapshot(entry_detour::Kind::eNgxD3D12CreateFeature,
-            reinterpret_cast<HMODULE>(selected.provider));
+        const GraphicsApi api = selected.api == static_cast<uint32_t>(GraphicsApi::eVulkan)
+            ? GraphicsApi::eVulkan : GraphicsApi::eD3D12;
+        const auto runtime = CreateEntry(reinterpret_cast<HMODULE>(selected.runtime), true, api);
+        const auto provider = CreateEntry(reinterpret_cast<HMODULE>(selected.provider), false, api);
         return runtime.current && runtime.currentEntries == 1 && runtime.generation == selected.runtimeGeneration
             && provider.current && provider.currentEntries == 1 && provider.generation == selected.providerGeneration
             && selected.provider == reinterpret_cast<uintptr_t>(ampere_gpu::Provider())
@@ -2328,9 +3093,38 @@ bool ObserveD3D12Device(void* device) noexcept
     gD3D12Confirmed.store(verified);
     return verified;
 }
-bool ObserveVulkanPhysicalDevice(void*) noexcept { return false; }
+bool ObserveVulkanPhysicalDevice(void* physicalDevice) noexcept
+{
+    const bool verified = ampere_gpu::ObserveVulkanPhysicalDevice(physicalDevice);
+    gVulkanConfirmed.store(verified);
+    return verified;
+}
+void ObserveVulkanDevice(void* device, bool startup) noexcept
+{
+    // Only a device created on (or handed over with) the verified physical
+    // device is recorded. A startup bracket owns the host's current device; an
+    // NGX Init only fills an unknown one. Features keep their own identity, so
+    // a replaced device refuses their later Evaluate.
+    if (!device || !gVulkanConfirmed.load() || !AdapterVerified()) return;
+    const auto value = reinterpret_cast<uintptr_t>(device);
+    if (startup) { gVulkanDevice.store(value, std::memory_order_release); return; }
+    uintptr_t expected = 0;
+    if (!gVulkanDevice.compare_exchange_strong(expected, value, std::memory_order_acq_rel) && expected != value)
+    {
+        wchar_t detail[160]{};
+        swprintf_s(detail, L"Ampere Vulkan NGX Init device %p differs from the host's device %p; RTX 30 Create keeps the host's",
+            device, reinterpret_cast<void*>(expected));
+        Report(detail);
+    }
+}
+GraphicsApi DeviceApi() noexcept
+{
+    // One process uses one API; D3D12 keeps precedence if both were observed.
+    return gD3D12Confirmed.load() ? GraphicsApi::eD3D12
+        : gVulkanConfirmed.load() ? GraphicsApi::eVulkan : GraphicsApi::eNone;
+}
 bool AdapterVerified() noexcept { return ampere_gpu::AdapterVerified(); }
-bool Ready() noexcept { return gD3D12Confirmed.load() && AdapterVerified() && ampere_gpu::Ready() && gStartupComplete.load() && !gFatal.load(); }
+bool Ready() noexcept { return DeviceConfirmed() && AdapterVerified() && ampere_gpu::Ready() && gStartupComplete.load() && !gFatal.load(); }
 uint32_t FailureCode() noexcept
 {
     if (const auto fatal = gFatalFailure.load()) return fatal;
@@ -2345,12 +3139,14 @@ ampere_diagnostics::Snapshot Diagnostics() noexcept
 }
 bool EarlyInitObserved() noexcept { return gEarlyInit.load(std::memory_order_acquire); }
 uint64_t PresetQueries() noexcept { return gPresetQueries.load(); }
+fg_lifetime::Snapshot ReadFrameGenerationLiveness() noexcept { return gFgLifetime.Read(); }
+bool FrameGenerationQuiescent() noexcept { return gFgLifetime.Quiescent(); }
 bool LegacySinglePreset() noexcept
 {
     if (gFatal.load()) return false;
     const HMODULE provider = ampere_gpu::Provider();
     if (!provider) return false;
-    const auto current = entry_detour::ReadSnapshot(entry_detour::Kind::eNgxD3D12CreateFeature, provider);
+    const auto current = CreateEntry(provider, false, DeviceApi());
     if (!current.current || current.currentEntries != 1 || current.owner != provider || !current.generation) return false;
     // Every retained route has its own immutable capability proof. Preparing
     // another provider must not replace the currently selected program's
@@ -2398,8 +3194,7 @@ bool PatchProvider(HMODULE module, const wchar_t* path) noexcept
     if (!AdapterVerified() || gFatal.load() || (!gStartupDepth && !gStartupComplete.load())) return false;
     for (const auto& route : gRoutes)
         if (route.module == module && RoutePresetCurrent(route)
-            && RouteEntryCurrent(route, route.create) && RouteEntryCurrent(route, route.evaluate)
-            && RouteEntryCurrent(route, route.release) && ampere_gpu::PreparedProvider(module))
+            && RouteEntriesCurrent(route, DeviceApi()) && ampere_gpu::PreparedProvider(module))
             return ampere_gpu::PatchProvider(module, path);
     return false;
 }
@@ -2409,16 +3204,14 @@ void SetPreparationBoundaryResolver(PreparationBoundaryResolver resolver) noexce
 { gPreparationBoundaryResolver.store(resolver, std::memory_order_release); }
 void BeginInit() noexcept
 {
-    ++gInitDepth;
+    if (++gInitDepth == 1) gInitRequirementQueries.store(0, std::memory_order_relaxed);
     // Unknown/Ada slInit is a native call and can wait on another thread's NGX
     // callbacks. Unknown Ampere requirement overrides acquire gCalls inside
     // Requirements/ObserveModule, covering each actual mutation and restore.
     // Remember the depth that acquired a persistent Ampere lock: selection can
     // change inside slInit, and nested scopes must unwind the original owner.
     if (!gInitLockDepth
-#if MFG_UNLOCK_RUNTIME_GPU_SELECTION
-        && gpu_dispatch::IsAmpere()
-#endif
+        && gpu_dispatch::UsesTranslatedProgram()
         )
     {
         gCalls.lock();
@@ -2431,6 +3224,10 @@ void EndInit() noexcept
     std::lock_guard lock(gCalls);
     for (auto& route : gRoutes)
         if (route.availability.active) route.availability.Set(false);
+    // Without a supported FG answer here, Streamline has already unloaded
+    // sl.dlss_g and the startup bootstrap will find no wrapper (177).
+    if (gInitDepth == 1 && ampere_provider_arch::Armed() && !gInitRequirementQueries.load(std::memory_order_relaxed))
+        Report(L"Ampere FG requirements: no FrameGeneration requirements query reached the NGX runtime hook during slInit");
     if (gInitLockDepth == gInitDepth)
     {
         gInitLockDepth = 0;
@@ -2469,12 +3266,11 @@ void EndStartup(bool accepted) noexcept
     for (auto& route : gRoutes)
         if (route.availability.active) route.availability.Set(false);
     bool runtimeCovered = false, providerCovered = false;
+    const GraphicsApi api = DeviceApi();
     for (const auto& route : gRoutes)
     {
-        const bool covered = route.prepared && route.create && route.evaluate && route.release
-            && RouteEntryCurrent(route, route.create)
-            && RouteEntryCurrent(route, route.evaluate)
-            && RouteEntryCurrent(route, route.release);
+        // The confirming device's API names the entries every FG call takes.
+        const bool covered = route.prepared && RouteEntriesCurrent(route, api);
         runtimeCovered |= covered && route.runtime;
         providerCovered |= covered && RoutePresetCurrent(route)
             && ampere_gpu::PreparedProvider(route.module);
@@ -2482,7 +3278,7 @@ void EndStartup(bool accepted) noexcept
     const uint32_t missing = (!accepted ? 0x01u : 0)
         | (!runtimeCovered ? 0x02u : 0) | (!providerCovered ? 0x04u : 0)
         | (!ampere_policy::CapacityValid(gStartupMaximum.load()) ? 0x08u : 0)
-        | (!gD3D12Confirmed.load() ? 0x10u : 0) | (!AdapterVerified() ? 0x20u : 0)
+        | (!DeviceConfirmed() ? 0x10u : 0) | (!AdapterVerified() ? 0x20u : 0)
         | (!ampere_gpu::Ready() ? 0x40u : 0) | (gFatal.load() ? 0x80u : 0);
     const bool ready = missing == 0;
     gStartupFailureMask.store(missing, std::memory_order_release);
@@ -2493,9 +3289,10 @@ void EndStartup(bool accepted) noexcept
         Reject(ampere_diagnostics::kStartupAdmissionFailure);
         wchar_t detail[320]{};
         swprintf_s(detail, L"Ampere startup admission incomplete: mask=0x%02X slStartupAccepted=%u runtimeCovered=%u providerCovered=%u "
-            L"startupMaximum=%u d3d12=%u adapter=%u program=%u fatal=%u",
+            L"startupMaximum=%u device=%ls adapter=%u program=%u fatal=%u",
             missing, static_cast<unsigned>(accepted), static_cast<unsigned>(runtimeCovered), static_cast<unsigned>(providerCovered),
-            gStartupMaximum.load(), static_cast<unsigned>(gD3D12Confirmed.load()), static_cast<unsigned>(AdapterVerified()),
+            gStartupMaximum.load(), api == GraphicsApi::eD3D12 ? L"d3d12" : api == GraphicsApi::eVulkan ? L"vulkan" : L"none",
+            static_cast<unsigned>(AdapterVerified()),
             static_cast<unsigned>(ampere_gpu::Ready()), static_cast<unsigned>(gFatal.load()));
         Report(detail);
     }
@@ -2528,14 +3325,12 @@ bool InspectRuntimeLayout(Route& route, const Image&, const wchar_t* path) noexc
 void ObserveModule(HMODULE module, const wchar_t* path, uint64_t generation,
     bool wrapper, bool provider, bool runtime) noexcept
 {
-#if MFG_UNLOCK_RUNTIME_GPU_SELECTION
     // Streamline can probe, unload and replace plugins during slInit, before
     // the device establishes the GPU family. Pinning a probe wrapper here can
     // preserve its pointers into a common plugin which the host then unloads.
     // Confirm Ampere before claiming routes or retaining any discovery owner.
     // BeginStartup re-inspects the surviving modules after device selection.
-    if (!gpu_dispatch::IsAmpere()) return;
-#endif
+    if (!gpu_dispatch::UsesTranslatedProgram()) return;
     if (!module || !generation || (!wrapper && !provider && !runtime) || gFatal.load()) return;
     std::lock_guard callLock(gCalls);
     std::lock_guard lock(gInstall);
@@ -2575,14 +3370,27 @@ void ObserveModule(HMODULE module, const wchar_t* path, uint64_t generation,
     }
     if (provider && !route->prepared && (gStartupDepth || gPreparationDepth)
         && BeforeFirstFeatureCreate()
-        && gD3D12Confirmed.load() && AdapterVerified())
+        && DeviceConfirmed() && AdapterVerified())
     {
         if (!dlssg_provider_policy::IsSupportedAmpereProvider(module, path)) { Reject(3); return; }
         // NGX validates the provider against the GPU when it maps the snippet.
         // An undeclared provider is refused by NGX itself; fail closed here too.
         if (const auto declared = ampere_provider_arch::Declare(module);
             declared != ampere_provider_arch::Outcome::eDeclared
-            && declared != ampere_provider_arch::Outcome::eAlreadyDeclared) { Reject(157); return; }
+            && declared != ampere_provider_arch::Outcome::eAlreadyDeclared)
+        {
+            // not-armed: RTX 30 detection failed. not-provider or shape-mismatch:
+            // a provider another mod replaced or changed (the candidate line has its path).
+            static std::atomic<bool> reported{false};
+            if (!reported.exchange(true, std::memory_order_relaxed))
+            {
+                wchar_t detail[160]{};
+                swprintf_s(detail, L"Ampere DLSS-G provider not declared for RTX 30: outcome=%hs",
+                    ampere_provider_arch::OutcomeName(declared));
+                Report(detail);
+            }
+            Reject(157); return;
+        }
         const auto resolveBoundary = gPreparationBoundaryResolver.load(std::memory_order_acquire);
         auto boundary = resolveBoundary ? resolveBoundary(module, generation) : ampere_gpu::PreparationBoundary{};
         // Prove the early owner before installing a preset reader or changing
@@ -2597,6 +3405,7 @@ void ObserveModule(HMODULE module, const wchar_t* path, uint64_t generation,
         if (!route->deviceGateReady || !ampere_gpu::PatchProvider(module, path, boundary)) { Reject(151); return; }
         route->prepared = true;
         RetainLegacyPresetContract(index, *route);
+        AdoptLivePresetReader(*route);
     }
     if (runtime && !route->prepared && (gInitDepth || gStartupDepth || gPreparationDepth))
     {
@@ -2607,6 +3416,9 @@ void ObserveModule(HMODULE module, const wchar_t* path, uint64_t generation,
                 reinterpret_cast<void*>(kRequirements[index]), route->requirements)
             || !InstallExport(*route, "NVSDK_NGX_D3D12_GetCapabilityParameters", entry_detour::Kind::eAmpereParameters,
                 reinterpret_cast<void*>(kParameters[index]), route->parameters)) { Reject(153); return; }
+        // A Vulkan host needs the runtime's Vulkan capability, requirement and
+        // release entries as well; a D3D12 host keeps its admission unchanged.
+        if (!InstallVulkanRuntime(*route, index) && DeviceApi() == GraphicsApi::eVulkan) { Reject(153); return; }
         route->prepared = true;
     }
     if (wrapper && (gInitDepth || gStartupDepth) && !route->availability.address)
@@ -2622,7 +3434,7 @@ void ObserveModule(HMODULE module, const wchar_t* path, uint64_t generation,
                 : legacy + kAmpereSlDlssgAvailabilityLegacyBranchOffset), kAmpereSlDlssgAvailabilityOriginal};
         }
     }
-    if (gStartupDepth && gD3D12Confirmed.load() && AdapterVerified() && route->availability.address)
+    if (gStartupDepth && DeviceConfirmed() && AdapterVerified() && route->availability.address)
         route->availability.Set(true);
 }
 
@@ -2632,24 +3444,20 @@ bool InstallRoute(HMODULE module, const wchar_t* path, uint64_t generation, bool
     std::lock_guard callLock(gCalls);
     std::lock_guard lock(gInstall);
     if (!module || !generation) return false;
-#if MFG_UNLOCK_RUNTIME_GPU_SELECTION
-    // Provider entry routes serve both GPUs: RTX 40 keeps the shared eligibility (310.9.16 included),
-    // RTX 30 its own (Ada-only builds excluded).
-    if (!runtime && !(gpu_dispatch::IsAda()
+    // Provider entry routes serve every GPU: RTX 40 and RTX 50 keep the shared eligibility (310.9.16
+    // included), RTX 30 its own (Ada-only builds excluded).
+    if (!runtime && !(gpu_dispatch::UsesNativeProgram()
             ? dlssg_provider_policy::IsSupportedProvider(module, path)
             : dlssg_provider_policy::IsSupportedAmpereProvider(module, path))) return false;
-#endif
     auto* route = FindRoute(module, generation);
     if (!route) return false;
     route->runtime = runtime;
     // Prove the private driver layout before installing any mutating callback.
     // A native intermediary continues to the separately verified runtime. If
     // that runtime is absent, startup and provider admission still fail closed.
-    // Selected Ada callbacks are native pass-throughs and need no Ampere layout.
+    // Selected RTX 40 and RTX 50 callbacks are native pass-throughs and need no Ampere layout.
     if (runtime
-#if MFG_UNLOCK_RUNTIME_GPU_SELECTION
-        && !gpu_dispatch::IsAda()
-#endif
+        && !gpu_dispatch::UsesNativeProgram()
         )
     {
         Image image{};
@@ -2670,5 +3478,131 @@ bool InstallRoute(HMODULE module, const wchar_t* path, uint64_t generation, bool
             reinterpret_cast<void*>(kEvaluates[i]), route->evaluate)) return false;
     return InstallExport(*route, "NVSDK_NGX_D3D12_CreateFeature", runtime ? entry_detour::Kind::eNgxRuntimeD3D12CreateFeature : entry_detour::Kind::eNgxD3D12CreateFeature,
         reinterpret_cast<void*>(kCreates[i]), route->create);
+}
+
+bool InstallVulkanEntry(HMODULE owner, uint64_t generation, bool runtime, entry_detour::Kind kind,
+    void* target, entry_detour::ForwardPreCall preCall, entry_detour::ForwardGate gate, void* rejected,
+    const entry_detour::InstallOptions& options, entry_detour::Handle* handle) noexcept
+{
+    using entry_detour::Kind;
+    std::lock_guard callLock(gCalls);
+    std::lock_guard lock(gInstall);
+    if (handle) *handle = {};
+    Route* route = owner && generation ? FindRoute(owner, generation) : nullptr;
+    void* rejectedTarget = rejected;
+    if (route && runtime)
+    {
+        const size_t i = route - gRoutes.data();
+        route->runtime = true;
+        if (kind == Kind::eNgxRuntimeVulkanCreateFeature) rejectedTarget = reinterpret_cast<void*>(kVkCreates[i]);
+        else if (kind == Kind::eNgxRuntimeVulkanCreateFeature1) rejectedTarget = reinterpret_cast<void*>(kVkCreate1s[i]);
+        else if (kind == Kind::eNgxRuntimeVulkanEvaluateFeature) rejectedTarget = reinterpret_cast<void*>(kVkEvaluates[i]);
+    }
+    void* trampoline = nullptr;
+    entry_detour::Handle installed{};
+    const bool result = entry_detour::InstallForwarding(kind, owner, target, preCall, trampoline,
+        options, &installed, gate, rejectedTarget);
+    if (handle) *handle = installed;
+    if (!result || !route) return result;
+    switch (kind)
+    {
+    case Kind::eNgxVulkanCreateFeature: case Kind::eNgxRuntimeVulkanCreateFeature:
+        route->vkCreate = installed; route->vkBeforeCreate = preCall; break;
+    case Kind::eNgxVulkanCreateFeature1: case Kind::eNgxRuntimeVulkanCreateFeature1:
+        route->vkCreate1 = installed; route->vkBeforeCreate1 = preCall; break;
+    case Kind::eNgxVulkanEvaluateFeature: case Kind::eNgxRuntimeVulkanEvaluateFeature:
+        route->vkEvaluate = installed; route->vkBeforeEvaluate = preCall; break;
+    default: break;
+    }
+    return result;
+}
+
+bool InstallVulkanRoute(HMODULE module, const wchar_t* path, uint64_t generation, bool runtime) noexcept
+{
+    std::lock_guard callLock(gCalls);
+    std::lock_guard lock(gInstall);
+    if (!module || !generation || !ampere_provider_arch::Armed()) return false;
+    if (!runtime && !dlssg_provider_policy::IsSupportedAmpereProvider(module, path)) return false;
+    auto* route = FindRoute(module, generation);
+    if (!route) return false;
+    route->runtime = runtime;
+    if (!runtime) return InstallVulkanProvider(*route);
+    // As for D3D12: only NVIDIA's installed runtime is hooked; a game-local
+    // intermediary keeps native forwarding to it.
+    Image image{};
+    if (!image.Open(module) || !InspectRuntimeLayout(*route, image, path)) return false;
+    return InstallVulkanRuntime(*route, route - gRoutes.data());
+}
+
+bool WINAPI VulkanProviderGate(void* arg1, uintptr_t arg2, const void* arg3, void* arg4,
+    uintptr_t, uintptr_t, entry_detour::Handle entry, const void* caller) noexcept
+{
+    using entry_detour::Kind;
+    const auto attempted = entry_detour::ReadSnapshot(entry);
+    const bool create1 = attempted.kind == Kind::eNgxVulkanCreateFeature1;
+    const bool create = create1 || attempted.kind == Kind::eNgxVulkanCreateFeature;
+    const bool release = attempted.kind == Kind::eAmpereVulkanRelease;
+    // CreateFeature1 is (VkDevice, VkCommandBuffer, feature, parameters, handle**).
+    const uintptr_t feature = create1 ? reinterpret_cast<uintptr_t>(arg3) : arg2;
+    const void* parameters = create1 ? static_cast<const void*>(arg4) : arg3;
+    if (create && feature == NVSDK_NGX_Feature_FrameGeneration)
+        gPipelineCreateObserved.store(true, std::memory_order_release);
+    // Release forwards natively on other GPUs. The patcher's gate calls this
+    // for Create/Evaluate only on RTX 30; anything else is refused.
+    if (!gpu_dispatch::UsesTranslatedProgram()) return release;
+    std::unique_lock callLock(gCalls);
+    // Tail forwarding keeps NVIDIA's real runtime caller on the stack. Only a
+    // nested call belonging to our tracked runtime operation is admitted.
+    HMODULE callerModule = nullptr;
+    if (!gCallingRuntime || !caller || !GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(caller), &callerModule)
+        || callerModule != gCallingRuntime->module) return Reject(160);
+    const auto snapshot = entry_detour::ReadSnapshot(entry);
+    auto found = std::find_if(gRoutes.begin(), gRoutes.end(), [&](const Route& route) {
+        return !route.runtime && route.module == snapshot.owner && route.generation == snapshot.generation; });
+    if (!snapshot.current || found == gRoutes.end() || !found->prepared) return Reject(161);
+    auto& route = *found;
+    if (create)
+    {
+        if (!gCreateDepth || feature != NVSDK_NGX_Feature_FrameGeneration || !Ready() || !parameters
+            || !gCallingWrapper || !ampere_wrapper::Matches(gCallingWrapper->wrapperLayout, gCreatingCapacity)
+            || (gCreatingProvider && gCreatingProvider != &route)) return Reject(162);
+        if (!ampere_gpu::BindProvider(route.module)) return Reject(161);
+        if (!BindCurrentCreateProvider(route, entry)) return Reject(162);
+        gCreatingProvider = &route;
+        return true; // The relay runs the patcher's pre-call, then the provider.
+    }
+    auto* tracked = gCallingFeature;
+    if (route.module != ampere_gpu::Provider() || !tracked
+        || tracked->provider != reinterpret_cast<uintptr_t>(route.module)
+        || tracked->providerGeneration != route.generation) return Reject(163);
+    if (snapshot.kind == Kind::eNgxVulkanEvaluateFeature)
+    {
+        EvaluationInput input{};
+        if (!gEvaluateDepth || !arg2 || !Ready() || gProviderEvaluated || !FeatureCapacityCurrent(*tracked)
+            || !ReadVulkanEvaluationInput(static_cast<const NVSDK_NGX_Parameter*>(arg3), input, nullptr, nullptr,
+                tracked->createdGeneratedFrames == 1 && ActiveWrapper()
+                    && !ActiveWrapper()->wrapperLayout.frameIdAvailable ? gEvaluationInput.frame : 0)
+            || !(input == gEvaluationInput)
+            || (tracked->providerHandle && tracked->providerHandle != arg2)) return Reject(164);
+        tracked->providerHandle = arg2;
+        gProviderEvaluated = true;
+        return true;
+    }
+    if (release)
+        return gReleaseDepth && arg1 && (!tracked->providerHandle
+            || tracked->providerHandle == reinterpret_cast<uintptr_t>(arg1)) ? true : Reject(165);
+    return Reject(166);
+}
+
+bool VulkanProviderPrepared(HMODULE module) noexcept
+{
+    std::lock_guard callLock(gCalls);
+    for (const auto& route : gRoutes)
+        if (module && route.module == module && !route.runtime && route.prepared
+            && RouteEntriesCurrent(route, GraphicsApi::eVulkan) && ampere_gpu::PreparedProvider(module))
+            return true;
+    return false;
 }
 } // namespace ampere_backend

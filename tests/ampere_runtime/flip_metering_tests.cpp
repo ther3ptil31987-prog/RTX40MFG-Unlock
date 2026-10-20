@@ -45,6 +45,15 @@ int main(int argc, char** argv)
         Check(caps <= 1, "the V2 capability query, where present, is queried once");
         Check(Count(data, Text("Achieved 'good' FC feedback state")) == 1,
             "the 30-feedback switch into flip-metering presentation is present");
+        // Opt-in scope: only the V2 generation (caps query) is forwarded; its
+        // setFlipConfig tries V2 params and falls back to V1 (same layout).
+        const bool v2 = ContainsCapsQuery(data.data(), data.size());
+        Check(v2 == (caps == 1), "the opt-in generation marker matches the caps query");
+        if (v2)
+            Check(Count(data, Text("Failed to set flip config V2, falling back to V1")) == 1
+                && Count(data, Text("DLFG running on pacer command context, even if flip-metering is disabled!")) == 1,
+                "V2 generation: V2/V1 params and frame generation on the pacer context in flip metering");
+        std::cout << "INFO optInGeneration=" << (v2 ? "V2" : "pre-V2 (withheld)") << '\n';
         std::cout << "INFO capsQuery=" << caps << " cloneOutputPoolName="
             << Count(data, Text("clone.dlfg-output")) << '\n';
     }

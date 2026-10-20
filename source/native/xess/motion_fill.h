@@ -48,7 +48,6 @@ bool UsableMatrices(const float (&view)[16], const float (&projection)[16]) noex
 class Filler
 {
 public:
-    using Capture = std::function<void(ID3D12GraphicsCommandList*, uint32_t, const xefg_swapchain_d3d12_resource_data_t&)>;
     Filler(ID3D12Device* device, ID3D12CommandQueue* queue) noexcept;
     ~Filler(); // waits (bounded) for its own GPU work before releasing resources
     Filler(const Filler&) = delete;
@@ -65,10 +64,9 @@ public:
         Mode mode, const char*& reason) noexcept;
     bool Pending() const noexcept { return pending_; }
     // Before the game's Present: fills on our own list, executes it on the presentation queue and
-    // returns the tag (our texture, UNTIL_NEXT_PRESENT) for `frame`. `capture` may record a copy of
-    // our texture into our list (diagnostic capture). False: nothing was submitted for the frame.
-    bool Submit(uint32_t& frame, xefg_swapchain_d3d12_resource_data_t& tag, const Capture& capture,
-        const char*& reason) noexcept;
+    // returns the tag (our texture, UNTIL_NEXT_PRESENT) for `frame`. False: nothing was submitted
+    // for the frame.
+    bool Submit(uint32_t& frame, xefg_swapchain_d3d12_resource_data_t& tag, const char*& reason) noexcept;
     // A failure that disables the filler for the rest of the context (logged once by the caller).
     bool Broken() const noexcept { return broken_; }
     uint64_t Submitted() const noexcept { return submitted_; }

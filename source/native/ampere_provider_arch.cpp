@@ -16,14 +16,24 @@ std::atomic<bool> gArmed{false};
 std::atomic<uint32_t> gArchitecture{0};
 std::atomic<uint32_t> gImplementation{0};
 std::atomic<uint32_t> gPhysicalGpuCount{0}, gSingleGpuArchitecture{0}, gSingleGpuImplementation{0};
+std::atomic<uint32_t> gNvapiRedirected{0};
 std::atomic<uint64_t> gDeclared{0};
 std::atomic<uint64_t> gAlreadyDeclared{0};
 std::atomic<uint64_t> gShapeMismatches{0};
 std::atomic<uint64_t> gPublicationFailures{0};
 std::atomic<uint32_t> gLast{static_cast<uint32_t>(Outcome::eNotArmed)};
 std::atomic<HMODULE> gLastModule{nullptr};
+std::atomic<uint32_t> gLastVulkan{static_cast<uint32_t>(VulkanOutcome::eNotChecked)};
+std::atomic<uint64_t> gVulkanDeclared{0};
 
 constexpr size_t kMaximumRequirementsBytes = 0x4000;
+
+VulkanOutcome RecordVulkan(VulkanOutcome outcome) noexcept
+{
+    if (outcome == VulkanOutcome::eDeclared) gVulkanDeclared.fetch_add(1, std::memory_order_relaxed);
+    gLastVulkan.store(static_cast<uint32_t>(outcome), std::memory_order_release);
+    return outcome;
+}
 
 Outcome Record(Outcome outcome, HMODULE module) noexcept
 {
@@ -103,44 +113,19 @@ bool PublishByte(uint8_t* address, uint8_t expected, uint8_t replacement) noexce
         && *address == replacement;
 }
 
-// NVAPI is loaded only from System32 and its factory-owned code from the
-// trusted driver store, as for adapter discovery. Any failure detects nothing.
+// NVAPI is resolved as for adapter discovery (adapter_discovery::ResolveNvapi).
+// Any failure detects nothing.
 bool SystemAmpere(uint32_t& architecture, uint32_t& implementation,
     uint32_t& physicalCount, uint32_t& singleArchitecture, uint32_t& singleImplementation) noexcept
 {
     using namespace adapter_discovery;
-    std::array<wchar_t, kPathCapacity> systemDirectory{}, stubPath{}, loadedPath{};
-    const UINT systemLength = GetSystemDirectoryW(systemDirectory.data(), static_cast<UINT>(systemDirectory.size()));
-    if (!systemLength || systemLength >= systemDirectory.size()
-        || swprintf_s(stubPath.data(), stubPath.size(), L"%ls\\nvapi64.dll", systemDirectory.data()) < 0) return false;
-    ModuleReference dispatcher;
-    dispatcher.module = LoadLibraryExW(stubPath.data(), nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-    if (!dispatcher.module) return false;
-    // Never be the reference which unmaps NVAPI: hooks other modules placed on
-    // its first load (OptiScaler's QueryInterface detour) would go with it.
-    HMODULE pinnedDispatcher = nullptr;
-    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
-        reinterpret_cast<LPCWSTR>(dispatcher.module), &pinnedDispatcher);
-    const DWORD stubLength = GetModuleFileNameW(dispatcher.module, loadedPath.data(), static_cast<DWORD>(loadedPath.size()));
-    if (!stubLength || stubLength >= loadedPath.size()
-        || !NvapiOwnerPath(systemDirectory.data(), loadedPath.data(), true)) return false;
-    const auto query = reinterpret_cast<QueryInterface>(GetProcAddress(dispatcher.module, "nvapi_QueryInterface"));
-    if (!OwnedCode(dispatcher.module, reinterpret_cast<void*>(query))) return false;
     constexpr std::array<uint32_t, 3> ids{0x0150e828, 0xe5ac921f, 0xd8265d24};
-    std::array<void*, ids.size()> targets{};
-    std::array<ModuleReference, ids.size()> owners{};
-    for (size_t i = 0; i < ids.size(); ++i)
-    {
-        targets[i] = query(ids[i]);
-        if (!owners[i].Acquire(targets[i])) return false;
-        const DWORD ownerLength = GetModuleFileNameW(owners[i].module, loadedPath.data(), static_cast<DWORD>(loadedPath.size()));
-        if (!ownerLength || ownerLength >= loadedPath.size()
-            || !NvapiOwnerPath(systemDirectory.data(), loadedPath.data())
-            || !OwnerFactoryMatches(owners[i].module, ids[i], targets[i])) return false;
-    }
-    const auto initialize = reinterpret_cast<Initialize>(targets[0]);
-    const auto enumerate = reinterpret_cast<Enumerate>(targets[1]);
-    const auto getArchitecture = reinterpret_cast<GetArchitecture>(targets[2]);
+    NvapiTargets<ids.size()> resolved;
+    if (!ResolveNvapi(ids, resolved)) return false;
+    gNvapiRedirected.store(resolved.redirected, std::memory_order_relaxed);
+    const auto initialize = reinterpret_cast<Initialize>(resolved.targets[0]);
+    const auto enumerate = reinterpret_cast<Enumerate>(resolved.targets[1]);
+    const auto getArchitecture = reinterpret_cast<GetArchitecture>(resolved.targets[2]);
     if (initialize() != 0) return false;
     std::array<void*, 64> physical{};
     uint32_t count = 0;
@@ -156,7 +141,8 @@ bool SystemAmpere(uint32_t& architecture, uint32_t& implementation,
             singleArchitecture = info.architecture;
             singleImplementation = info.implementation;
         }
-        if (!ampere && IsAmpereRtx(info.architecture, info.implementation))
+        if (IsTranslatedRtx(info.architecture, info.implementation)
+            && (!ampere || info.architecture < architecture))
         {
             architecture = info.architecture;
             implementation = info.implementation;
@@ -192,7 +178,7 @@ size_t FindRequirementsArchitecture(const uint8_t* begin, size_t size) noexcept
     unsigned architectureStores = 0;
     for (size_t i = 0; i < count; ++i)
     {
-        if (stores[i].value != kAdaArchitecture && stores[i].value != kAmpereArchitecture) continue;
+        if (stores[i].value != kAdaArchitecture && stores[i].value != kAmpereArchitecture && stores[i].value != kTuringArchitecture) continue;
         ++architectureStores;
         for (size_t j = 0; j < i; ++j)
         {
@@ -234,7 +220,7 @@ bool DetectAndArm() noexcept
 
 void Arm(uint32_t architecture, uint32_t implementation) noexcept
 {
-    if (!IsAmpereRtx(architecture, implementation)) return;
+    if (!IsTranslatedRtx(architecture, implementation)) return;
     gArchitecture.store(architecture, std::memory_order_relaxed);
     gImplementation.store(implementation, std::memory_order_relaxed);
     gArmed.store(true, std::memory_order_release);
@@ -243,39 +229,82 @@ void Arm(uint32_t architecture, uint32_t implementation) noexcept
 bool Armed() noexcept { return gArmed.load(std::memory_order_acquire); }
 bool Detected() noexcept { return gDetected.load(std::memory_order_acquire); }
 
+const char* VulkanOutcomeName(VulkanOutcome outcome) noexcept
+{
+    switch (outcome)
+    {
+    case VulkanOutcome::eNotChecked: return "not-checked";
+    case VulkanOutcome::eDeclared: return "declared";
+    case VulkanOutcome::eAlreadyDeclared: return "already-declared";
+    case VulkanOutcome::eAbsent: return "absent";
+    case VulkanOutcome::eShapeMismatch: return "shape-mismatch";
+    case VulkanOutcome::ePublicationFailed: return "publication-failed";
+    default: return "unknown";
+    }
+}
+
+namespace
+{
+// The architecture immediate of one requirements export, or null when the
+// export is absent (present=false) or not the recognized record shape.
+uint8_t* RequirementsImmediate(HMODULE module, const char* name, bool& present) noexcept
+{
+    auto* requirements = reinterpret_cast<uint8_t*>(GetProcAddress(module, name));
+    present = requirements != nullptr;
+    uint32_t begin = 0, end = 0;
+    if (!requirements || !FunctionRange(module, requirements, begin, end)
+        || end - begin > kMaximumRequirementsBytes || !ReadableImage(module, requirements, end - begin))
+        return nullptr;
+    const size_t offset = FindRequirementsArchitecture(requirements, end - begin);
+    return offset == SIZE_MAX ? nullptr : requirements + offset;
+}
+
+bool ImmediateIs(const uint8_t* immediate, uint32_t value) noexcept
+{
+    return immediate && immediate[0] == static_cast<uint8_t>(value)
+        && immediate[1] == static_cast<uint8_t>(value >> 8) && immediate[2] == 0 && immediate[3] == 0;
+}
+
+// Vulkan record after the D3D12 one; never changes the D3D12 outcome.
+void DeclareVulkanRequirements(HMODULE module, uint32_t target) noexcept
+{
+    bool present = false;
+    uint8_t* const immediate = RequirementsImmediate(module, kVulkanRequirementsExport, present);
+    if (!present) { RecordVulkan(VulkanOutcome::eAbsent); return; }
+    if (ImmediateIs(immediate, target)) { RecordVulkan(VulkanOutcome::eAlreadyDeclared); return; }
+    if (!ImmediateIs(immediate, kAdaArchitecture)) { RecordVulkan(VulkanOutcome::eShapeMismatch); return; }
+    RecordVulkan(PublishByte(immediate, 0x90, static_cast<uint8_t>(target)) && ImmediateIs(immediate, target)
+        ? VulkanOutcome::eDeclared : VulkanOutcome::ePublicationFailed);
+}
+}
+
 Outcome Declare(HMODULE module) noexcept
 {
     if (!gArmed.load(std::memory_order_acquire)) return Outcome::eNotArmed;
     if (!module || !dlssg_provider_policy::IsDlssgImplementationModule(module)) return Outcome::eNotProvider;
+    const uint32_t target = gArchitecture.load(std::memory_order_acquire);
+    if (target != kAmpereArchitecture && target != kTuringArchitecture) return Outcome::eNotArmed;
     auto* exportCode = reinterpret_cast<uint8_t*>(GetProcAddress(module, kArchitectureExport));
-    auto* requirements = reinterpret_cast<uint8_t*>(GetProcAddress(module, kRequirementsExport));
-    if (!exportCode || !requirements || !ReadableImage(module, exportCode, 6))
+    if (!exportCode || !ReadableImage(module, exportCode, 6))
         return Record(Outcome::eShapeMismatch, module);
-    uint32_t begin = 0, end = 0;
-    if (!FunctionRange(module, requirements, begin, end) || end - begin > kMaximumRequirementsBytes
-        || !ReadableImage(module, requirements, end - begin))
-        return Record(Outcome::eShapeMismatch, module);
-    const size_t offset = FindRequirementsArchitecture(requirements, end - begin);
-    if (offset == SIZE_MAX) return Record(Outcome::eShapeMismatch, module);
-    uint8_t* const requirementImmediate = requirements + offset;
+    bool present = false;
+    uint8_t* const requirementImmediate = RequirementsImmediate(module, kRequirementsExport, present);
+    if (!requirementImmediate) return Record(Outcome::eShapeMismatch, module);
     const bool exportAda = ArchitectureExportIs(exportCode, kAdaArchitecture);
-    const bool exportAmpere = ArchitectureExportIs(exportCode, kAmpereArchitecture);
-    const auto immediateIs = [requirementImmediate](uint32_t value) {
-        return requirementImmediate[0] == static_cast<uint8_t>(value)
-            && requirementImmediate[1] == static_cast<uint8_t>(value >> 8)
-            && requirementImmediate[2] == 0 && requirementImmediate[3] == 0;
-    };
-    const bool requirementAda = immediateIs(kAdaArchitecture);
-    const bool requirementAmpere = immediateIs(kAmpereArchitecture);
+    const bool exportAmpere = ArchitectureExportIs(exportCode, target);
+    const bool requirementAda = ImmediateIs(requirementImmediate, kAdaArchitecture);
+    const bool requirementAmpere = ImmediateIs(requirementImmediate, target);
     if ((!exportAda && !exportAmpere) || (!requirementAda && !requirementAmpere))
         return Record(Outcome::eShapeMismatch, module);
-    if (exportAmpere && requirementAmpere) return Record(Outcome::eAlreadyDeclared, module);
     // 0x190 and 0x170 differ only in the low byte. Requirements first: an
     // interrupted publication then leaves NGX's own snippet gate closed.
-    if ((requirementAda && !PublishByte(requirementImmediate, 0x90, 0x70))
-        || (exportAda && !PublishByte(exportCode + 1, 0x90, 0x70)))
+    if (requirementAda && !PublishByte(requirementImmediate, 0x90, static_cast<uint8_t>(target)))
         return Record(Outcome::ePublicationFailed, module);
-    return Record(ArchitectureExportIs(exportCode, kAmpereArchitecture) && immediateIs(kAmpereArchitecture)
+    DeclareVulkanRequirements(module, target);
+    if (exportAmpere && requirementAmpere) return Record(Outcome::eAlreadyDeclared, module);
+    if (exportAda && !PublishByte(exportCode + 1, 0x90, static_cast<uint8_t>(target)))
+        return Record(Outcome::ePublicationFailed, module);
+    return Record(ArchitectureExportIs(exportCode, target) && ImmediateIs(requirementImmediate, target)
         ? Outcome::eDeclared : Outcome::ePublicationFailed, module);
 }
 
@@ -295,6 +324,9 @@ Snapshot Read() noexcept
     snapshot.publicationFailures = gPublicationFailures.load(std::memory_order_relaxed);
     snapshot.last = static_cast<Outcome>(gLast.load(std::memory_order_acquire));
     snapshot.lastModule = gLastModule.load(std::memory_order_relaxed);
+    snapshot.nvapiRedirected = gNvapiRedirected.load(std::memory_order_relaxed);
+    snapshot.lastVulkan = static_cast<VulkanOutcome>(gLastVulkan.load(std::memory_order_acquire));
+    snapshot.vulkanDeclared = gVulkanDeclared.load(std::memory_order_relaxed);
     return snapshot;
 }
 }

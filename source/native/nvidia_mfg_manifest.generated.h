@@ -7,14 +7,15 @@ struct ManifestEntry { std::string_view key; Tier tier; };
 
 // Source: https://www.nvidia.com/content/dam/en-zz/Solutions/geforce/news/nvidia-rtx-games-engines-apps/dlss-rt-games-apps-overrides.json
 // NoMfgOverride: native FG listed, MFG cell blank; 2x is the mod fallback, not a published maximum.
-inline constexpr char kManifestFetchedDate[] = "2026-09-13";
-inline constexpr char kManifestSha256[] = "8BBBA2D23CD2C76BCC50D6A9FDEB1CC8D6DEA289A6E423E04C882C9EB653C76F";
-inline constexpr std::array<ManifestEntry, 393> kManifest = {{
+inline constexpr char kManifestFetchedDate[] = "2026-10-20";
+inline constexpr char kManifestSha256[] = "B11550FF03738E43BA5F724782A45A68503D1AA40546BAB9B1C3A051250B490D";
+inline constexpr std::array<ManifestEntry, 407> kManifest = {{
     {"007firstlight", Tier::eSixX}, // 007 First Light
     {"171", Tier::eSixX}, // 171
     {"3dmark", Tier::eFourX}, // 3D Mark
     {"83", Tier::eSixX}, // 83
     {"abjectabyss", Tier::eNoMfgOverride}, // Abject Abyss
+    {"activematter", Tier::eSixX}, // Active Matter
     {"adifficultgameaboutrollingreuprise", Tier::eSixX}, // A Difficult Game About ROLLING - ReUpRise
     {"aila", Tier::eSixX}, // A.I.L.A
     {"aion2", Tier::eFourX}, // AION2
@@ -22,6 +23,7 @@ inline constexpr std::array<ManifestEntry, 393> kManifest = {{
     {"alanwake2", Tier::eSixX}, // Alan Wake 2
     {"alienrogueincursionpartoneevolvededition", Tier::eSixX}, // Alien: Rogue Incursion - Part One: Evolved Edition
     {"ambulancelifeaparamedicsimulator", Tier::eSixX}, // Ambulance Life: A Paramedic Simulator
+    {"aniimo", Tier::eSixX}, // Aniimo
     {"aplaguetalerequiem", Tier::eNoMfgOverride}, // A Plague Tale: Requiem
     {"aquietplacetheroadahead", Tier::eSixX}, // A Quiet Place: The Road Ahead
     {"arcraiders", Tier::eFourX}, // ARC Raiders
@@ -51,6 +53,7 @@ inline constexpr std::array<ManifestEntry, 393> kManifest = {{
     {"beyondhanwell", Tier::eSixX}, // Beyond Hanwell
     {"blackmythwukong", Tier::eFourX}, // Black Myth: Wukong
     {"bladesoffire", Tier::eSixX}, // Blades of Fire
+    {"bodycam", Tier::eFourX}, // Bodycam
     {"borderlands4", Tier::eSixX}, // Borderlands 4
     {"breathedge2", Tier::eSixX}, // Breathedge 2
     {"brickadia", Tier::eFourX}, // Brickadia
@@ -59,6 +62,7 @@ inline constexpr std::array<ManifestEntry, 393> kManifest = {{
     {"busbound", Tier::eSixX}, // Bus Bound
     {"callofdutyblackops6", Tier::eNoMfgOverride}, // Call of Duty: Black Ops 6
     {"callofdutyblackops7", Tier::eFourX}, // Call of Duty: Black Ops 7
+    {"callofdutymodernwarfare4", Tier::eSixX}, // Call of Duty: Modern Warfare 4
     {"callofdutymodernwarfareiii", Tier::eNoMfgOverride}, // Call of Duty: Modern Warfare III
     {"callofdutywarzone2022", Tier::eNoMfgOverride}, // Call of Duty: Warzone (2022)
     {"carpathiansurvival", Tier::eSixX}, // Carpathian Survival
@@ -67,13 +71,16 @@ inline constexpr std::array<ManifestEntry, 393> kManifest = {{
     {"chaosvantage", Tier::eNoMfgOverride}, // Chaos Vantage
     {"chernobylite2exclusionzone", Tier::eSixX}, // Chernobylite 2: Exclusion Zone
     {"clairobscurexpedition33", Tier::eSixX}, // Clair Obscur: Expedition 33
+    {"clivebarkershellraiserrevival", Tier::eSixX}, // Clive Barker’s Hellraiser: Revival
     {"codealkonostawakeningofevil", Tier::eSixX}, // Code Alkonost: Awakening of Evil
     {"conanexilesenhanced", Tier::eSixX}, // Conan Exiles Enhanced
     {"conquerorsblade", Tier::eNoMfgOverride}, // Conqueror's Blade
+    {"controlresonant", Tier::eSixX}, // CONTROL Resonant
     {"corsaircove", Tier::eSixX}, // Corsair Cove
     {"crimsondesert", Tier::eSixX}, // Crimson Desert
     {"crimsonmoon", Tier::eFourX}, // Crimson Moon
     {"cronosthenewdawn", Tier::eSixX}, // Cronos: The New Dawn
+    {"crossoutremastered", Tier::eSixX}, // Crossout Remastered
     {"crownsimulatorroyallifesimulation", Tier::eFourX}, // Crown Simulator - Royal Life Simulation
     {"cthulhuthecosmicabyss", Tier::eSixX}, // Cthulhu: The Cosmic Abyss
     {"curseddeal", Tier::eSixX}, // Cursed Deal
@@ -107,7 +114,7 @@ inline constexpr std::array<ManifestEntry, 393> kManifest = {{
     {"doomthedarkages", Tier::eSixX}, // DOOM: The Dark Ages
     {"dragonagetheveilguard", Tier::eSixX}, // Dragon Age: The Veilguard
     {"dragonkinthebanished", Tier::eSixX}, // Dragonkin: The Banished
-    {"dragonsdogma2", Tier::eNoMfgOverride}, // Dragon's Dogma 2
+    {"dragonsdogma2", Tier::eSixX}, // Dragon's Dogma 2
     {"dreadzone", Tier::eSixX}, // DREADZONE
     {"duckside", Tier::eSixX}, // DUCKSIDE
     {"duetnightabyss", Tier::eSixX}, // Duet Night Abyss
@@ -122,7 +129,7 @@ inline constexpr std::array<ManifestEntry, 393> kManifest = {{
     {"empireoftheants", Tier::eSixX}, // Empire of the Ants
     {"empulse", Tier::eSixX}, // Empulse
     {"empyreal", Tier::eSixX}, // Empyreal
-    {"enlisted", Tier::eFourX}, // Enlisted
+    {"enlisted", Tier::eSixX}, // Enlisted
     {"enotriathelastsong", Tier::eSixX}, // Enotria: The Last Song
     {"entitytheblackday", Tier::eSixX}, // ENTITY: THE BLACK DAY
     {"epicgamestwinmotionue", Tier::eSixX}, // Epic Games' Twinmotion-UE
@@ -156,6 +163,7 @@ inline constexpr std::array<ManifestEntry, 393> kManifest = {{
     {"fragpunk", Tier::eSixX}, // FragPunk
     {"frostpunk2", Tier::eSixX}, // Frostpunk 2
     {"funkofusion", Tier::eNoMfgOverride}, // Funko Fusion
+    {"gearsofwareday", Tier::eSixX}, // Gears of War: E-Day
     {"ghostoftsushimadirectorscut", Tier::eNoMfgOverride}, // Ghost of Tsushima Director’s Cut
     {"ghostrunner2", Tier::eSixX}, // Ghostrunner 2
     {"goals", Tier::eFourX}, // GOALS
@@ -168,6 +176,7 @@ inline constexpr std::array<ManifestEntry, 393> kManifest = {{
     {"groundbranch", Tier::eSixX}, // Ground Branch
     {"halflife2rtxdemo", Tier::eFourX}, // Half-Life 2 RTX Demo
     {"halfsword", Tier::eSixX}, // Half Sword
+    {"halloweenthegame", Tier::eSixX}, // Halloween: The Game
     {"halocampaignevolved", Tier::eSixX}, // Halo: Campaign Evolved
     {"hellbladeiienhancedsenuassaga", Tier::eSixX}, // Hellblade II Enhanced: Senua's Saga
     {"hellisus", Tier::eSixX}, // Hell Is Us
@@ -264,9 +273,11 @@ inline constexpr std::array<ManifestEntry, 393> kManifest = {{
     {"palworld", Tier::eSixX}, // Palworld
     {"panicore", Tier::eNoMfgOverride}, // PANICORE
     {"parkstudio", Tier::eSixX}, // Park Studio
+    {"paxautocratica", Tier::eFourX}, // Pax Autocratica
     {"paxdei", Tier::eSixX}, // Pax Dei
     {"payday3", Tier::eSixX}, // PAYDAY 3
     {"perish", Tier::eNoMfgOverride}, // PERISH
+    {"permafrost", Tier::eSixX}, // Permafrost
     {"pizzabandit", Tier::eSixX}, // Pizza Bandit
     {"planetcoaster2", Tier::eNoMfgOverride}, // Planet Coaster 2
     {"portalpreludertx", Tier::eNoMfgOverride}, // Portal: Prelude RTX
@@ -321,6 +332,7 @@ inline constexpr std::array<ManifestEntry, 393> kManifest = {{
     {"starrupture", Tier::eSixX}, // StarRupture
     {"starshiptroopersextermination", Tier::eSixX}, // Starship Troopers: Extermination
     {"startrekvoyageracrosstheunknown", Tier::eSixX}, // Star Trek: Voyager - Across The Unknown
+    {"starwarsgalacticracer", Tier::eSixX}, // STAR WARS: Galactic Racer
     {"starwarsjedisurvivor", Tier::eSixX}, // Star Wars Jedi: Survivor
     {"starwarsoutlaws", Tier::eFourX}, // Star Wars Outlaws
     {"starwarszerocompany", Tier::eSixX}, // STAR WARS Zero Company
@@ -367,6 +379,7 @@ inline constexpr std::array<ManifestEntry, 393> kManifest = {{
     {"thetalosprinciplereawakened", Tier::eFourX}, // The Talos Principle: Reawakened
     {"thethaumaturge", Tier::eSixX}, // The Thaumaturge
     {"thewitcher3wildhunt", Tier::eNoMfgOverride}, // The Witcher 3: Wild Hunt
+    {"thewitcher3wildhuntremastered", Tier::eSixX}, // The Witcher 3: Wild Hunt - Remastered
     {"throneandliberty", Tier::eSixX}, // THRONE AND LIBERTY
     {"titanquestii", Tier::eSixX}, // Titan Quest II
     {"tokyoxtremeracer", Tier::eSixX}, // Tokyo Xtreme Racer
@@ -379,6 +392,7 @@ inline constexpr std::array<ManifestEntry, 393> kManifest = {{
     {"vampirethemasqueradebloodlines2", Tier::eSixX}, // Vampire: The Masquerade - Bloodlines 2
     {"vectorstrike", Tier::eSixX}, // Vector Strike
     {"wackywest", Tier::eSixX}, // Wacky West
+    {"wardogs", Tier::eSixX}, // WARDOGS
     {"warhammer40000darktide", Tier::eFourX}, // Warhammer 40,000: Darktide
     {"warhammer40000spacemarine2", Tier::eFourX}, // Warhammer 40,000: Space Marine 2
     {"warhammervermintide2", Tier::eNoMfgOverride}, // Warhammer: Vermintide 2

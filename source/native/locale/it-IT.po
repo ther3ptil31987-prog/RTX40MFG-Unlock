@@ -1,0 +1,777 @@
+# MFG Unlocker menu, Italian.
+# Segoe UI draws Latin, so no extra font is listed.
+msgid ""
+msgstr ""
+"Project-Id-Version: MFG Unlocker\n"
+"Language: it_IT\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"X-MFG-Native-Name: Italiano\n"
+"X-MFG-English-Name: Italian\n"
+"X-MFG-Match: it\n"
+
+msgid "Auto (%s)"
+msgstr "Automatica (%s)"
+
+msgid "Menu language"
+msgstr "Lingua del menu"
+
+msgid "Pin"
+msgstr "Fissa"
+
+msgid ""
+"Keeps this panel on screen, see-through and click-through.\n"
+"%s brings the menu back."
+msgstr ""
+"Mantiene questo pannello sullo schermo, semitrasparente e senza bloccare i clic.\n"
+"Premi %s per riaprire il menu."
+
+msgid "Pinned  |  %s brings the menu back"
+msgstr "Fissato  |  Premi %s per riaprire il menu"
+
+msgid "Menu key: %s"
+msgstr "Tasto menu: %s"
+
+msgid "Press a key... Esc cancels"
+msgstr "Premi un tasto... Esc annulla"
+
+msgid "Cancel"
+msgstr "Annulla"
+
+msgid "Change key"
+msgstr "Cambia tasto"
+
+msgid "The new shortcut works for this session, but could not be saved."
+msgstr "Il nuovo tasto vale solo per questa sessione: non è stato possibile salvarlo nel file."
+
+msgid "The language works for this session, but could not be saved."
+msgstr "La lingua vale solo per questa sessione: non è stato possibile salvarla nel file."
+
+msgid "MFG Unlocker  |  %s opens the menu"
+msgstr "MFG Unlocker  |  Premi %s per aprire il menu"
+
+msgid ""
+"Shows the real and DLSS frame rates in the top-left corner\n"
+"while the menu is closed. Saved for the next launch."
+msgstr ""
+"Mostra gli FPS reali e quelli DLSS nell'angolo in alto a sinistra\n"
+"quando il menu è chiuso. La scelta viene salvata per i prossimi avvii."
+
+msgid "DLSS-G preset"
+msgstr "Preset DLSS-G"
+
+msgid "Original"
+msgstr "Predefinito"
+
+msgid "observed"
+msgstr "rilevato"
+
+msgid "waiting for the provider"
+msgstr "in attesa del provider"
+
+msgid "Preset %s"
+msgstr "Preset %s"
+
+msgid "Game / driver"
+msgstr "Gioco / driver"
+
+msgid "managed by the game or driver"
+msgstr "gestito dal gioco o dal driver"
+
+msgid "needs DLSS-G 310.9.16; game / driver in use"
+msgstr "richiede DLSS-G 310.9.16; resta il preset gioco / driver"
+
+msgid "override supplied"
+msgstr "override fornito"
+
+msgid "override unavailable"
+msgstr "override non disponibile"
+
+msgid "This DLSS-G provider supports its original preset only. Preset B stays saved for providers that support it."
+msgstr "Questo provider DLSS-G supporta solo il proprio preset predefinito. Il Preset B resta salvato per i provider che lo supportano."
+
+msgid "This DLSS-G provider supports its original preset only."
+msgstr "Questo provider DLSS-G supporta solo il proprio preset predefinito."
+
+msgid "Restarting frame generation with the new preset..."
+msgstr "Riavvio della Frame Generation con il nuovo preset..."
+
+msgid "The game / driver preset is saved. Restart the game to use it."
+msgstr "Il preset gioco / driver è salvato. Riavvia il gioco per applicarlo."
+
+msgid "Preset %s is saved. Restart the game to use it."
+msgstr "Il Preset %s è salvato. Riavvia il gioco per applicarlo."
+
+msgid "Preset C needs DLSS-G 310.9.16 or newer (NVIDIA app). This game's frame generation keeps the game / driver preset."
+msgstr "Il Preset C richiede DLSS-G 310.9.16 o superiore (NVIDIA App). La Frame Generation di questo gioco resta sul preset gioco / driver."
+
+msgid "The preset selection could not be saved."
+msgstr "Impossibile salvare il preset selezionato."
+
+msgid "Game / driver default"
+msgstr "Predefinito gioco / driver"
+
+msgid "Preset C (performance)"
+msgstr "Preset C (prestazioni)"
+
+msgid "Original preset"
+msgstr "Preset predefinito"
+
+msgid ""
+"The DLSS frame generation model preset.\n"
+"Preset C is NVIDIA's lighter Frame Generation mode. It needs DLSS-G 310.9.16 or newer,\n"
+"from the NVIDIA app's DLSS override; other providers keep the game / driver preset.\n"
+"A change made while frame generation runs restarts it once, with a short pause;\n"
+"some older DLSS-G versions apply it after a game restart."
+msgstr ""
+"Il preset del modello DLSS Frame Generation.\n"
+"Il Preset C è la modalità Frame Generation più leggera di NVIDIA. Richiede DLSS-G 310.9.16 o superiore,\n"
+"tramite l'override DLSS della NVIDIA App; gli altri provider mantengono il preset gioco / driver.\n"
+"Se lo cambi con la Frame Generation attiva, questa si riavvia una volta, con una breve pausa;\n"
+"con alcune versioni di DLSS-G più vecchie si applica al riavvio del gioco."
+
+msgid "Performance"
+msgstr "Prestazioni"
+
+msgid "Balanced"
+msgstr "Bilanciato"
+
+msgid "Quality"
+msgstr "Qualità"
+
+msgid "Ultra Performance"
+msgstr "Ultra Prestazioni"
+
+msgid "Ultra Quality"
+msgstr "Ultra Qualità"
+
+msgid "DLSS RR"
+msgstr "DLSS RR"
+
+msgid "DLSS SR"
+msgstr "DLSS SR"
+
+msgid "RR preset"
+msgstr "Preset RR"
+
+msgid "SR preset"
+msgstr "Preset SR"
+
+msgid "Running"
+msgstr "In esecuzione"
+
+msgid "Idle"
+msgstr "Inattivo"
+
+msgid "not evaluated in the last second"
+msgstr "non elaborato nell'ultimo secondo"
+
+msgid "Not detected"
+msgstr "Non rilevato"
+
+msgid "waiting for the game to create DLSS"
+msgstr "in attesa che il gioco crei il DLSS"
+
+msgid "NVIDIA app override: latest"
+msgstr "override dell'app NVIDIA: più recente"
+
+msgid "NVIDIA app override: %s"
+msgstr "override dell'app NVIDIA: %s"
+
+msgid "sent as the game's preset hint"
+msgstr "inviato come suggerimento di preset del gioco"
+
+msgid "game hint: %s"
+msgstr "suggerimento del gioco: %s"
+
+msgid "DLSS default for this mode"
+msgstr "predefinito DLSS per questa modalità"
+
+msgid ""
+"The DLSS Ray Reconstruction model preset.\n"
+"D is NVIDIA's transformer model; E is the newer transformer model, which games with a\n"
+"depth-of-field guide need. F is NVIDIA's second-generation model (RR2) and needs driver 580\n"
+"or newer; DLSS versions without a preset use their default.\n"
+"A change applies at once while DLSS runs. A preset selected when the game starts also\n"
+"replaces an NVIDIA app preset override for that session."
+msgstr ""
+"Il preset del modello DLSS Ray Reconstruction.\n"
+"D è il modello transformer di NVIDIA; E è il modello transformer più recente, necessario ai giochi\n"
+"con una guida di profondità di campo. F è il modello di seconda generazione di NVIDIA (RR2) e richiede il driver 580\n"
+"o successivo; le versioni del DLSS senza un preset usano il loro predefinito.\n"
+"Una modifica si applica subito mentre il DLSS è attivo. Un preset selezionato all'avvio del gioco\n"
+"sostituisce anche un override del preset dell'app NVIDIA per quella sessione."
+
+msgid ""
+"The DLSS Super Resolution model preset.\n"
+"K is NVIDIA's transformer model with the best image quality; J is similar with a little\n"
+"less ghosting and more flicker. L and M are the newer transformer presets NVIDIA uses for\n"
+"Ultra Performance and Performance; DLSS versions without them use their default.\n"
+"A change applies at once while DLSS runs. A preset selected when the game starts also\n"
+"replaces an NVIDIA app preset override for that session."
+msgstr ""
+"Il preset del modello DLSS Super Resolution.\n"
+"K è il modello transformer di NVIDIA con la migliore qualità d'immagine; J è simile, con un po'\n"
+"meno ghosting e più sfarfallio. L e M sono i preset transformer più recenti che NVIDIA usa per\n"
+"Ultra Prestazioni e Prestazioni; le versioni del DLSS che non li hanno usano il loro predefinito.\n"
+"Una modifica si applica subito mentre il DLSS è attivo. Un preset selezionato all'avvio del gioco\n"
+"sostituisce anche un override del preset dell'app NVIDIA per quella sessione."
+
+msgid "The DLSS RR preset could not be saved."
+msgstr "Impossibile salvare il preset DLSS RR."
+
+msgid "The DLSS SR preset could not be saved."
+msgstr "Impossibile salvare il preset DLSS SR."
+
+msgid "The NVIDIA app's DLSS preset override is active in this game session. Restart the game with a preset selected here to switch presets live."
+msgstr "L'override del preset DLSS dell'app NVIDIA è attivo in questa sessione di gioco. Riavvia il gioco con un preset selezionato qui per cambiare preset durante l'esecuzione."
+
+msgid "The NVIDIA app's DLSS preset override is replaced in this session. It applies again after a restart with Game / driver selected."
+msgstr "L'override del preset DLSS dell'app NVIDIA è sostituito in questa sessione. Torna attivo dopo un riavvio con Gioco / driver selezionato."
+
+msgid "The NVIDIA app's DLSS preset override could not be checked in this session. If one is set, it takes priority."
+msgstr "Non è stato possibile verificare l'override del preset DLSS dell'app NVIDIA in questa sessione. Se ne è impostato uno, ha la precedenza."
+
+msgid "This game's DLSS cannot change its preset while running. The preset applies the next time the game starts DLSS (change the DLSS quality mode or restart the game)."
+msgstr "Il DLSS di questo gioco non può cambiare preset durante l'esecuzione. Il preset si applica al prossimo avvio del DLSS da parte del gioco (cambia la modalità di qualità DLSS o riavvia il gioco)."
+
+msgid "DLSS refused the new preset; the previous one stays in use."
+msgstr "Il DLSS ha rifiutato il nuovo preset; resta in uso quello precedente."
+
+msgid "Waiting to release the previous DLSS preset..."
+msgstr "In attesa di rilasciare il preset DLSS precedente..."
+
+msgid "Switching DLSS Ray Reconstruction to the new preset..."
+msgstr "Passaggio del DLSS Ray Reconstruction al nuovo preset..."
+
+msgid "Switching DLSS Super Resolution to the new preset..."
+msgstr "Passaggio del DLSS Super Resolution al nuovo preset..."
+
+msgid "Waiting for the game's Reflex plugin."
+msgstr "In attesa del plugin Reflex del gioco."
+
+msgid "The loaded Reflex plugin version is unsupported."
+msgstr "La versione del plugin Reflex caricata non è supportata."
+
+msgid "Reflex controls are unavailable for this plugin."
+msgstr "I controlli Reflex non sono disponibili per questo plugin."
+
+msgid "The Reflex limit is unavailable for the current FG runtime."
+msgstr "Il limite Reflex non è disponibile per il runtime FG attuale."
+
+msgid "Waiting for game Reflex settings. Change the game's Reflex setting once to retry."
+msgstr "In attesa delle impostazioni Reflex del gioco. Cambia una volta l'impostazione Reflex del gioco per riprovare."
+
+msgid "Waiting for the game's Reflex settings thread."
+msgstr "In attesa del thread delle impostazioni Reflex del gioco."
+
+msgid "Waiting for Reflex availability."
+msgstr "Verifica della disponibilità di Reflex in corso."
+
+msgid "Reflex is unavailable."
+msgstr "Reflex non è disponibile."
+
+msgid "Restoring the game's Reflex limit..."
+msgstr "Ripristino del limite Reflex del gioco..."
+
+msgid "The game rejected the Reflex limit."
+msgstr "Il gioco ha rifiutato il limite Reflex."
+
+msgid "The game's Reflex settings cannot be safely replayed."
+msgstr "Impossibile riapplicare in modo sicuro le impostazioni Reflex del gioco."
+
+msgid "The Reflex plugin changed. Restart the game."
+msgstr "Il plugin Reflex è cambiato. Riavvia il gioco."
+
+msgid "Waiting for the next safe Reflex update."
+msgstr "In attesa del prossimo momento sicuro per aggiornare Reflex."
+
+msgid "Waiting for the game to accept the Reflex limit."
+msgstr "In attesa che il gioco accetti il limite Reflex."
+
+msgid "Game"
+msgstr "Gioco"
+
+msgid "Off"
+msgstr "Disattivato"
+
+msgid "V-Sync"
+msgstr "V-Sync"
+
+msgid ""
+"Off submits the game's frames without V-Sync.\n"
+"NVIDIA Control Panel V-Sync settings take priority."
+msgstr ""
+"Disattivato: i frame del gioco vengono inviati senza V-Sync.\n"
+"Le impostazioni V-Sync del Pannello di controllo NVIDIA hanno la precedenza."
+
+msgid "Reflex FPS limit"
+msgstr "Limite FPS Reflex"
+
+msgid ""
+"Caps the game's frame rate through Reflex.\n"
+"Paused while Dynamic MFG is on; the saved limit is kept."
+msgstr ""
+"Limita il frame rate del gioco tramite Reflex.\n"
+"In pausa con la modalità Dinamica attiva; il limite salvato viene mantenuto."
+
+msgid "The Reflex limit is paused while Dynamic MFG is on. The saved limit is kept."
+msgstr "Il limite Reflex è in pausa con la modalità Dinamica attiva. Il limite salvato viene mantenuto."
+
+msgid "The presentation settings could not be saved."
+msgstr "Impossibile salvare le impostazioni di latenza e schermo."
+
+msgid "Off not applied"
+msgstr "Disattivazione non applicata"
+
+msgid "applies when the game recreates its swapchain"
+msgstr "si applica quando il gioco ricrea la swapchain"
+
+msgid "the game already presents without V-Sync"
+msgstr "il gioco invia già i frame senza V-Sync"
+
+msgid "Off requested"
+msgstr "Disattivazione richiesta"
+
+msgid "not available on this GPU or driver"
+msgstr "non disponibile con questa GPU o questo driver"
+
+msgid "game interval %u submitted as 0"
+msgstr "intervallo del gioco %u inviato come 0"
+
+msgid "the game's last Present was not accepted"
+msgstr "l'ultimo Present del gioco non è stato accettato"
+
+msgid "waiting for the game's swapchain"
+msgstr "in attesa della swapchain del gioco"
+
+msgid "Applying..."
+msgstr "Applicazione in corso..."
+
+msgid "Reflex limit"
+msgstr "Limite Reflex"
+
+msgid "accepted"
+msgstr "accettato"
+
+msgid "%d FPS requested"
+msgstr "%d FPS richiesti"
+
+msgid "restoring the game's Reflex limit"
+msgstr "ripristino del limite Reflex del gioco"
+
+msgid "paused for Dynamic MFG"
+msgstr "in pausa per la modalità Dinamica"
+
+msgid "Reflex status is temporarily unavailable."
+msgstr "Lo stato di Reflex è temporaneamente non disponibile."
+
+msgid "Path traced hair"
+msgstr "Capelli in path tracing"
+
+msgid "State"
+msgstr "Stato"
+
+msgid "Unknown"
+msgstr "Sconosciuto"
+
+msgid "Disabled"
+msgstr "Disabilitato"
+
+msgid "Waiting for early device"
+msgstr "In attesa del dispositivo grafico"
+
+msgid "Preparing"
+msgstr "In preparazione"
+
+msgid "Unsupported game build"
+msgstr "Build del gioco non supportata"
+
+msgid "Unsupported GPU"
+msgstr "GPU non supportata"
+
+msgid "Native LSS"
+msgstr "LSS nativo"
+
+msgid "Unavailable"
+msgstr "Non disponibile"
+
+msgid "Unsupported driver"
+msgstr "Driver non supportato"
+
+msgid "game Path Traced Hair setting"
+msgstr "impostazione Path Traced Hair del gioco"
+
+msgid "Active"
+msgstr "Attivo"
+
+msgid "tracing converted hair"
+msgstr "tracciamento dei capelli convertiti"
+
+msgid "no hair traced in the last 2 s"
+msgstr "nessun capello tracciato negli ultimi 2 s"
+
+msgid "Ready"
+msgstr "Pronto"
+
+msgid "waiting for game hair"
+msgstr "in attesa dei capelli del gioco"
+
+msgid "Turn it on or off with HairWorks and Path Traced Hair in the game's graphics settings."
+msgstr "Attivalo o disattivalo con HairWorks e Path Traced Hair nelle impostazioni grafiche del gioco."
+
+msgid "Traced hair"
+msgstr "Capelli tracciati"
+
+msgid "%s updates"
+msgstr "%s aggiornamenti"
+
+msgid "Builds"
+msgstr "Build"
+
+msgid "Hair diagnostics"
+msgstr "Diagnostica capelli"
+
+msgid "Turn on frame generation in the game's settings (DLSS or XeSS)."
+msgstr "Attiva la Frame Generation nelle impostazioni del gioco (DLSS o XeSS)."
+
+msgid "Turn on frame generation in the game's settings (DLSS)."
+msgstr "Attiva la Frame Generation nelle impostazioni del gioco (DLSS)."
+
+msgid "Turn on frame generation in the game's settings (XeSS)."
+msgstr "Attiva la Frame Generation nelle impostazioni del gioco (XeSS)."
+
+msgid "Turn on DLSS or XeSS frame generation in the game's settings."
+msgstr "Attiva la Frame Generation DLSS o XeSS nelle impostazioni del gioco."
+
+msgid "Game FG"
+msgstr "FG del gioco"
+
+msgid "GPU"
+msgstr "GPU"
+
+msgid "Waiting for a supported game GPU"
+msgstr "In attesa di una GPU supportata nel gioco"
+
+msgid "Game FG option"
+msgstr "Opzione FG del gioco"
+
+msgid "Unlock"
+msgstr "Sblocca"
+
+msgid ""
+"For games that hide DLSS Frame Generation on RTX 30 cards, such as Wuthering Waves.\n"
+"The game then sees an NVIDIA GeForce RTX 4090. DLSS, Streamline, the driver and MFG Unlocker\n"
+"keep using your real GPU. The game's recommended settings may assume an RTX 4090.\n"
+"Online games with anti cheat may treat any mod as a risk. Applies after a game restart."
+msgstr ""
+"Per i giochi che nascondono la DLSS Frame Generation sulle schede RTX 30, come Wuthering Waves.\n"
+"Il gioco vedrà così una NVIDIA GeForce RTX 4090. DLSS, Streamline, il driver e MFG Unlocker\n"
+"continuano a usare la tua vera GPU. Le impostazioni consigliate dal gioco potrebbero essere pensate per una RTX 4090.\n"
+"I giochi online con anti-cheat potrebbero considerare un rischio qualsiasi mod. Riavvia il gioco per applicare la modifica."
+
+msgid "The Game FG option could not be saved."
+msgstr "Impossibile salvare l'opzione FG del gioco."
+
+msgid "Restart the game to unlock its Frame Generation option."
+msgstr "Riavvia il gioco per sbloccare l'opzione Frame Generation."
+
+msgid "Restart the game to report your real GPU again."
+msgstr "Riavvia il gioco perché veda di nuovo la tua vera GPU."
+
+msgid "The Game FG option could not be applied this session. See the log."
+msgstr "Impossibile applicare l'opzione FG del gioco in questa sessione. Controlla il log."
+
+msgid "The game sees an NVIDIA GeForce RTX 4090 this session."
+msgstr "In questa sessione il gioco vede una NVIDIA GeForce RTX 4090."
+
+msgid "This GPU is not an RTX 30 card; the game sees its real name."
+msgstr "Questa GPU non è una scheda RTX 30; il gioco vede il suo nome reale."
+
+msgid "MFG Unlocker multi-frame port"
+msgstr "Porting multi-frame di MFG Unlocker"
+
+msgid "Intel 2x model"
+msgstr "Modello Intel 2x"
+
+msgid "Frame generation"
+msgstr "Frame Generation"
+
+msgid "XeSS frame generation support is unavailable in this build."
+msgstr "Il supporto alla Frame Generation XeSS non è disponibile in questa build."
+
+msgid "XeSS multi-frame generation needs OptiScaler, with XeFG as its frame generation output. Without it the game's XeSS frame generation runs at Intel's standard 2x."
+msgstr "La Multi Frame Generation XeSS richiede OptiScaler, con XeFG come output FG. Senza OptiScaler, la Frame Generation XeSS del gioco resta al 2x standard di Intel."
+
+msgid "XeSS multi-frame generation runs through OptiScaler. Set the frame generation ratio and the MFG model in OptiScaler's menu."
+msgstr "La Multi Frame Generation XeSS funziona tramite OptiScaler. Imposta il rapporto di Frame Generation e il modello MFG nel menu di OptiScaler."
+
+msgid "Display"
+msgstr "Schermo"
+
+msgid "Off submits the game's frames without V-Sync."
+msgstr "Disattivato: i frame del gioco vengono inviati senza V-Sync."
+
+msgid "The V-Sync setting could not be saved."
+msgstr "Impossibile salvare l'impostazione V-Sync."
+
+msgid "Status"
+msgstr "Stato"
+
+msgid "%u generated frames capacity"
+msgstr "capacità di %u frame generati"
+
+msgid "Applied"
+msgstr "Applicato"
+
+msgid "Not verified"
+msgstr "Non verificato"
+
+msgid "Model"
+msgstr "Modello"
+
+msgid "Tensor cores"
+msgstr "Tensor core"
+
+msgid "On"
+msgstr "Attivato"
+
+msgid "the ported model's int8 layers run as CUDA kernels"
+msgstr "i layer int8 del porting girano come kernel CUDA"
+
+msgid "no layer has run yet"
+msgstr "nessun layer è stato ancora eseguito"
+
+msgid "XeFGTensorCores = off in OptiScaler.ini"
+msgstr "XeFGTensorCores = off in OptiScaler.ini"
+
+msgid "presentation override is not verified"
+msgstr "l'override della presentazione non è verificato"
+
+msgid "DLSS multi-frame generation needs an NVIDIA RTX GPU."
+msgstr "La Multi Frame Generation DLSS richiede una GPU NVIDIA RTX."
+
+msgid "DLSS multi-frame generation is unavailable on this GPU."
+msgstr "La Multi Frame Generation DLSS non è disponibile su questa GPU."
+
+msgid "Advanced"
+msgstr "Avanzate"
+
+msgid "XeSS diagnostics"
+msgstr "Diagnostica XeSS"
+
+msgid "Waiting for status"
+msgstr "In attesa dello stato"
+
+msgid "Waiting for current backend status. Saved settings are preserved."
+msgstr "In attesa dello stato attuale del backend. Le impostazioni salvate vengono mantenute."
+
+msgid "Not connected"
+msgstr "Non connesso"
+
+msgid "%s backend is not loaded."
+msgstr "Il backend di %s non è caricato."
+
+msgid "The integrated core is unavailable. Check the startup log and restart the game with one %s module."
+msgstr "Il core integrato non è disponibile. Controlla il log di avvio e riavvia il gioco con un solo modulo %s."
+
+msgid "Paused"
+msgstr "In pausa"
+
+msgid "Live"
+msgstr "Attivo"
+
+msgid "The game changed graphics adapters. Restart the game to select a new GPU."
+msgstr "Il gioco ha cambiato scheda grafica. Riavvia il gioco per usare la nuova GPU."
+
+msgid "RTX Remix detected. Frame generation and its multiplier are managed in the RTX Remix menu."
+msgstr "RTX Remix rilevato. La Frame Generation e il suo moltiplicatore si gestiscono nel menu di RTX Remix."
+
+msgid "Provider patch"
+msgstr "Patch del provider"
+
+msgid "Ready at feature creation"
+msgstr "Pronta alla creazione della feature"
+
+msgid "Waiting for frame generation"
+msgstr "In attesa della Frame Generation"
+
+msgid "5x MFG (experimental)"
+msgstr "MFG 5x (sperimentale)"
+
+msgid "6x MFG (experimental)"
+msgstr "MFG 6x (sperimentale)"
+
+msgid "Follow game"
+msgstr "Segui il gioco"
+
+msgid "Mode"
+msgstr "Modalità"
+
+msgid "MFG mode"
+msgstr "Modalità MFG"
+
+msgid ""
+"Follow game uses the game's own frame generation setting.\n"
+"Dynamic adjusts frame generation toward a target frame rate; it does not set a hard FPS limit."
+msgstr ""
+"Segui il gioco: usa l'impostazione di Frame Generation del gioco stesso.\n"
+"Dinamica: regola la Frame Generation in base a un frame rate target; non è un limite FPS rigido."
+
+msgid "Dynamic target"
+msgstr "Target dinamico"
+
+msgid "Display refresh rate"
+msgstr "Frequenza dello schermo"
+
+msgid "Target FPS"
+msgstr "FPS target"
+
+msgid "Dynamic MFG is unavailable with the current limit or runtime. Its full frame-generation range must fit the limit."
+msgstr "La modalità Dinamica non è disponibile con il limite o il runtime attuali. L'intero intervallo di Frame Generation deve rientrare nel limite."
+
+msgid "Dynamic selection is saved; waiting for runtime support."
+msgstr "La modalità Dinamica è salvata; in attesa del supporto del runtime."
+
+msgid "Saved MFG request: %dx (unavailable in this session)"
+msgstr "Richiesta MFG salvata: %dx (non disponibile in questa sessione)"
+
+msgid "Request accepted, but the configuration was not saved."
+msgstr "Richiesta accettata, ma la configurazione non è stata salvata."
+
+msgid "The selection could not be applied or saved."
+msgstr "Impossibile applicare o salvare la selezione."
+
+msgid "Latency and display"
+msgstr "Latenza e schermo"
+
+msgid "DLSS Ray Reconstruction"
+msgstr "DLSS Ray Reconstruction"
+
+msgid "DLSS Super Resolution"
+msgstr "DLSS Super Resolution"
+
+msgid "game intent: unknown"
+msgstr "impostazione del gioco: sconosciuta"
+
+msgid "game intent: on"
+msgstr "impostazione del gioco: attivata"
+
+msgid "game intent: off"
+msgstr "impostazione del gioco: disattivata"
+
+msgid "FG state"
+msgstr "Stato FG"
+
+msgid "Requested"
+msgstr "Richiesto"
+
+msgid "Dynamic"
+msgstr "Dinamica"
+
+msgid "Dynamic, %ux"
+msgstr "Dinamica, %ux"
+
+msgid "NVIDIA list unavailable"
+msgstr "Elenco NVIDIA non disponibile"
+
+msgid "NVIDIA lists no MFG for this game"
+msgstr "NVIDIA non prevede MFG per questo gioco"
+
+msgid "game not on NVIDIA's list"
+msgstr "gioco non presente nell'elenco NVIDIA"
+
+msgid "NVIDIA lists %ux"
+msgstr "elenco NVIDIA: %ux"
+
+msgid "Limit"
+msgstr "Limite"
+
+msgid "the current wrapper has no verified MFG override"
+msgstr "il wrapper attuale non ha un override MFG verificato"
+
+msgid "%dx (safe fallback)"
+msgstr "%dx (ripiego sicuro)"
+
+msgid "Waiting"
+msgstr "In attesa"
+
+msgid "for an active DLSS-G wrapper"
+msgstr "di un wrapper DLSS-G attivo"
+
+msgid "NVIDIA lists ordinary Frame Generation only. The mod keeps its override limit at 2x."
+msgstr "L'elenco NVIDIA prevede solo la Frame Generation normale. La mod mantiene il limite di override a 2x."
+
+msgid "The listed %ux ceiling requires a compatible runtime. The current limit is %dx."
+msgstr "Il tetto di %ux indicato nell'elenco richiede un runtime compatibile. Il limite attuale è %dx."
+
+msgid ""
+"The highest mode the current DLSS-G runtime supports, and the ceiling\n"
+"NVIDIA's override list gives this game."
+msgstr ""
+"La modalità più alta supportata dal runtime DLSS-G attuale e il tetto\n"
+"che l'elenco di override di NVIDIA assegna a questo gioco."
+
+msgid "%.1f real, %.1f DLSS"
+msgstr "%.1f reali, %.1f DLSS"
+
+msgid "%.1f real, DLSS unavailable"
+msgstr "%.1f reali, DLSS non disponibile"
+
+msgid "Measuring..."
+msgstr "Misurazione..."
+
+msgid "DLSS FG off"
+msgstr "FG DLSS disattivata"
+
+msgid "waiting for an accepted Dynamic request"
+msgstr "in attesa che la modalità Dinamica venga accettata"
+
+msgid "applied: display refresh rate"
+msgstr "applicato: frequenza dello schermo"
+
+msgid "applied: %.2f FPS"
+msgstr "applicato: %.2f FPS"
+
+msgid "Restart with the matching single-module build. The current status protocol is older than this UI expects."
+msgstr "Riavvia il gioco con la build a modulo singolo corrispondente. Il protocollo di stato attuale è più vecchio di quello previsto da questa interfaccia."
+
+msgid "Frame generation stays under the game's control. This wrapper has no verified MFG override support."
+msgstr "La Frame Generation resta sotto il controllo del gioco. Questo wrapper non ha un supporto verificato per l'override MFG."
+
+msgid "DLSS-G activity observed; waiting for the game's FG control calls."
+msgstr "Attività DLSS-G rilevata; in attesa delle chiamate di controllo FG del gioco."
+
+msgid "Waiting for the game to request frame generation."
+msgstr "In attesa che il gioco richieda la Frame Generation."
+
+msgid "Waiting for an active DLSS-G pipeline."
+msgstr "In attesa di una pipeline DLSS-G attiva."
+
+msgid "Toggle frame generation off then on, or restart the game, to recreate the pipeline with this selection."
+msgstr "Disattiva e riattiva la Frame Generation, oppure riavvia il gioco, per ricreare la pipeline con questa selezione."
+
+msgid "Diagnostics"
+msgstr "Diagnostica"
+
+msgid "Status is temporarily unavailable; controls are paused."
+msgstr "Lo stato è temporaneamente non disponibile; i controlli sono in pausa."
+
+msgid "FPS status unavailable"
+msgstr "Stato FPS non disponibile"
+
+msgid "Real -- | DLSS --"
+msgstr "Reali -- | DLSS --"
+
+msgid "Real %.0f | DLSS %.0f"
+msgstr "Reali %.0f | DLSS %.0f"
+
+msgid "Real %.0f | DLSS --"
+msgstr "Reali %.0f | DLSS --"
+
+msgid "Dynamic (unavailable)"
+msgstr "Dinamica (non disponibile)"
+
+msgid "Dynamic (checking...)"
+msgstr "Dinamica (verifica...)"

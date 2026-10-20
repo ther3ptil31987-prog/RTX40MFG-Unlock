@@ -1,4 +1,6 @@
 #include "ampere_gpu.h"
+#include "provider_image.h"
+#include "sha256_util.h"
 #include "dlssg_provider_policy.h"
 #include "protected_pointer.h"
 #include "ampere_native_cache.h"
@@ -6,6 +8,9 @@
 #include "ampere_diagnostics.h"
 #include "adapter_discovery.h"
 #include "ampere_mask_transform.h"
+#include "vulkan_physical_device.h"
+#include "turing_ptx.h"
+#include "third_party/minhook/src/hde/hde64.h"
 
 #include <bcrypt.h>
 #include <d3d12.h>
@@ -32,6 +37,15 @@ namespace ampere_gpu
 {
 namespace
 {
+using provider_image::SameName;
+using provider_image::SafeCopy;
+using provider_image::SafeRead;
+using provider_image::ReadU16;
+using provider_image::ReadU32;
+using provider_image::ReadU64;
+using provider_image::ImageSize;
+using provider_image::FindUniqueBytes;
+using provider_image::PackLuid;
 constexpr size_t kKernelCount = 25;
 constexpr size_t kMaximumKernelCount = ampere_native_cache::kMaximumSlots;
 constexpr size_t kDescriptorBytes = 48;
@@ -165,13 +179,6 @@ constexpr bool OutputPullMaskSlot(const TemporalProviderProfile& profile, size_t
     return profile.outputPullSlot ? slot == profile.outputPullSlot : slot == 14 && profile.temporalSlot == 9;
 }
 
-constexpr bool SameName(const char* a, const char* b) noexcept
-{
-    if (!a || !b) return false;
-    for (; *a || *b; ++a, ++b)
-        if (*a != *b) return false;
-    return true;
-}
 static_assert([] {
     if (!SameName(k310916KernelNames[0], k3109KernelNames[0])
         || !SameName(k310916KernelNames[1], "BlendCandidatesFGLite")) return false;
@@ -258,7 +265,10 @@ struct PublishResult
 };
 
 std::atomic<LogCallback> gLogCallback{nullptr};
+std::atomic<uint32_t> gTargetSm{86};
 std::atomic<bool> gAdapterVerified{false};
+struct TuringNetworkProgram;
+bool TuringNetworkCurrent(const TuringNetworkProgram&, bool) noexcept;
 std::atomic<bool> gReady{false};
 std::atomic<uint32_t> gKernelImage{0};
 std::atomic<uint32_t> gNativeCacheStatus{0};
@@ -271,6 +281,10 @@ std::mutex gMutex;
 HMODULE gProvider = nullptr;
 HMODULE gPinnedProvider = nullptr;
 uint64_t gPublishedAdapterLuid = 0;
+// Last adapter verification written to the log, and identical ones since.
+uint64_t gLoggedVerificationLuid = 0;
+uint32_t gLoggedVerification = 0;
+uint64_t gUnloggedVerifications = 0;
 uintptr_t gDescriptorTable = 0;
 std::array<uintptr_t, kMaximumKernelCount> gOriginalDescriptors{};
 std::array<uintptr_t, kMaximumKernelCount> gReplacementDescriptors{};
@@ -288,6 +302,7 @@ struct PublishedProgram
     std::array<std::array<uint8_t, kDescriptorBytes>, kMaximumKernelCount> descriptors{};
     size_t slotCount = kKernelCount;
     std::shared_ptr<FontProgram> font;
+    std::shared_ptr<TuringNetworkProgram> network;
 };
 // Discovery may see a local provider and several OTA candidates before NGX
 // chooses one. Each owns a separate immutable program. The first real nested
@@ -310,99 +325,17 @@ void Log(const wchar_t* format, ...) noexcept
     callback(message);
 }
 
-bool SafeCopy(void* destination, const void* source, size_t bytes) noexcept
-{
-    if (!destination || !source || bytes == 0)
-        return false;
-    __try
-    {
-        std::memcpy(destination, source, bytes);
-        return true;
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER)
-    {
-        return false;
-    }
-}
 
-template <typename T>
-bool SafeRead(uintptr_t address, T& value) noexcept
-{
-    return SafeCopy(&value, reinterpret_cast<const void*>(address),
-        sizeof(value));
-}
 
-uint16_t ReadU16(const uint8_t* bytes) noexcept
-{
-    uint16_t value = 0;
-    std::memcpy(&value, bytes, sizeof(value));
-    return value;
-}
 
-uint32_t ReadU32(const uint8_t* bytes) noexcept
-{
-    uint32_t value = 0;
-    std::memcpy(&value, bytes, sizeof(value));
-    return value;
-}
 
-uint64_t ReadU64(const uint8_t* bytes) noexcept
-{
-    uint64_t value = 0;
-    std::memcpy(&value, bytes, sizeof(value));
-    return value;
-}
 
 bool Sha256Equals(const uint8_t* bytes, size_t count,
     const char* expected) noexcept
 {
-    if (!bytes || count == 0 || count > ULONG_MAX || !expected
-        || std::strlen(expected) != 64)
-        return false;
-
-    BCRYPT_ALG_HANDLE algorithm = nullptr;
-    std::array<uint8_t, 32> digest{};
-    NTSTATUS status = BCryptOpenAlgorithmProvider(&algorithm,
-        BCRYPT_SHA256_ALGORITHM, nullptr, 0);
-    if (status >= 0)
-    {
-        status = BCryptHash(algorithm, nullptr, 0,
-            const_cast<PUCHAR>(bytes), static_cast<ULONG>(count),
-            digest.data(), static_cast<ULONG>(digest.size()));
-    }
-    if (algorithm)
-        BCryptCloseAlgorithmProvider(algorithm, 0);
-    if (status < 0)
-        return false;
-
-    static constexpr char kDigits[] = "0123456789ABCDEF";
-    for (size_t index = 0; index < digest.size(); ++index)
-    {
-        if (expected[index * 2] != kDigits[digest[index] >> 4]
-            || expected[index * 2 + 1] != kDigits[digest[index] & 0x0F])
-            return false;
-    }
-    return true;
+    return sha256_util::EqualsUpperHex(bytes, count, expected, ULONG_MAX);
 }
 
-bool ImageSize(HMODULE module, uint32_t& imageSize) noexcept
-{
-    imageSize = 0;
-    const uintptr_t base = reinterpret_cast<uintptr_t>(module);
-    IMAGE_DOS_HEADER dos{};
-    if (!base || !SafeRead(base, dos) || dos.e_magic != IMAGE_DOS_SIGNATURE
-        || dos.e_lfanew <= 0
-        || static_cast<uintptr_t>(dos.e_lfanew) > UINTPTR_MAX - base)
-        return false;
-    IMAGE_NT_HEADERS64 nt{};
-    if (!SafeRead(base + static_cast<uintptr_t>(dos.e_lfanew), nt)
-        || nt.Signature != IMAGE_NT_SIGNATURE
-        || nt.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC
-        || nt.OptionalHeader.SizeOfImage < sizeof(nt))
-        return false;
-    imageSize = nt.OptionalHeader.SizeOfImage;
-    return true;
-}
 
 bool IsReadOnlyImageAddress(HMODULE module, uintptr_t address) noexcept
 {
@@ -464,7 +397,8 @@ PublishedProgram* FindPublishedProgram(HMODULE module) noexcept
 
 bool ProgramCurrent(const PublishedProgram& program, uint64_t luid) noexcept
 {
-    if (!luid || program.luid != luid || !program.boundary.Proven()
+    if ((program.network && !TuringNetworkCurrent(*program.network, true))
+        || !luid || program.luid != luid || !program.boundary.Proven()
         || !program.font || program.font->module != program.module || !FontCurrent(*program.font, true)
         || program.slotCount < kKernelCount || program.slotCount > kMaximumKernelCount) return false;
     for (size_t i = 0; i < program.slotCount; ++i)
@@ -913,22 +847,6 @@ bool DecompressNvidiaLz(const uint8_t* input, size_t inputSize,
     return inputOffset == inputSize && outputOffset == outputSize;
 }
 
-size_t FindUniqueBytes(const uint8_t* bytes, size_t count,
-    const char* marker, size_t markerBytes) noexcept
-{
-    if (!bytes || !marker || markerBytes == 0 || markerBytes > count)
-        return SIZE_MAX;
-    size_t match = SIZE_MAX;
-    for (size_t offset = 0; offset + markerBytes <= count; ++offset)
-    {
-        if (std::memcmp(bytes + offset, marker, markerBytes) != 0)
-            continue;
-        if (match != SIZE_MAX)
-            return SIZE_MAX;
-        match = offset;
-    }
-    return match;
-}
 
 struct Sm89PtxMetadata
 {
@@ -1180,6 +1098,16 @@ bool BuildAmpereSm86Fatbin(uintptr_t sourceFatbin, uint64_t sourceTotalSize,
     }
     std::memcpy(destinationPtx + targetOffset, kSm86PtxTarget,
         sizeof(kSm86PtxTarget) - 1);
+    if (gTargetSm.load(std::memory_order_acquire) == 75)
+    {
+        std::string lowered(reinterpret_cast<const char*>(destinationPtx), rawBytes);
+        if (!turing_ptx::Lower(lowered) || lowered.size() > outputCapacity - metadata.outerHeaderSize - metadata.imageHeaderSize) return false;
+        rawBytes = lowered.size();
+        paddedRawBytes = (rawBytes + 7u) & ~size_t{7};
+        finalSize = metadata.outerHeaderSize + metadata.imageHeaderSize + paddedRawBytes;
+        if (finalSize > outputCapacity || finalSize > UINT32_MAX) return false;
+        memcpy(destinationPtx, lowered.data(), rawBytes);
+    }
     std::memset(destinationPtx + rawBytes, 0,
         paddedRawBytes - rawBytes);
 
@@ -1188,7 +1116,7 @@ bool BuildAmpereSm86Fatbin(uintptr_t sourceFatbin, uint64_t sourceTotalSize,
     const uint32_t actualPayloadBytes =
         (metadata.flags & 0x2000u) != 0
             ? 0u : static_cast<uint32_t>(rawBytes);
-    const uint32_t sm86 = 86;
+    const uint32_t sm86 = gTargetSm.load(std::memory_order_acquire);
     const uint64_t uncompressedFlags = metadata.flags & ~uint64_t{0x2000};
     const uint64_t zero64 = 0;
     std::memcpy(destinationEntry + 8, &paddedRawBytes64,
@@ -1240,6 +1168,8 @@ PublishResult PublishPointer(uintptr_t address, uintptr_t expected,
         result.replacementWasPublished};
 }
 
+#include "turing_network_program.inl"
+
 struct ProgramPublicationResult
 {
     bool success = false;
@@ -1277,7 +1207,8 @@ ProgramPublicationResult PublishProgram(PublishedProgram& program,
     size_t attempted = 0;
     result.attempted = true;
     result.failedSlot = SIZE_MAX;
-    const bool fontPublished = WriteFont(*program.font, true, protect);
+    const bool networkPublished = WriteTuringNetwork(program.network, true, protect);
+    const bool fontPublished = networkPublished && WriteFont(*program.font, true, protect);
     for (size_t i = 0; fontPublished && program.boundary.Current(program.module) && i < program.slotCount; ++i)
     {
         result.attempted = true;
@@ -1298,7 +1229,8 @@ ProgramPublicationResult PublishProgram(PublishedProgram& program,
             { result.success = false; result.failedSlot = slot; break; }
         }
         if (result.success && (!program.boundary.Current(program.module)
-            || !FontCurrent(*program.font, true))) result.success = false;
+            || !FontCurrent(*program.font, true)
+            || (program.network && !TuringNetworkCurrent(*program.network, true)))) result.success = false;
     }
     if (result.success) { result.failedSlot = SIZE_MAX; return result; }
     // Storage is retained after any attempt. CAS rollback preserves a foreign
@@ -1318,7 +1250,7 @@ ProgramPublicationResult PublishProgram(PublishedProgram& program,
     // foreign content and restore each page's original access semantics.
     for (size_t i = 0; i < program.font->pageCount; ++i)
         RestoreFontPage(*program.font, i, protect);
-    result.rollbackComplete = FontCurrent(*program.font, false);
+    result.rollbackComplete = WriteTuringNetwork(program.network, false, protect) && FontCurrent(*program.font, false);
     for (size_t i = 0; i < attempted; ++i)
     {
         const uintptr_t address = program.table + i * sizeof(uintptr_t);
@@ -1330,11 +1262,6 @@ ProgramPublicationResult PublishProgram(PublishedProgram& program,
     return result;
 }
 
-uint64_t PackLuid(const LUID& luid) noexcept
-{
-    return static_cast<uint64_t>(luid.LowPart)
-        | (static_cast<uint64_t>(static_cast<uint32_t>(luid.HighPart)) << 32);
-}
 
 void SetFailure(Failure failure) noexcept;
 bool VerifyAmpereAdapter(const LUID&, int&, int&) noexcept;
@@ -1352,6 +1279,8 @@ bool ObserveAdapterLuid(const LUID& luid, const wchar_t* api) noexcept
     int minor = 0;
     const bool verified = VerifyAmpereAdapter(luid, major, minor);
     const uint64_t packedLuid = PackLuid(luid);
+    bool report = false;
+    uint64_t repeats = 0;
     {
         std::lock_guard lock(gMutex);
         if (gProvider && gPublishedAdapterLuid != packedLuid)
@@ -1362,6 +1291,7 @@ bool ObserveAdapterLuid(const LUID& luid, const wchar_t* api) noexcept
             Log(L"Ampere SM86 provider requires restart after an adapter change");
             return false;
         }
+        if (verified) gTargetSm.store(static_cast<uint32_t>(major * 10 + minor), std::memory_order_release);
         gAdapterLuid.store(packedLuid, std::memory_order_release);
         gAdapterVerified.store(verified, std::memory_order_release);
         if (!verified)
@@ -1371,10 +1301,25 @@ bool ObserveAdapterLuid(const LUID& luid, const wchar_t* api) noexcept
                     ? Failure::eAdapterUnavailable : Failure::eAdapterNotAmpere);
         }
         else if (!gProvider) SetFailure(Failure::eNone);
+        // Each device observation re-verifies the adapter (thousands per
+        // session). Log only a result that differs from the last one logged.
+        const uint32_t result = 0x80000000u | (static_cast<uint32_t>(major & 0xFF) << 16)
+            | (static_cast<uint32_t>(minor & 0xFF) << 8) | (verified ? 1u : 0u);
+        report = gLoggedVerificationLuid != packedLuid || gLoggedVerification != result;
+        if (report)
+        {
+            repeats = gUnloggedVerifications;
+            gUnloggedVerifications = 0;
+            gLoggedVerificationLuid = packedLuid;
+            gLoggedVerification = result;
+        }
+        else ++gUnloggedVerifications;
     }
-    Log(L"Ampere %s adapter verification: luid=0x%016llX "
-        L"capability=%d.%d verified=%d", api ? api : L"unknown",
-        static_cast<unsigned long long>(packedLuid), major, minor, verified);
+    if (report)
+        Log(L"Ampere %s adapter verification: luid=0x%016llX "
+            L"capability=%d.%d verified=%d unloggedRepeats=%llu", api ? api : L"unknown",
+            static_cast<unsigned long long>(packedLuid), major, minor, verified,
+            static_cast<unsigned long long>(repeats));
     return verified;
 }
 
@@ -1431,7 +1376,8 @@ bool VerifyAmpereAdapter(const LUID& activeLuid, int& major, int& minor) noexcep
     }
     FreeLibrary(cuda);
     return complete && ampere_policy::AdapterMatches(PackLuid(activeLuid),
-        PackLuid(activeLuid), matches, major, minor, matchedNodeMask);
+        PackLuid(activeLuid), matches, major, minor, matchedNodeMask)
+        && (major != 7 || adapter_discovery::IsAmpere(activeLuid, 0x160));
 }
 
 void SetFailure(Failure failure) noexcept
@@ -1474,7 +1420,24 @@ bool ObserveAdapter(void* adapter) noexcept
     if (!adapter) return false;
     DXGI_ADAPTER_DESC desc{};
     if (FAILED(static_cast<IDXGIAdapter*>(adapter)->GetDesc(&desc))) return false;
-    return desc.VendorId == 0x10de && adapter_discovery::IsAmpere(desc.AdapterLuid);
+    return desc.VendorId == 0x10de && (adapter_discovery::IsAmpere(desc.AdapterLuid) || adapter_discovery::IsAmpere(desc.AdapterLuid, 0x160));
+}
+
+bool ObserveVulkanPhysicalDevice(void* physicalDevice) noexcept
+{
+    LUID luid{};
+    if (!vulkan_physical_device::QueryLuid(physicalDevice, luid))
+    {
+        RejectAdapterUnavailable();
+        return false;
+    }
+    return ObserveAdapterLuid(luid, L"Vulkan");
+}
+
+bool ObserveVulkanAdapter(void* physicalDevice) noexcept
+{
+    LUID luid{};
+    return vulkan_physical_device::QueryLuid(physicalDevice, luid) && (adapter_discovery::IsAmpere(luid) || adapter_discovery::IsAmpere(luid, 0x160));
 }
 
 bool PatchProvider(HMODULE module, const wchar_t* path, const PreparationBoundary& boundary) noexcept
@@ -1541,6 +1504,7 @@ bool PatchProvider(HMODULE module, const wchar_t* path, const PreparationBoundar
     candidate.module = module; candidate.pinned = pinned;
     candidate.luid = luid; candidate.table = table; candidate.boundary = boundary;
     candidate.slotCount = slotCount;
+    const bool turing = gTargetSm.load(std::memory_order_acquire) == 75;
     ampere_native_cache::CompleteProgram ptxProgram, nativeProgram;
     std::vector<uint8_t> fontPtx, fontNative;
     std::vector<ampere_cuda_program::Entry> entries;
@@ -1581,7 +1545,9 @@ bool PatchProvider(HMODULE module, const wchar_t* path, const PreparationBoundar
             { discard(); return fail(Failure::eSourceIdentity); }
             const auto* temporal = i == profile->temporalSlot ? profile : nullptr;
             const size_t capacity = meta.outerHeaderSize + meta.imageHeaderSize
-                + ((meta.rawPtxBytes + 7) & ~size_t{7}) + (temporal ? kTemporalGrowthAllowance : 0);
+                + ((meta.rawPtxBytes + 7) & ~size_t{7}) + (temporal ? kTemporalGrowthAllowance : 0)
+                + (turing ? meta.rawPtxBytes * 15 + 4096 : 0);
+            if (capacity > kMaximumFatbinBytes) return fail(Failure::eAllocation);
             ptxProgram[i].resize(capacity);
             std::vector<uint8_t> scratch(meta.compressedSize);
             uint32_t outputSize = 0;
@@ -1593,8 +1559,13 @@ bool PatchProvider(HMODULE module, const wchar_t* path, const PreparationBoundar
             { discard(); return fail(Failure::eDecompression); }
             ptxProgram[i].resize(outputSize);
         }
+        if (turing)
+        {
+            candidate.network = PrepareTuringNetwork(module);
+            if (!candidate.network) { Log(L"Turing network discovery/translation rejected; no partial program admitted"); return fail(Failure::eProviderLayout); }
+        }
         gPreparation.store(Preparation::eNativeCache);
-        const auto mode = ampere_native_cache::ConfiguredMode();
+        const auto mode = turing ? ampere_native_cache::Mode::ePtx : ampere_native_cache::ConfiguredMode();
         if (mode != ampere_native_cache::Mode::ePtx)
         {
             const auto result = ampere_native_cache::LoadConfiguredProgram(ptxProgram, nativeProgram);
@@ -1605,7 +1576,10 @@ bool PatchProvider(HMODULE module, const wchar_t* path, const PreparationBoundar
         }
         gPreparation.store(Preparation::eCudaValidation);
         auto validated = ampere_cuda_program::Validate(useNative ? nativeProgram : ptxProgram, entries, luid,
-            {useNative ? &fontNative : &fontPtx});
+            {useNative ? &fontNative : &fontPtx,
+                candidate.network ? ampere_native_cache::ProgramView(candidate.network->payloads) : ampere_native_cache::ProgramView{},
+                candidate.network ? ampere_cuda_program::EntryView(candidate.network->names) : ampere_cuda_program::EntryView{},
+                turing ? 75u : 86u});
         if (!validated.Ready())
         {
             Log(L"Ampere CUDA program validation: image=%s stage=%u slot=%u result=%d contextRestored=%u provider=%s",
@@ -1658,6 +1632,13 @@ bool PatchProvider(HMODULE module, const wchar_t* path, const PreparationBoundar
         }
     }
     catch (...) { discard(); return fail(Failure::eAllocation); }
+    if (candidate.network)
+    {
+        auto& net = *candidate.network;
+        net.passthrough[net.passthroughCount++] = {candidate.font->address, static_cast<uint32_t>(kFontBytes)};
+        for (size_t i = 0; i < slotCount; ++i)
+            net.passthrough[net.passthroughCount++] = {clones[i] + kDescriptorBytes, static_cast<uint32_t>(ptxProgram[i].size())};
+    }
     gPreparation.store(Preparation::ePublication);
     candidate.originals = originals; candidate.replacements = clones;
     candidate.kernelImage = useNative ? 2u : 1u;
@@ -1672,16 +1653,17 @@ bool PatchProvider(HMODULE module, const wchar_t* path, const PreparationBoundar
             static_cast<unsigned>(result.rollbackComplete));
         return fail(Failure::ePublication);
     }
+    if (candidate.network) Log(L"Turing network program published: %zu SM75 PTX images; D3D12/Vulkan CreateKernel and both network loaders current", candidate.network->images.size());
     auto& program = gPrograms[gProgramCount++];
     program = std::move(candidate);
     if (!gProvider) SelectProgram(program);
     gPreparation.store(Preparation::eReady);
     SetFailure(Failure::eNone);
-    Log(L"Ampere auxiliary font published: SM86 %s bytes=%zu sourceBytes=%zu RVA=0x%zX; shared CUDA preflight and publication transaction",
-        useNative ? L"native" : L"PTX", useNative ? fontNative.size() : fontPtx.size(), kFontBytes,
+    Log(L"Translated auxiliary font published: SM%u %s bytes=%zu sourceBytes=%zu RVA=0x%zX; shared CUDA preflight and publication transaction",
+        turing ? 75u : 86u, useNative ? L"native" : L"PTX", useNative ? fontNative.size() : fontPtx.size(), kFontBytes,
         program.font->address - reinterpret_cast<uintptr_t>(module));
-    Log(L"Ampere SM86 program published: %zu %s slots, variable temporal positions; cache=%u; table RVA=0x%zX; registration RVA=0x%zX",
-        slotCount, useNative ? L"native" : L"PTX", gNativeCacheStatus.load(), table - reinterpret_cast<uintptr_t>(module),
+    Log(L"Translated SM%u program published: %zu %s slots, variable temporal positions; cache=%u; table RVA=0x%zX; registration RVA=0x%zX",
+        turing ? 75u : 86u, slotCount, useNative ? L"native" : L"PTX", gNativeCacheStatus.load(), table - reinterpret_cast<uintptr_t>(module),
         discovery.registration - reinterpret_cast<uintptr_t>(module));
     return true;
 }
@@ -1718,6 +1700,8 @@ bool BindProvider(HMODULE module) noexcept
             module, static_cast<unsigned long long>(program->table), program->kernelImage, program->cacheStatus);
     return true;
 }
+bool IsTuring() noexcept { return gAdapterVerified.load(std::memory_order_acquire) && gTargetSm.load(std::memory_order_acquire) == 75; }
+
 bool AdapterVerified() noexcept { return gAdapterVerified.load(std::memory_order_acquire); }
 bool Ready() noexcept { return gReady.load(std::memory_order_acquire); }
 uint32_t FailureCode() noexcept { return gFailure.load(std::memory_order_acquire); }

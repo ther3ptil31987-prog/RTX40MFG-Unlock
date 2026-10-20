@@ -1,4 +1,5 @@
 #include "ampere_native_cache.h"
+#include "sha256_util.h"
 #include <Windows.h>
 #include <bcrypt.h>
 #include <algorithm>
@@ -58,7 +59,7 @@ struct NativeProgram
 {
     std::span<const Entry> entries;
     std::span<const NativeContract> contracts;
-    uint32_t firstResource;
+    uint32_t firstResource; // Layout of the pinned manifests; embedded kernels are found by SHA-256.
 };
 #if MFG_AMPERE_NATIVE_CACHE_ADDITIONAL
 #include "ampere_native_manifest_additional.inc"
@@ -101,20 +102,7 @@ bool SingleImage(const std::vector<uint8_t>& bytes, uint16_t kind,
 }
 bool MatchesHash(const uint8_t* data, size_t bytes, const char* expected) noexcept
 {
-    if (!data || bytes == 0 || bytes > kMaximumBytes || !expected || std::strlen(expected) != 64) return false;
-    BCRYPT_ALG_HANDLE algorithm = nullptr;
-    BCRYPT_HASH_HANDLE hash = nullptr;
-    std::array<uint8_t, 32> actual{};
-    bool okay = BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0) >= 0
-        && BCryptCreateHash(algorithm, &hash, nullptr, 0, nullptr, 0, 0) >= 0
-        && BCryptHashData(hash, const_cast<PUCHAR>(data), static_cast<ULONG>(bytes), 0) >= 0
-        && BCryptFinishHash(hash, actual.data(), static_cast<ULONG>(actual.size()), 0) >= 0;
-    if (hash) BCryptDestroyHash(hash);
-    if (algorithm) BCryptCloseAlgorithmProvider(algorithm, 0);
-    constexpr char digits[] = "0123456789ABCDEF";
-    for (size_t i = 0; okay && i < actual.size(); ++i)
-        okay = expected[i * 2] == digits[actual[i] >> 4] && expected[i * 2 + 1] == digits[actual[i] & 15];
-    return okay;
+    return sha256_util::EqualsUpperHex(data, bytes, expected, kMaximumBytes);
 }
 #include "ampere_native_elf.inl"
 struct File
@@ -260,11 +248,26 @@ Status LoadProgram(ProgramView validatedPtx, const std::wstring& directory, Comp
     }, output);
 }
 
+#if MFG_AMPERE_EMBEDDED_KERNELS
+struct KernelResource
+{
+    const char* fatbinSha256;
+    uint32_t id;
+};
+#include "ampere_kernel_resources.inc"
+#endif
+
 Status LoadEmbeddedProgram(ProgramView validatedPtx, void* module, CompleteProgram& output) noexcept
 {
-    return LoadProgramUsing(validatedPtx, [&](size_t resourceId, const Entry& entry, std::vector<uint8_t>& slot)
+    return LoadProgramUsing(validatedPtx, [&](size_t, const Entry& entry, std::vector<uint8_t>& slot)
     {
+#if MFG_AMPERE_EMBEDDED_KERNELS
         if (!module) return false;
+        // Each distinct kernel is embedded once; programs sharing it share the resource.
+        uint32_t resourceId = 0;
+        for (const auto& kernel : kKernelResources)
+            if (std::strcmp(kernel.fatbinSha256, entry.fatbinSha256) == 0) { resourceId = kernel.id; break; }
+        if (!resourceId) return false;
         const auto owner = static_cast<HMODULE>(module);
         const HRSRC resource = FindResourceW(owner, MAKEINTRESOURCEW(resourceId), RT_RCDATA);
         if (!resource || SizeofResource(owner, resource) != entry.fatbinBytes) return false;
@@ -273,6 +276,10 @@ Status LoadEmbeddedProgram(ProgramView validatedPtx, void* module, CompleteProgr
         if (!bytes) return false;
         slot.assign(bytes, bytes + entry.fatbinBytes);
         return true;
+#else
+        (void)module; (void)entry; (void)slot;
+        return false;
+#endif
     }, output);
 }
 

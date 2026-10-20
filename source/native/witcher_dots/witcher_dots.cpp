@@ -6,6 +6,7 @@
 #include "../protected_pointer.h"
 #include "../overlay_native.h"
 #include "../single_module.h"
+#include "../diagnostic_paths.h"
 #include <MinHook.h>
 #include <dxgi1_4.h>
 #include <intrin.h>
@@ -675,9 +676,9 @@ void ObserveDevice(IUnknown* object,const void* caller) noexcept {
             if(outer.Get()!=state.identity.Get())single_module::Log(L"WITCHER_DOTS device reached through a wrapper; native device resolved");
         }
         if(state.dredEnabled) {
-            wchar_t temp[MAX_PATH]{};const DWORD length=GetTempPathW(MAX_PATH,temp);
+            const auto& directory=diagnostic_paths::LogDirectory();
             std::wstring path;
-            if(length&&length<MAX_PATH)path=std::wstring(temp)+L"RTXMFG-witcher3-device-removed-"+std::to_wstring(GetCurrentProcessId())+L".txt";
+            if(!directory.empty())path=(std::filesystem::path(directory)/(L"RTXMFG-witcher3-device-removed-"+std::to_wstring(GetCurrentProcessId())+L".txt")).wstring();
             const bool armed=ArmRemovalReport(state.device.Get(),path);
             {std::lock_guard lock(state.lock);state.snapshot.crashReportArmed=armed;}
             wchar_t line[600]{};

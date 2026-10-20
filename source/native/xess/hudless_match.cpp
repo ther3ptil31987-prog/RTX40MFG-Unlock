@@ -418,7 +418,7 @@ bool Matcher::OnHudless(uint32_t frame, const xefg_swapchain_d3d12_resource_data
 }
 
 bool Matcher::Submit(ID3D12Resource* backBuffer, uint32_t& frame, xefg_swapchain_d3d12_resource_data_t& tag,
-    const Capture& capture, const char*& reason) noexcept
+    const char*& reason) noexcept
 {
     reason = nullptr;
     if (!pending_) { reason = "nothing_pending"; return false; }
@@ -500,7 +500,6 @@ bool Matcher::Submit(ID3D12Resource* backBuffer, uint32_t& frame, xefg_swapchain
         tag.resourceBase = base_; tag.resourceSize = size_;
         tag.pResource = slot.output.Get();
         tag.incomingState = kOutputState;
-        if (capture) capture(list, frame, tag);
         if (FAILED(list->Close())) { broken_ = true; reason = "list_close"; return false; }
         ID3D12CommandList* lists[] = {list};
         queue_->ExecuteCommandLists(1, lists);

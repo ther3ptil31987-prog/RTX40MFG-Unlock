@@ -1,4 +1,5 @@
 #include "caller_scoped_import.h"
+#include "process_mitigations.h"
 #include "single_module.h"
 #include "protected_pointer.h"
 #include <MinHook.h>
@@ -106,14 +107,6 @@ bool DeclaredDataImport(HMODULE image, void** slot, const char* name, size_t siz
         }
     }
     return false;
-}
-bool MitigationsSupported() noexcept {
-    PROCESS_MITIGATION_CONTROL_FLOW_GUARD_POLICY cfg{};
-    PROCESS_MITIGATION_USER_SHADOW_STACK_POLICY cet{};
-    return GetProcessMitigationPolicy(GetCurrentProcess(),ProcessControlFlowGuardPolicy,&cfg,sizeof(cfg))
-        && GetProcessMitigationPolicy(GetCurrentProcess(),ProcessUserShadowStackPolicy,&cet,sizeof(cet))
-        && !cfg.StrictMode && !cfg.EnableXfg && !cet.EnableUserShadowStackStrictMode
-        && !cet.BlockNonCetBinaries && !cet.BlockNonCetBinariesNonEhcont;
 }
 bool PublicTarget(void* target, const char* name, HMODULE& owner) noexcept {
     const wchar_t* leaf=OwnerName(name);
@@ -255,7 +248,7 @@ bool Prepare(HMODULE importer, void** slot, void* expected, void* replacement, c
         single_module::Log(line);return false;
     };
     if (!replacement || replacement==expected || !Eligible(importer,slot,expected,name)) return fail(L"eligibility");
-    if (!MitigationsSupported()) return fail(L"mitigation");
+    if (!HookMitigationsSupported()) return fail(L"mitigation");
     uintptr_t begin=0,end=0;
     if (!ImageRange(importer,begin,end)) return false;
     std::lock_guard lock(mutex);
@@ -291,7 +284,7 @@ bool PrepareInterposerEntry(void* expected, void* replacement, const char* name,
     };
     HMODULE owner=nullptr;
     if (!replacement || replacement==expected || !InterposerTarget(expected,name,owner)) return fail(L"eligibility");
-    if (!MitigationsSupported()) return fail(L"mitigation");
+    if (!HookMitigationsSupported()) return fail(L"mitigation");
     uintptr_t begin=0,end=0;
     if (!ImageRange(GetModuleHandleW(nullptr),begin,end)) return fail(L"caller-range");
     std::lock_guard lock(mutex);

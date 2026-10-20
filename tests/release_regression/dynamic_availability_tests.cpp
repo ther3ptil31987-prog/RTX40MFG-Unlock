@@ -47,6 +47,10 @@ int main()
     check(state,Availability::Unavailable,"Ampere retains its full-capacity Dynamic restriction");
     state.numFramesToGenerateMax=5; state.safeMaximumMultiplier=6;
     check(state,Availability::Supported,"Ampere supported full-capacity Dynamic is retained");
+    state.gpuFamily=4; state.numFramesToGenerateMax=3; state.safeMaximumMultiplier=4;
+    check(state,Availability::Unavailable,"Turing retains the translated backend's full-capacity Dynamic restriction");
+    state.numFramesToGenerateMax=5; state.safeMaximumMultiplier=6;
+    check(state,Availability::Supported,"Turing full-capacity Dynamic requires the same positive proof");
     const bool labels=std::strcmp(Label(Availability::Unavailable),"Dynamic (unavailable)")==0
         && std::strcmp(Label(Availability::Checking),"Dynamic (checking...)")==0
         && std::strcmp(Label(Availability::Supported),"Dynamic")==0;

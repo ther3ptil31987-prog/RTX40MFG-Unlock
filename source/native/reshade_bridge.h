@@ -5,6 +5,35 @@
 
 #include <cstdint>
 
+// One DLSS feature in the menu snapshot (V1.6.0): Super Resolution from the
+// dlssSr* status keys, Ray Reconstruction from dlssRr*. Presets: 0 game/driver,
+// SR 10..13 J..M, RR 4..6 D..F. Active/driver/hint values describe the game's
+// most recently evaluated feature; the live feature counts decide whether the
+// menu shows the SR or the RR controls.
+struct MfgUnlockDlssFeature
+{
+    uint32_t presetRequested = 0;
+    BOOL detected = FALSE;
+    BOOL running = FALSE;
+    uint32_t liveFeatures = 0;
+    uint32_t renderWidth = 0, renderHeight = 0, outputWidth = 0, outputHeight = 0;
+    int32_t quality = -1;
+    uint32_t gameHint = 0;
+    uint32_t activePreset = 0;
+    // dlss_sr::Unavailable for the selection on that feature (0 = live).
+    uint32_t liveSwitch = 0;
+    // The provider's one DRS preset read per session: seen, the driver's
+    // (NVIDIA app) value, answered "not set" for a selected preset, whether
+    // that value fixes the preset until a restart, and a cached driver value
+    // (which can coexist with a live selector hook).
+    BOOL drsObserved = FALSE;
+    BOOL driverPresetValid = FALSE;
+    uint32_t driverPreset = 0;
+    BOOL drsSuppressed = FALSE;
+    BOOL fixedByDriver = FALSE;
+    BOOL driverOverrideCached = FALSE;
+};
+
 struct MfgUnlockReShadeSnapshot
 {
     uint32_t structSize = sizeof(MfgUnlockReShadeSnapshot);
@@ -100,16 +129,6 @@ struct MfgUnlockReShadeSnapshot
     uint32_t wrapperCompiledMaximumGeneratedFrames = 0;
     uint32_t safeMaximumMultiplier = 2;
     BOOL requestedMultiplierLimited = FALSE;
-    BOOL selectiveOtaDlssgWrapperRequested = FALSE;
-    BOOL selectiveOtaDlssgWrapperCandidateReady = FALSE;
-    uint32_t selectiveOtaDlssgWrapperFailure = 0;
-    uint64_t selectiveOtaDlssgWrapperRedirectAttempts = 0;
-    uint64_t selectiveOtaDlssgWrapperRedirectSuccesses = 0;
-    uint64_t selectiveOtaDlssgWrapperFallbacks = 0;
-    uint32_t selectiveOtaDlssgWrapperVersionMajor = 0;
-    uint32_t selectiveOtaDlssgWrapperVersionMinor = 0;
-    uint32_t selectiveOtaDlssgWrapperVersionBuild = 0;
-    uint32_t selectiveOtaDlssgWrapperVersionPrivate = 0;
     BOOL nvidiaCompatibilityResolved = FALSE;
     int32_t nvidiaProfileStatus = -1;
     char nvidiaProfileName[128]{};
@@ -180,7 +199,7 @@ struct MfgUnlockReShadeSnapshot
     uint32_t ampereCandidateVersionBuild = 0;
     uint64_t ampereCreatedFeatures = 0;
     uint64_t ampereEvaluations = 0;
-    uint32_t gpuFamily = 0;
+    uint32_t gpuFamily = 0; // 0 unknown, 1 Ada, 2 Ampere, 3 conflict, 4 Turing RTX, 5 Blackwell RTX
     uint64_t gpuAdapterLuid = 0;
     uint32_t gpuSelectionFailure = 0;
 
@@ -219,55 +238,36 @@ struct MfgUnlockReShadeSnapshot
 
     BOOL ampereLegacySinglePreset = FALSE;
 
-    // Automatic HUDless detection (v1.4). Observation only.
-    BOOL hudlessDetectEnabled = FALSE;
-    char hudlessDetectSource[24]{};
-    char hudlessDetectVerdict[24]{};
-    char hudlessDetectRoute[24]{};
-    char hudlessDetectReason[64]{};
-    char hudlessDetectBestHypothesis[16]{};
-    uint32_t hudlessDetectProbes = 0;
-    uint32_t hudlessDetectConclusive = 0;
-    uint32_t hudlessDetectIdentityPermille = 0;
-    uint32_t hudlessDetectBestPermille = 0;
-    uint32_t hudlessDetectUiCoveragePermille = 0;
-    uint32_t hudlessDetectFormat = 0;
-    uint32_t hudlessDetectExtentWidth = 0;
-    uint32_t hudlessDetectExtentHeight = 0;
-    uint32_t hudlessDetectLifecycle = 0;
-    uint32_t hudlessDetectFinalFormat = 0;
-    uint32_t hudlessDetectFinalWidth = 0;
-    uint32_t hudlessDetectFinalHeight = 0;
-    uint32_t hudlessDetectCompositePermille = 0;
-    uint32_t hudlessDetectTranslucentTiles = 0;
-    uint32_t hudlessDetectInformativeTiles = 0;
-
-    // Automatic UI recomposition (v1.4 milestone 2).
-    char hudRecompositionState[24]{};
-    BOOL hudRecompositionVerified = FALSE;
-
-    // Frame pairing of HUDless tags with Presents (v1.4 milestone 2).
-    BOOL hudlessDetectPaired = FALSE;
-    uint32_t hudlessDetectStillPermille = 0;
-    uint64_t hudlessPresentMarkers = 0;
-    int32_t hudlessTagLead = 0;
-    int32_t hudlessMaxTagLead = 0;
-
-    // UI buffer used by recomposition, and HUDless that differs only in motion.
-    char hudRecompositionUi[16]{};
-    BOOL hudlessDetectDiffersInMotion = FALSE;
-    uint32_t hudlessDetectMotionDiffersProbes = 0;
+    // The game's own DLSS-G UI recomposition option (RTXMFG never changes it).
+    BOOL gameUiRecompositionEnabled = FALSE;
 
     // The provider implements Frame Generation Preset C (DLSS-G 310.9.16 and newer).
     BOOL dlssgPresetCAvailable = FALSE;
+
+    // Live preset switching (V1.6.0): dlssg_preset_switch::Unavailable, 0 when a
+    // saved preset replaces the running one. A backend without the field keeps
+    // restart-to-apply (2, provider).
+    uint32_t dlssgPresetLiveSwitch = 2;
+    BOOL dlssgPresetSwitching = FALSE;
+
+    // DLSS Super Resolution and Ray Reconstruction (V1.6.0).
+    MfgUnlockDlssFeature dlssSr{};
+    MfgUnlockDlssFeature dlssRr{};
+
+    // NGX graphics API of the FG pipeline, or of the device that selected the
+    // GPU before the first Create: 0 unknown, 1 D3D12, 2 Vulkan.
+    uint32_t graphicsApi = 0;
+
+    // V-Sync on Vulkan (vsync_control.h): the vsync* readback describes the
+    // game's live Vulkan swapchain, whose present mode (VkPresentModeKHR) is
+    // fixed at creation. vsyncVulkanHook: the creation wrapper is installed.
+    BOOL vsyncVulkanSwapchain = FALSE;
+    BOOL vsyncVulkanHook = FALSE;
+    uint32_t vsyncOriginalPresentMode = 0;
+    uint32_t vsyncSubmittedPresentMode = 0;
+
+    // Source of dlssFpsMilli: 0 unavailable, 1 present callback, 2 DXGI
+    // present count, 4 DLSS-G's own presented-frame count.
+    uint32_t fpsOutputSource = 0;
 };
 
-#if defined(MFG_UNLOCK_RESHADE_ADDON) || defined(MFG_UNLOCK_BACKEND_BRIDGE)
-extern "C" __declspec(dllexport) BOOL WINAPI
-MfgUnlockReShadeGetSnapshot(MfgUnlockReShadeSnapshot* snapshot);
-
-extern "C" __declspec(dllexport) BOOL WINAPI
-MfgUnlockReShadeApplyControl(uint32_t multiplier, BOOL dynamicMode,
-    uint32_t dynamicTargetFrameRate, BOOL dynamicExperimental56,
-    BOOL generatedOnlyDebug);
-#endif

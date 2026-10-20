@@ -1,8 +1,6 @@
-// Real D3D12 WARP swapchain/presentation harness for the bounded overlay
-// redesign. Modes:
-//   present - full presentation suite with drawing disabled (build A)
-//   menu    - same base plus actual menu rendering, input, resize, teardown
-//             (build B)
+// Real D3D12 WARP swapchain/presentation harness for the bounded overlay:
+// presentation, menu rendering, input, resize and teardown. run.py lists the
+// modes the release regression runs.
 #include "common.h"
 #include "existing_overlay.h"
 #include "unaligned_import_fixture.h"
@@ -814,17 +812,6 @@ int RunPresentation(const wchar_t* dll, bool menuMode, uint32_t expectedTargets,
         for (int i = 0; i < 4; ++i) RenderAndPresent(fixture, chain, base);
         Check(SUCCEEDED(fixture.device->GetDeviceRemovedReason()), "device healthy after menu");
     }
-    else if (expectedTargets == 10)
-    {
-        // Build A: drawing stays disabled; presenting must not render UI.
-        float base[4] = {0.30f, 0.30f, 0.35f, 1.0f};
-        for (int i = 0; i < 8; ++i) RenderAndPresent(fixture, chain, base);
-        MfgSingleModuleStatus status = Status(module);
-        Check(status.renderedFrames == 0, "forwarding build performs no UI rendering");
-        Check(status.overlayActivatedTargets > 0, "comparison retains application input setup");
-        Check(status.overlayVisible == 0, "overlay stays invisible in the forwarding build");
-        Check(status.renderFailures == 0, "no UI render failures in the forwarding build");
-    }
     else
     {
         // Menu-enabled candidate with the menu never opened: the renderer
@@ -1131,6 +1118,60 @@ std::optional<PanelLayout> ReadPanel(const std::filesystem::path& path)
 // Dying Light: The Beast reads the mouse through DirectInput. dinput8 runs an
 // exclusive mouse through a low-level hook that consumes every event, so the
 // game window receives no button messages and the menu could not be clicked.
+// Pinned FPS readout: with [Overlay] PinnedFps=1 saved, the closed menu keeps
+// a readout in the top-left corner composited after the 7-second
+// startup hint is gone. The hint sits below the readout, so a point inside it
+// is the control: drawn first, the plain clear colour after the hint expires.
+int RunPinnedFps(const wchar_t* dll)
+{
+    wchar_t exe[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    const auto ini = std::filesystem::path(exe).parent_path() / L"RTX40MFG-UI.ini";
+    if (!Check(GetPrivateProfileIntW(L"Overlay", L"PinnedFps", 0, ini.c_str()) == 1,
+            "pinned FPS saved before startup")) return 1;
+    WarpFixture fixture;
+    if (!Check(fixture.Initialize(true), "WARP device, queue and factory created")) return 1;
+    RestoreForeground previousForeground;
+    TestWindow window(L"PinnedFps", 640, 480, GameWindowProc);
+    if (!Check(window.window != nullptr, "test window created")) return 1;
+    window.Show();
+    HMODULE module = LoadCandidate(dll);
+    if (!Check(module != nullptr, "candidate loads")) return 1;
+    ComPtr<IDXGIFactory1> applicationFactory;
+    if (!Check(SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&applicationFactory)))
+            && SUCCEEDED(applicationFactory.As(&fixture.factory)),
+            "application factory created through the menu's gateway"))
+        return 1;
+    Chain chain;
+    if (!Check(chain.Create(fixture, window.window, 640, 480, 2, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL)
+            && Status(module).swapchainWrappersCreated == 1,
+            "application swapchain wrapped by the menu"))
+        return 1;
+
+    float teal[4] = {0.10f, 0.60f, 0.60f, 1.0f};
+    const ULONGLONG start = GetTickCount64();
+    for (int frame = 0; frame < 6; ++frame) { RenderAndPresent(fixture, chain, teal); window.Pump(1); }
+    float readout[4]{}, hint[4]{};
+    Check(ReadCenter(fixture, chain, readout, 20, 18) && !PixelMatches(readout, teal),
+        "pinned FPS readout composited in the top-left corner");
+    Check(ReadCenter(fixture, chain, hint, 200, 50) && !PixelMatches(hint, teal),
+        "startup hint composited below the readout");
+    while (GetTickCount64() - start < 8500)
+    {
+        RenderAndPresent(fixture, chain, teal);
+        window.Pump(1);
+        Sleep(50);
+    }
+    for (int frame = 0; frame < 3; ++frame) RenderAndPresent(fixture, chain, teal);
+    Check(Status(module).overlayVisible == 0, "menu stays closed");
+    Check(ReadCenter(fixture, chain, hint, 200, 50) && PixelMatches(hint, teal),
+        "startup hint gone after 7 seconds");
+    Check(ReadCenter(fixture, chain, readout, 20, 18) && !PixelMatches(readout, teal),
+        "pinned FPS readout still composited with the menu closed");
+    Check(SUCCEEDED(fixture.device->GetDeviceRemovedReason()), "device healthy after presents");
+    return 0;
+}
+
 // This case acquires a real exclusive DirectInput mouse, then drags the menu
 // panel by its title bar with injected input: the cursor and the panel must
 // follow, and DirectInput must still read the mouse once the menu closes. The
@@ -1838,14 +1879,10 @@ bool ExerciseMenu(WarpFixture& fixture, Chain& chain, TestWindow& window, HMODUL
 int wmain(int argc, wchar_t** argv)
 {
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
-    if (argc != 3 && argc != 4) return 2;
+    if (argc != 3) return 2;
     const std::wstring mode = argv[1];
     const wchar_t* dll = argv[2];
     std::printf("mode=%ls dll=%ls\n", argv[1], dll);
-    if (mode == L"present") return RunPresentation(dll, false, argc == 4 ? _wtoi(argv[3]) : 10);
-    if (mode == L"coexist-present") return RunPresentation(dll, false, 10,true,true);
-    if (mode == L"wrapped-slinit-forward") return RunPresentation(dll,false,10,true,true,false,true,true);
-    if (mode == L"menu") return RunPresentation(dll, true, 18);
     if (mode == L"factory-revision-menu") return RunPresentation(dll,true,18,false,false,false,false,false,false,false,false,false,false,0,false,false,false,true);
     if (mode == L"factory-revision-present") return RunPresentation(dll,false,18,false,false,false,false,false,false,false,false,false,false,0,false,false,false,true);
     if (mode == L"factory-revision-unsupported") return RunLegacyFactoryUnsupported(dll);
@@ -1863,12 +1900,8 @@ int wmain(int argc, wchar_t** argv)
     if (mode == L"startup-menu") return RunPresentation(dll, true, 18, true);
     if (mode == L"engine-menu") return RunPresentation(dll,true,18,true,false,false,false,false,false,false,false,false,false,0,true);
     if (mode == L"first-launch-menu") return RunPresentation(dll,true,18,true,false,false,false,false,false,false,true);
-    if (mode == L"coexist-menu") return RunPresentation(dll, true, 18, true, true);
-    if (mode == L"dynamic-coexist-menu") return RunPresentation(dll,true,18,true,true,true);
-    if (mode == L"wrapped-slinit-menu") return RunPresentation(dll,true,18,true,true,false,true,true);
     if (mode == L"layered-slinit-menu") return RunPresentation(dll,true,18,true,true,false,true,true,true);
     if (mode == L"reshade-wrapped-menu") return RunPresentation(dll,true,18,true,true,false,true,true,false,true);
-    if (mode == L"slinit-coexist-menu") return RunPresentation(dll,true,18,true,true,false,true);
     if (mode == L"manual-upgrade-factory-menu") return RunManualUpgrade(dll,false);
     if (mode == L"manual-upgrade-swapchain-passthrough") return RunManualUpgrade(dll,true);
     if (mode == L"manual-upgrade-immediate-menu") return RunManualUpgrade(dll,false,true);
@@ -1876,6 +1909,7 @@ int wmain(int argc, wchar_t** argv)
     if (mode == L"interposer-host-menu") return RunInterposerHost(dll, true);
     if (mode == L"interposer-host-dynamic") return RunInterposerHost(dll, false);
     if (mode == L"vsync-override-menu") return RunVsyncOverride(dll);
+    if (mode == L"pinned-fps-menu") return RunPinnedFps(dll);
     if (mode == L"directinput-menu") return RunDirectInputMenu(dll);
     std::printf("unknown mode\n");
     return 2;

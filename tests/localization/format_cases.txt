@@ -1,0 +1,17 @@
+# Format signatures shared by the C++ runtime test and the generator test.
+# text<TAB>signature (- means no conversions). \n in text is a newline.
+plain text	-
+100%% sure	-
+%s	%s;
+Preset %s is saved.	%s;
+%ux	%u;
+%dx (safe fallback)	%d;
+%.1f real, %.1f DLSS	%f;%f;
+applied: %.2f FPS	%f;
+%-8.3lf	%lf;
+%*d	%*d;
+%.*s	%.*s;
+%llu and %I64u	%llu;%I64u;
+%08X	%X;
+%TEMP%\\file	%T;%\;
+ends with %	%?;

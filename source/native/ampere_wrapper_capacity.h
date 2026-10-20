@@ -28,6 +28,27 @@ struct Capacity
     uint32_t maximumGeneratedFrames = 0, bufferCount = 0;
     bool operator==(const Capacity&) const = default;
 };
+// The wrapper's swap-chain change path (its ResizeBuffers, ResizeBuffers1 and
+// SetFullscreenState post hooks; postSwapchainChanged in sl.dlss_g 2.14) puts
+// new per-buffer objects for the same swap chain into the same vector, with no
+// new NGX Create. Returns how many entries changed when that is the only
+// difference from `stored`, otherwise 0. `current` must come from Read(),
+// which proves its entries non-null and distinct.
+inline uint32_t RefreshedBuffers(const Capacity& stored, const Capacity& current) noexcept
+{
+    if (!stored.context || current.context != stored.context || current.swapchain != stored.swapchain
+        || current.ringOwner != stored.ringOwner || current.buffersBegin != stored.buffersBegin
+        || current.buffersEnd != stored.buffersEnd || current.buffersCapacity != stored.buffersCapacity
+        || current.maximumGeneratedFrames != stored.maximumGeneratedFrames
+        || current.bufferCount != stored.bufferCount || current.bufferCount > current.buffers.size()) return 0;
+    uint32_t changed = 0;
+    for (size_t i = 0; i < current.buffers.size(); ++i)
+    {
+        if (i < current.bufferCount) changed += current.buffers[i] != stored.buffers[i];
+        else if (current.buffers[i] != stored.buffers[i]) return 0;
+    }
+    return changed;
+}
 // Failure reporting only. Observed fields do not certify an allocation.
 struct Observation
 {
