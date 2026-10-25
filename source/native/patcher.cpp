@@ -12,6 +12,8 @@
 #if MFG_UNLOCK_XESS
 #include "xess/xess_mod.h"
 #include "xess/cuda/cuda_route.h"
+#include "xess/vulkan/vk_host.h"
+#include "xess/d3d12_host.h"
 #endif
 #include "ampere_backend.h"
 #include "ampere_provider_arch.h"
@@ -48,6 +50,9 @@ inline bool LivePresetGpu() noexcept { return NativeDlssgPresetGpu() || UseAmper
 #include "ngx_runtime_policy.h"
 #include "dlssg_preset.h"
 #include "dlss_sr.h"
+#include "dlss5.h"
+#include "dlss5_vulkan.h"
+#include "dlss5_settings.h"
 #include "dlssg_preset_policy.h"
 #include "dlssg_preset_switch_policy.h"
 #include "present_counter.h"
@@ -57,6 +62,7 @@ inline bool LivePresetGpu() noexcept { return NativeDlssgPresetGpu() || UseAmper
 #include "streamline_ota_policy.h"
 #include "temporal_interval_trace.h"
 #include "fault_capture.h"
+#include "session_diagnostics.h"
 #include "universal_route_policy.h"
 #include "universal_wrapper_profile.h"
 #include "vulkan_capability.h"
@@ -67,6 +73,8 @@ inline bool LivePresetGpu() noexcept { return NativeDlssgPresetGpu() || UseAmper
 #include <winternl.h>
 #include <sl.h>
 #include <sl_dlss_g.h>
+#include <sl_pcl.h>
+#include <sl_reflex.h>
 #include <nvsdk_ngx.h>
 
 #include <algorithm>
@@ -133,6 +141,7 @@ std::atomic<PFun_slSetD3DDevice*> gOriginalSetD3DDevice{nullptr};
 std::atomic<PFun_slSetVulkanInfoAbi*> gOriginalSetVulkanInfo{nullptr};
 std::atomic<PFun_slSetTag*> gOriginalSetTag{nullptr};
 std::atomic<PFun_slSetTagForFrame*> gOriginalSetTagForFrame{nullptr};
+std::atomic<PFun_slSetConstants*> gOriginalSetConstants{nullptr};   // xemfgsa.1
 std::atomic<PFun_slInit*> gOriginalSlInit{nullptr};
 entry_detour::Handle gSlInitEntryHandle{};
 std::atomic<PFun_slUpgradeInterface*> gOriginalSlUpgradeInterface{nullptr};
@@ -345,6 +354,8 @@ std::atomic<uint32_t> gDlssFpsMilli{0};
 std::atomic<uint32_t> gFpsSampleWindowMs{0};
 std::atomic<uint64_t> gFpsSampleTick{0};
 std::atomic<uint64_t> gFpsOutputPresentTick{0};
+// alpha.15 (B4-02): every present the telemetry sampled, for "presents since" after a GPU driver fault.
+std::atomic<uint64_t> gTelemetryPresents{0};
 std::atomic<bool> gLogReady{false};
 std::mutex gStreamlineCallMutex;
 std::mutex gLastOptionsMutex;
@@ -391,6 +402,7 @@ struct ControlConfig
     // and Ray Reconstruction preset (0 game/driver, 4..6 D..F).
     uint32_t dlssSrPreset = 0;
     uint32_t dlssRrPreset = 0;
+    dlss5::Settings dlss5{};
     uint32_t vsyncMode = 0;
     uint32_t reflexFrameLimitFps = 0;
     // XeSS MFG runs under OptiScaler only (beta.8); its menu owns the frame count. The model
@@ -398,12 +410,35 @@ struct ControlConfig
     // OptiScaler's first XeFG creation (a restart applies a change). OptiScaler.ini [XeFG]
     // XeFGModel (or the earlier RtxmfgModel) comes first. Older XeSS keys in a saved file are ignored.
     uint32_t xessModel = 0;
+    // vkxefg.1 (V1.6.2): RTXMFG's own XeMFG takeover on Vulkan games, harness builds only
+    // (MFG_UNLOCK_XEFG_VK_STANDALONE); products run XeMFG on Vulkan as OptiScaler's XeFG output (vkxefg.2,
+    // MfgXeFGVkGetApi) and ignore these. xessVulkanFrames is its frame count (2-6); without it the fixed multiplier
+    // applies (Follow = 2X, the game has no FG of its own).
+    bool xessVulkan = false;
+    uint32_t xessVulkanFrames = 0;
+    // xemfgsa.1 (V1.7.0): XeMFG standalone, RTXMFG as the XeFG host without OptiScaler (xess/d3d12_host.h, and the
+    // Vulkan host above as the product's), off by default; xemfgFrames is its frame count (2-6, 0 = the fixed
+    // multiplier, Follow = 2X). Takeover happens at a swap chain's creation: switching on applies after a restart.
+    bool xemfgStandalone = false;
+    uint32_t xemfgFrames = 0;
+    // xemfgsa.6: XeMFG standalone's Dynamic MFG (xess/xemfg_dynamic.h), up to xemfgFrames: its target (0 = the FPS
+    // limit, else just under the refresh rate), rounding (0 at most, 1 nearest, 2 at least), 1X allowed, "Use target as
+    // cap". Applies live.
+    bool xemfgDynamic = false;
+    uint32_t xemfgTargetFps = 0;
+    uint32_t xemfgRounding = 1;
+    bool xemfgAllow1x = true;
+    bool xemfgTargetAsCap = false;
     bool dynamicExperimental56 = false;
     bool generatedOnlyDebug = false;
     bool intervalLogging = gpu_dispatch::UsesNativeProgram() || UseAmpere();
-    // When OptiScaler is detected: 0 = its menu owns the controls (RTXMFG UI
-    // hidden, Follow, no overrides); 1 = "rtxmfg" keeps RTXMFG's UI/controls.
-    uint32_t optiScalerUi = 0;
+    // When OptiScaler is detected (optiscaler_host::UiMode): 0 = "shared": its
+    // menu owns frame generation (Follow, no overrides) and RTXMFG's menu offers
+    // the DLSS presets and DLSS 5; 1 = "rtxmfg": RTXMFG's own UI and controls;
+    // 2 = "optiscaler": no RTXMFG menu, everything delegated (V1.6.2's default);
+    // 3 = absent: optiscaler_host::DefaultUiMode() (alpha.19 optimenu.1: shared,
+    // hidden for a ForzaTech executable).
+    uint32_t optiScalerUi = 3;
 };
 
 struct ControlSnapshot
@@ -694,27 +729,71 @@ ModuleRecord InspectLoadedModule(
 FileVersion ReadFileVersion(const std::wstring& path);
 uint64_t ModuleGeneration(HMODULE module) noexcept;
 
+// diag.1: a beta's lines carry local time; `stamped` lines were stamped when they were queued.
+void WriteLogLine(const wchar_t* message, bool stamped)
+{
+    OutputDebugStringW(L"[MfgUnlock] ");
+    OutputDebugStringW(message);
+    OutputDebugStringW(L"\n");
+    if (gLog)
+    {
+#if MFG_UNLOCK_SESSION_DIAGNOSTICS
+        if (!stamped)
+        {
+            wchar_t stamp[session_diagnostics::kStampChars];
+            session_diagnostics::Stamp(stamp);
+            fwprintf_s(gLog, L"%s%s\n", stamp, message);
+            fflush(gLog);
+            return;
+        }
+#else
+        (void)stamped;
+#endif
+        fwprintf_s(gLog, L"%s\n", message);
+        fflush(gLog);
+    }
+}
+
+// V1.7.0 alpha.9: 4096, since the startup banner's base= list passed 2048 characters and lost its session-diagnostics
+// label and output fields to the truncation.
 void Log(const wchar_t* format, ...)
+{
+    wchar_t message[4096]{};
+    va_list args;
+    va_start(args, format);
+    _vsnwprintf_s(message, _countof(message), _TRUNCATE, format, args);
+    va_end(args);
+    WriteLogLine(message, false);
+}
+
+// diag.1: hook-state lines repeat on every module rescan; a beta writes each distinct line once.
+void LogOnChange(const wchar_t* format, ...)
 {
     wchar_t message[2048]{};
     va_list args;
     va_start(args, format);
     _vsnwprintf_s(message, _countof(message), _TRUNCATE, format, args);
     va_end(args);
-
-    OutputDebugStringW(L"[MfgUnlock] ");
-    OutputDebugStringW(message);
-    OutputDebugStringW(L"\n");
-    if (gLog)
-    {
-        fwprintf_s(gLog, L"%s\n", message);
-        fflush(gLog);
-    }
+#if MFG_UNLOCK_SESSION_DIAGNOSTICS
+    if (!session_diagnostics::FirstOccurrence(message))
+        return;
+#endif
+    WriteLogLine(message, false);
 }
 
 void MidpointLog(const wchar_t* message)
 {
     Log(L"%s", message ? message : L"");
+}
+
+// The sink for lines queued by single_module::Log.
+void QueuedLog(const wchar_t* line)
+{
+#if MFG_UNLOCK_SESSION_DIAGNOSTICS
+    WriteLogLine(line ? line : L"", true);
+#else
+    MidpointLog(line);
+#endif
 }
 
 void LogAmpereArchitectureDetection(bool armed) noexcept
@@ -778,11 +857,10 @@ nvidia_mfg_policy::CapacityDecision CurrentCapacityDecision() noexcept
 
 uint32_t SafeMaximumMultiplier() noexcept
 {
+    // RTX 30/20: the certified ring's N+1 (ringcap.1; 6x only for a full ring).
     uint32_t runtimeMaximum = UseAmpere()
-        ? (ampere_backend::Ready()
-            && ampere_backend::StartupMaximumGeneratedFrames() == ampere_policy::kMaximumGeneratedFrames
-            && ampere_backend::CertifiedMaximumGeneratedFrames() == ampere_policy::kMaximumGeneratedFrames
-            ? ampere_policy::kMaximumGeneratedFrames + 1u : 2u)
+        ? (ampere_backend::Ready() ? ampere_policy::RingMaximumMultiplier(
+            ampere_backend::StartupMaximumGeneratedFrames(), ampere_backend::CertifiedMaximumGeneratedFrames()) : 2u)
         : gpu_dispatch::UsesNativeProgram() ? std::clamp(
             CurrentCapacityDecision().effectiveMaximumMultiplier,
             kMinimumMultiplier, kMaximumMultiplier) : 2u;
@@ -804,9 +882,11 @@ uint32_t AmpereAdvertisedMaximum() noexcept
     // Allocation evidence (certified maximum) arrives only after Create; the
     // pre-Create maximum follows the wrapper's startup capacity and the title's
     // NVIDIA ceiling, the same ceiling SafeMaximumMultiplier applies later.
+    // Once a Create certified a smaller ring, no more than it holds (ringcap.1).
     return ampere_policy::AdvertisedGeneratedFrames(ampere_backend::StartupMaximumGeneratedFrames(),
         nvidia_mfg_policy::LimitToPolicy(static_cast<nvidia_mfg_policy::Tier>(
-            gNvidiaCompatibilityTier.load(std::memory_order_acquire)), ampere_policy::kMaximumGeneratedFrames + 1u));
+            gNvidiaCompatibilityTier.load(std::memory_order_acquire)), ampere_policy::kMaximumGeneratedFrames + 1u),
+        ampere_backend::RingMaximumGeneratedFrames());
 }
 
 uint32_t EffectiveMultiplier(const ControlConfig& control) noexcept
@@ -1584,6 +1664,7 @@ bool TryParseControl(const char* data, size_t size, ControlConfig& control)
     if (!dlss_sr::IsValidRrSelection(parsed.dlssRrPreset))
         parsed.dlssRrPreset = dlss_sr::kGameOrDriver;
 
+    if (!dlss5::settings_json::Parse(content, parsed.dlss5)) return false;
     size_t experimentalOffset = 0;
     size_t pacingOffset = 0;
     if (FindJsonValue(content, "vsyncMode", pacingOffset)
@@ -1597,6 +1678,36 @@ bool TryParseControl(const char* data, size_t size, ControlConfig& control)
     if (FindJsonValue(content, "xessModel", xessOffset)
         && !TryParseUnsigned(content, "xessModel", 0, 1, parsed.xessModel))
         return false;
+    if (FindJsonValue(content, "xessVulkan", xessOffset)
+        && !TryParseBoolean(content, "xessVulkan", parsed.xessVulkan))
+        return false;
+    if (FindJsonValue(content, "xessVulkanFrames", xessOffset)
+        && !TryParseUnsigned(content, "xessVulkanFrames", 2, 6, parsed.xessVulkanFrames))
+        return false;
+    uint32_t xemfgStandalone = 0;
+    if (FindJsonValue(content, "xemfgStandalone", xessOffset)
+        && !TryParseUnsigned(content, "xemfgStandalone", 0, 1, xemfgStandalone))
+        return false;
+    parsed.xemfgStandalone = xemfgStandalone != 0;
+    if (FindJsonValue(content, "xemfgFrames", xessOffset)
+        && !TryParseUnsigned(content, "xemfgFrames", 2, 6, parsed.xemfgFrames))
+        return false;
+    // xemfgsa.6: Dynamic MFG for XeMFG standalone.
+    uint32_t xemfgDynamic = 0, xemfgAllow1x = 1, xemfgTargetAsCap = 0;
+    if ((FindJsonValue(content, "xemfgDynamic", xessOffset)
+            && !TryParseUnsigned(content, "xemfgDynamic", 0, 1, xemfgDynamic))
+        || (FindJsonValue(content, "xemfgTargetFps", xessOffset)
+            && !TryParseUnsigned(content, "xemfgTargetFps", 0, 1000, parsed.xemfgTargetFps))
+        || (FindJsonValue(content, "xemfgRounding", xessOffset)
+            && !TryParseUnsigned(content, "xemfgRounding", 0, 2, parsed.xemfgRounding))
+        || (FindJsonValue(content, "xemfgAllow1x", xessOffset)
+            && !TryParseUnsigned(content, "xemfgAllow1x", 0, 1, xemfgAllow1x))
+        || (FindJsonValue(content, "xemfgTargetAsCap", xessOffset)
+            && !TryParseUnsigned(content, "xemfgTargetAsCap", 0, 1, xemfgTargetAsCap)))
+        return false;
+    parsed.xemfgDynamic = xemfgDynamic != 0;
+    parsed.xemfgAllow1x = xemfgAllow1x != 0;
+    parsed.xemfgTargetAsCap = xemfgTargetAsCap != 0;
     if (FindJsonValue(content, "dynamicExperimental56", experimentalOffset)
         && !TryParseBoolean(content, "dynamicExperimental56",
             parsed.dynamicExperimental56))
@@ -1637,6 +1748,8 @@ bool TryParseControl(const char* data, size_t size, ControlConfig& control)
         if (content.compare(optiScalerUiOffset, 8, "\"rtxmfg\"") == 0)
             parsed.optiScalerUi = 1;
         else if (content.compare(optiScalerUiOffset, 12, "\"optiscaler\"") == 0)
+            parsed.optiScalerUi = 2;
+        else if (content.compare(optiScalerUiOffset, 8, "\"shared\"") == 0)
             parsed.optiScalerUi = 0;
         else
             return false;
@@ -1706,10 +1819,14 @@ ControlConfig ReadInitialControl()
     return control;
 }
 
-// OptiScaler mode: OptiScaler's menu owns the user controls. RTXMFG follows
-// the caller's frame-generation requests (OptiScaler's ratio/interpolation
-// count, or the game's own setting) and applies none of its own overrides.
-// The saved file is not rewritten, so standalone launches keep their choices.
+// OptiScaler mode: OptiScaler's menu owns the frame-generation controls.
+// RTXMFG follows the caller's frame-generation requests (OptiScaler's
+// ratio/interpolation count, or the game's own setting) and applies none of
+// its own frame-generation, latency or DLSS-G preset overrides. In the shared
+// UI mode (the default again since alpha.19) RTXMFG's menu still offers the
+// DLSS SR/RR presets and DLSS 5, which apply; hidden mode ("optiscaler", and
+// the default for a ForzaTech executable) delegates those too. The saved file
+// is not rewritten, so standalone launches keep their choices.
 ControlConfig EffectiveControl(const ControlConfig& saved) noexcept
 {
     if (!optiscaler_host::UiDelegated())
@@ -1721,10 +1838,17 @@ ControlConfig EffectiveControl(const ControlConfig& saved) noexcept
     effective.dlssgPreset = dlssg_preset::kGameOrDriver;
     effective.dlssSrPreset = dlss_sr::kGameOrDriver;
     effective.dlssRrPreset = dlss_sr::kGameOrDriver;
+    effective.dlss5.enabled = false;
     effective.vsyncMode = 0;
     effective.reflexFrameLimitFps = 0;
     effective.dynamicExperimental56 = false;
     effective.generatedOnlyDebug = false;
+    if (!optiscaler_host::UiHidden())
+    {
+        effective.dlssSrPreset = saved.dlssSrPreset;
+        effective.dlssRrPreset = saved.dlssRrPreset;
+        effective.dlss5 = saved.dlss5;
+    }
     return effective;
 }
 
@@ -1733,6 +1857,7 @@ ControlConfig EffectiveControl(const ControlConfig& saved) noexcept
 // anything selected a GPU family; the game's NGX device selects RTX 40 or
 // RTX 50 here (ObserveNativeD3D12Device never selects RTX 30). RTX 30/20 select
 // their family in PrepareNgxInitialization, which calls this again (V1.6.1).
+// Vulkan (vkpreset.1) passes no device: the VkPhysicalDevice selected the family.
 bool InstallDlssSrDrsHook(ID3D12Device* device) noexcept
 {
     if (gpu_dispatch::Selected() == gpu_dispatch::Family::eUnknown && device)
@@ -1791,6 +1916,7 @@ uint64_t StoreControl(const ControlConfig& control)
     dlssg_preset::SetRequested(control.dlssgPreset);
     dlss_sr::SetRequested(control.dlssSrPreset);
     dlss_sr::SetRequestedRr(control.dlssRrPreset);
+    dlss5::Configure(control.dlss5);
     gDynamicExperimental56.store(control.dynamicExperimental56, std::memory_order_relaxed);
     gGeneratedOnlyDebug.store(control.generatedOnlyDebug,
         std::memory_order_relaxed);
@@ -1906,6 +2032,109 @@ const char* ActiveFrameGeneration(bool xessActive) noexcept
     return "none";
 }
 
+// vkxefg.1: the XeMFG Vulkan host's frame count: the menu's own setting, else the fixed multiplier (Follow = 2X).
+uint32_t XessVulkanFrames(const ControlConfig& control) noexcept
+{
+    return control.xessVulkanFrames ? control.xessVulkanFrames : control.followGame ? 2u : control.multiplier;
+}
+
+// xemfgsa.1: XeMFG standalone's frame count, the same fallback.
+uint32_t XemfgFrames(const ControlConfig& control) noexcept
+{
+    return std::clamp<uint32_t>(control.xemfgFrames ? control.xemfgFrames : control.followGame ? 2u : control.multiplier, 2, 6);
+}
+
+#if MFG_UNLOCK_XESS
+// xemfgsa.1: both hosts take the switch; the Vulkan host also the harness builds' xessVulkan key.
+void ConfigureXemfg(const ControlConfig& control) noexcept
+{
+    // Under OptiScaler its XeFG outputs host XeMFG (a saved switch from a session without it stays inert).
+    xess_vulkan::Configure(control.xessVulkan, control.xemfgStandalone && !optiscaler_host::Detected(),
+        control.xemfgFrames ? XemfgFrames(control) : XessVulkanFrames(control));
+    xess_d3d12::Configure(control.xemfgStandalone, XemfgFrames(control));
+    // xemfgsa.5: the menu's Reflex FPS limit. The game's frames sleep in XeLL while XeMFG generates, where the driver's
+    // Reflex limit does not reach them; the hosts apply it to XeFG's presented frames as XeLL's interval.
+    xess_d3d12::SetFpsLimit(control.reflexFrameLimitFps);
+    xess_vulkan::SetStandaloneFpsLimit(control.reflexFrameLimitFps);
+    // xemfgsa.6: Dynamic MFG, up to XemfgFrames.
+    xess_d3d12::SetDynamic(control.xemfgDynamic, control.xemfgTargetFps, int(control.xemfgRounding), control.xemfgAllow1x,
+        control.xemfgTargetAsCap);
+    xess_vulkan::SetStandaloneDynamic(control.xemfgDynamic, control.xemfgTargetFps, int(control.xemfgRounding),
+        control.xemfgAllow1x, control.xemfgTargetAsCap);
+}
+
+// xemfgsa.1: XeMFG replaces the game's DLSS Frame Generation (held at Off) while a host may run it.
+bool XemfgReplacesDlssg() noexcept
+{
+    return xess_d3d12::ReplacesFrameGeneration() || xess_vulkan::ReplacesFrameGeneration();
+}
+
+// xemfgsa.1: XeMFG standalone's status for the menu, from the host of the game's API.
+std::string XemfgStatus(const ControlConfig& control)
+{
+    const auto d3d12 = xess_d3d12::ReadSnapshot();
+    const auto vulkan = xess_vulkan::ReadSnapshot();
+    const bool useVulkan = vulkan.vulkanGame && !d3d12.active;
+    std::string state = useVulkan ? vulkan.state : d3d12.state;
+    if (useVulkan && control.xemfgStandalone && vulkan.restartNeeded) state = "restart";
+    if (useVulkan && optiscaler_host::Detected()) state = "optiscaler";
+    const char* source = useVulkan ? (vulkan.inputFrames ? "dlss" : "none")
+        : d3d12.source == 1 ? "streamline" : d3d12.source == 2 ? "dlss" : d3d12.source == 3 ? "xess"
+        : d3d12.source == 4 ? "fsr" : "none";
+    return std::string(",\"xemfgStandalone\":") + (control.xemfgStandalone ? "true" : "false")
+        + ",\"xemfgSavedFrames\":" + std::to_string(XemfgFrames(control))
+        + ",\"xemfgApi\":\"" + (useVulkan ? "vulkan" : "d3d12") + "\""
+        + ",\"xemfgState\":\"" + JsonEscapeUtf8(state) + "\""
+        + ",\"xemfgReason\":\"" + JsonEscapeUtf8(useVulkan ? vulkan.reason : d3d12.reason) + "\""
+        + ",\"xemfgSource\":\"" + source + "\""
+        + ",\"xemfgFrames\":" + std::to_string(useVulkan ? vulkan.frames : d3d12.frames)
+        + ",\"xemfgGenerating\":" + ((useVulkan ? vulkan.active : d3d12.generating) ? "true" : "false")
+        + ",\"xemfgGameFg\":" + ((useVulkan ? vulkan.gameFrameGeneration : d3d12.gameFrameGeneration) ? "true" : "false")
+        + ",\"xemfgFsrFg\":" + (d3d12.fsrFrameGeneration ? "true" : "false")
+        + ",\"xemfgRuntime\":\"" + JsonEscapeUtf8(d3d12.runtime) + "\""
+        // alpha.15 (B4-12): after a failed runtime search, where the pair belongs and a near-miss name (the menu's note).
+        + ",\"xemfgRuntimeSearch\":\"" + JsonEscapeUtf8(useVulkan ? vulkan.runtimeSearch : d3d12.runtimeSearch) + "\""
+        + ",\"xemfgRuntimeGame\":\"" + JsonEscapeUtf8(useVulkan ? vulkan.runtimeGame : d3d12.runtimeGame) + "\""
+        + ",\"xemfgRuntimeMisnamed\":\"" + JsonEscapeUtf8(useVulkan ? vulkan.runtimeMisnamed : d3d12.runtimeMisnamed) + "\""
+        + ",\"xemfgBasePresents\":" + std::to_string(std::min<uint64_t>(useVulkan ? vulkan.basePresents : d3d12.basePresents, UINT32_MAX))
+        + ",\"xemfgInputFrames\":" + std::to_string(std::min<uint64_t>(useVulkan ? vulkan.inputFrames : d3d12.inputFrames, UINT32_MAX))
+        // xemfgsa.5: the menu's FPS row and pinned readout, and the FPS limit's readback.
+        + ",\"xemfgBaseFpsMilli\":" + std::to_string(useVulkan ? vulkan.baseFpsMilli : d3d12.baseFpsMilli)
+        + ",\"xemfgOutputFpsMilli\":" + std::to_string(useVulkan ? vulkan.outputFpsMilli : d3d12.outputFpsMilli)
+        + ",\"xemfgFpsAgeMs\":" + std::to_string(std::min<uint64_t>(useVulkan ? vulkan.fpsAgeMs : d3d12.fpsAgeMs, UINT32_MAX))
+        + ",\"xemfgFpsLimit\":" + std::to_string(useVulkan ? vulkan.fpsLimit : d3d12.fpsLimit)
+        + ",\"xemfgFpsLimited\":" + ((useVulkan ? vulkan.latencyLimited : d3d12.limitIntervalUs != 0) ? "true" : "false")
+        // xemfgsa.6: Dynamic MFG's saved settings, and while it runs its target and cap mode.
+        + ",\"xemfgDynamic\":" + (control.xemfgDynamic ? "true" : "false")
+        + ",\"xemfgTargetFps\":" + std::to_string(control.xemfgTargetFps)
+        + ",\"xemfgRounding\":" + std::to_string(control.xemfgRounding)
+        + ",\"xemfgAllow1x\":" + (control.xemfgAllow1x ? "true" : "false")
+        + ",\"xemfgTargetAsCap\":" + (control.xemfgTargetAsCap ? "true" : "false")
+        + ",\"xemfgDynamicActive\":" + ((useVulkan ? vulkan.dynamic : d3d12.dynamic) ? "true" : "false")
+        + ",\"xemfgDynamicTargetMilli\":" + std::to_string(useVulkan ? vulkan.dynamicTargetMilli : d3d12.dynamicTargetMilli)
+        + ",\"xemfgDynamicCap\":" + ((useVulkan ? vulkan.dynamicCap : d3d12.dynamicCap) ? "true" : "false");
+}
+
+// The XeMFG Vulkan host's status (vkxefg.1), with or without the D3D12 XeSS route.
+std::string XessVulkanStatus(const ControlConfig& control)
+{
+    const auto vulkan = xess_vulkan::ReadSnapshot();
+    return XemfgStatus(control) + ",\"xessVulkan\":" + (control.xessVulkan ? "true" : "false")
+        + ",\"xessVulkanSavedFrames\":" + std::to_string(control.xessVulkanFrames)
+        + ",\"xessVulkanState\":\"" + JsonEscapeUtf8(vulkan.state) + "\""
+        + ",\"xessVulkanReason\":\"" + JsonEscapeUtf8(vulkan.reason) + "\""
+        + ",\"xessVulkanGame\":" + (vulkan.vulkanGame ? "true" : "false")
+        + ",\"xessVulkanRestart\":" + (vulkan.restartNeeded ? "true" : "false")
+        + ",\"xessVulkanGameFg\":" + (vulkan.gameFrameGeneration ? "true" : "false")
+        + ",\"xessVulkanHosted\":" + (vulkan.hosted ? "true" : "false")
+        + ",\"xessVulkanFrames\":" + std::to_string(vulkan.frames)
+        + ",\"xessVulkanBasePresents\":" + std::to_string(std::min<uint64_t>(vulkan.basePresents, UINT32_MAX))
+        + ",\"xessVulkanPresents\":" + std::to_string(std::min<uint64_t>(vulkan.vulkanPresents, UINT32_MAX))
+        + ",\"xessVulkanInputFrames\":" + std::to_string(std::min<uint64_t>(vulkan.inputFrames, UINT32_MAX))
+        + ",\"xessVulkanMissingPrograms\":" + std::to_string(std::min<uint64_t>(vulkan.missingPrograms, UINT32_MAX));
+}
+#endif
+
 std::string XessStatusFragment(const ControlConfig& control)
 {
 #if MFG_UNLOCK_XESS
@@ -1913,7 +2142,7 @@ std::string XessStatusFragment(const ControlConfig& control)
     const auto snapshot = xess_mod::ReadSnapshot();
     if (!snapshot)
         return std::string(",\"xessAvailable\":false,\"activeFrameGeneration\":\"")
-            + ActiveFrameGeneration(false) + "\"";
+            + ActiveFrameGeneration(false) + "\"" + XessVulkanStatus(control);
     const uint64_t now = GetTickCount64();
     const uint64_t nativeAge = snapshot->nativeActivityTick && now >= snapshot->nativeActivityTick
         ? now - snapshot->nativeActivityTick : UINT64_MAX;
@@ -1938,6 +2167,7 @@ std::string XessStatusFragment(const ControlConfig& control)
     const auto tensorCores = xefg_cuda::Snapshot();
     return numbers
         + std::string(",\"xessModel\":") + std::to_string(control.xessModel)
+        + XessVulkanStatus(control)
         + ",\"xessModelActive\":" + std::to_string(snapshot->modelActive)
         + ",\"xessTensorCores\":" + std::to_string(static_cast<uint32_t>(tensorCores.state))
         + ",\"xessTensorCoreLaunches\":" + std::to_string(std::min<uint64_t>(tensorCores.launches, UINT32_MAX))
@@ -2003,12 +2233,12 @@ std::string JsonEscapeWide(const std::wstring& source)
 std::string OptiScalerStatusFragment()
 {
     const auto host = optiscaler_host::Read();
-    const char* owner = !host.detected ? "none" : host.uiDelegated ? "optiscaler" : "rtxmfg";
+    const char* owner = !host.detected ? "none" : host.uiHidden ? "optiscaler" : host.uiDelegated ? "shared" : "rtxmfg";
     return std::string(",\"integrationMode\":\"") + (host.detected ? "optiscaler" : "standalone")
         + "\",\"optiScalerDetected\":" + (host.detected ? "true" : "false")
         + ",\"optiScalerRoute\":\"" + optiscaler_host::RouteName(host.route)
         + "\",\"optiScalerUiOwner\":\"" + owner
-        + "\",\"optiScalerMenuSuppressed\":" + (host.uiDelegated ? "true" : "false")
+        + "\",\"optiScalerMenuSuppressed\":" + (host.uiHidden ? "true" : "false")
         + ",\"optiScalerPluginCallerAccepted\":" + (host.pluginCallerAccepted ? "true" : "false")
         + ",\"optiScalerPluginCallerRejected\":" + (host.pluginCallerRejected ? "true" : "false")
         + ",\"optiScalerFileVersion\":\"" + JsonEscapeWide(host.fileVersion)
@@ -2179,7 +2409,19 @@ void DiscoverReflexModule()
         }
     }
     for (const auto& record : modules)
-        reflex_control::ObserveModule(record.module, record.path.c_str(), record.generation);
+    {
+        // reflexgate.1: each route and each refusal is logged once with the plug-in version.
+        std::array<uint32_t, 4> version{};
+        const auto observed = reflex_control::ObserveModule(record.module, record.path.c_str(),
+            record.generation, &version);
+        const wchar_t* outcome = observed == reflex_control::Observation::eRouted ? L"hooked"
+            : observed == reflex_control::Observation::eRefusedVersion ? L"refused (supported: 2.7-2.14)"
+            : observed == reflex_control::Observation::eHookUnavailable ? L"refused (Reflex entries incomplete)"
+            : nullptr;
+        if (outcome)
+            Log(L"Reflex FPS limit plug-in %s: version %u.%u.%u.%u path=%s", outcome,
+                version[0], version[1], version[2], version[3], record.path.c_str());
+    }
 }
 
 // Why a saved DLSS-G preset cannot replace the frozen one while the game runs
@@ -2193,8 +2435,11 @@ dlssg_preset_switch::Unavailable PresetSwitchUnavailableReason(uint32_t requeste
     // restart-only; a modern one switches through its adopted reader below.
     if (UseAmpere() && ampere_backend::LegacySinglePreset()) return Unavailable::eLegacyPreset;
     const auto api = static_cast<NgxGraphicsApi>(gActiveNgxGraphicsApi.load(std::memory_order_acquire));
-    // The lifetime tracker covers the runtime D3D12 route only.
-    if (api != NgxGraphicsApi::eUnknown && api != NgxGraphicsApi::eD3D12) return Unavailable::eGraphicsApi;
+    // The lifetime tracker covers the runtime D3D12 route, and (V1.6.2 vkpreset.1)
+    // the runtime Vulkan route while its Create, Evaluate and Release are hooked.
+    if (api == NgxGraphicsApi::eVulkan ? !ampere_backend::VulkanLifetimeCovered()
+            : api != NgxGraphicsApi::eUnknown && api != NgxGraphicsApi::eD3D12)
+        return Unavailable::eGraphicsApi;
     if (!ampere_backend::ReadFrameGenerationLiveness().exact) return Unavailable::eTracker;
     if (gRestartRequired.load(std::memory_order_acquire)
         || gPipelineMayPredateDetour.load(std::memory_order_acquire)
@@ -2323,8 +2568,11 @@ bool WriteBridgeStatus(const ControlConfig& control, DWORD pid)
             && setOptionsResolverFallbackCalls > 0);
     const temporal_interval_trace::Snapshot intervalTrace =
         temporal_interval_trace::ReadSnapshot();
-    const auto preset = dlssg_preset::ReadSnapshot(reinterpret_cast<HMODULE>(
-        gActiveNgxProviderBase.load(std::memory_order_acquire)));
+    // alpha.11: on RTX 30/20 the translated route's own provider (GitHub issue
+    // 107: these fields stayed 0/false there while Preset C was applied).
+    const auto preset = dlssg_preset::ReadSnapshot(reinterpret_cast<HMODULE>(dlssg_preset::StatusProvider(
+        gActiveNgxProviderBase.load(std::memory_order_acquire), UseAmpere(),
+        reinterpret_cast<uintptr_t>(ampere_backend::PresetProvider()))));
     const bool restartRequired =
         gRestartRequired.load(std::memory_order_acquire);
     const nvidia_mfg_policy::CapacityDecision compatibilityCapacity =
@@ -2789,11 +3037,13 @@ bool WriteBridgeStatus(const ControlConfig& control, DWORD pid)
         gpu_dispatch::AdapterVendor(), graphicsApi);
     serialized.insert(gpuClosing, gpu);
     char presetStatus[1152]{};
+    const auto liveness = ampere_backend::ReadFrameGenerationLiveness();
     sprintf_s(presetStatus, ",\"dlssgPresetLatched\":%u,"
         "\"dlssgPresetSelectionFrozen\":%s,\"dlssgPresetRestartRequired\":%s,"
         "\"dlssgPresetObserved\":%u,\"dlssgPresetObservedValid\":%s,"
         "\"dlssgPresetOverrideReadCount\":%llu,\"dlssgPresetCAvailable\":%s,"
-        "\"dlssgPresetLiveSwitch\":%u,\"dlssgPresetSwitching\":%s,\"fgLifetimeExact\":%s",
+        "\"dlssgPresetLiveSwitch\":%u,\"dlssgPresetSwitching\":%s,\"fgLifetimeExact\":%s,\"fgLifetimeVulkan\":%s,"
+        "\"fgLifetimeLive\":%u,\"fgLifetimeCreates\":%llu,\"fgLifetimeReleases\":%llu",
         preset.latched, preset.selectionFrozen ? "true" : "false",
         preset.restartRequired ? "true" : "false", preset.observedPreset,
         preset.observedPresetValid ? "true" : "false",
@@ -2802,11 +3052,35 @@ bool WriteBridgeStatus(const ControlConfig& control, DWORD pid)
         static_cast<uint32_t>(PresetSwitchUnavailableReason(preset.requested)),
         gPresetSwitchPhase.load(std::memory_order_acquire)
             == static_cast<uint32_t>(dlssg_preset_switch::Phase::eDraining) ? "true" : "false",
-        ampere_backend::ReadFrameGenerationLiveness().exact ? "true" : "false");
+        liveness.exact ? "true" : "false",
+        // vkpreset.1: the runtime Vulkan route's Create, Evaluate and Release
+        // are hooked; the tracked FG features (D3D12 and Vulkan).
+        ampere_backend::VulkanLifetimeCovered() ? "true" : "false", liveness.liveFeatures,
+        static_cast<unsigned long long>(liveness.trackedCreates),
+        static_cast<unsigned long long>(liveness.trackedReleases));
     serialized.insert(serialized.rfind('}'), presetStatus);
     serialized.insert(serialized.rfind('}'), DlssSrStatusFragment());
+    {
+        const auto nr=dlss5::Read();char fragment[1024]{};
+        sprintf_s(fragment,",\"dlss5State\":%u,\"dlss5Result\":%u,\"dlss5Route\":%u,\"dlss5Stage\":%u,\"dlss5Detected\":%s,\"dlss5Pending\":%s,\"dlss5Width\":%u,\"dlss5Height\":%u,\"dlss5ExtentWidth\":%u,\"dlss5ExtentHeight\":%u,\"dlss5Passes\":%u,\"dlss5Live\":%u,\"dlss5Creates\":%llu,\"dlss5Evaluations\":%llu,\"dlss5Failures\":%llu,\"dlss5EffectiveScale\":%.1f,\"dlss5GpuMs\":%.3f,\"dlss5BudgetMs\":%.3f,\"dlss5ExposureGain\":%.3f,\"dlss5FrameMs\":%.3f,\"dlss5BoostNetworkMs\":%.3f,\"dlss5ScaleFloorHeld\":%s",
+            static_cast<uint32_t>(nr.state),nr.result,nr.route,nr.stage,nr.providerDetected?"true":"false",nr.pending?"true":"false",
+            nr.width,nr.height,nr.extentWidth,nr.extentHeight,nr.passes,nr.live,
+            static_cast<unsigned long long>(nr.creates),static_cast<unsigned long long>(nr.evaluations),static_cast<unsigned long long>(nr.failures),
+            static_cast<double>(nr.scale),static_cast<double>(std::isfinite(nr.gpuMs)?nr.gpuMs:-1.0f),
+            static_cast<double>(nr.budgetMs),static_cast<double>(std::isfinite(nr.exposureGain)?nr.exposureGain:1.0f),
+            static_cast<double>(std::isfinite(nr.frameMs)?nr.frameMs:0.0f),
+            static_cast<double>(std::isfinite(nr.boostNetworkMs)?nr.boostNetworkMs:-1.0f),nr.scaleFloorHeld?"true":"false");
+        serialized.insert(serialized.rfind('}'),dlss5::settings_json::StatusFields(nr.requested)+fragment);
+    }
     const auto vsync = vsync_control::ReadSnapshot();
     const auto reflex = reflex_control::ReadSnapshot();
+    // reflexgate.1: the last refused Reflex plug-in ("" none, "unreadable" without a version resource).
+    char refusedReflex[48]{};
+    if (reflex.refusedModule && reflex.refusedVersionRead)
+        sprintf_s(refusedReflex, "%u.%u.%u.%u", reflex.refusedVersion[0], reflex.refusedVersion[1],
+            reflex.refusedVersion[2], reflex.refusedVersion[3]);
+    else if (reflex.refusedModule)
+        strcpy_s(refusedReflex, "unreadable");
     char pacing[2048]{};
     sprintf_s(pacing, ",\"vsyncMode\":%u,\"reflexFrameLimitFps\":%u,"
         "\"dynamicVsyncAvailable\":%s,\"vsyncControlAvailable\":%s,"
@@ -2819,7 +3093,7 @@ bool WriteBridgeStatus(const ControlConfig& control, DWORD pid)
         "\"reflexRestorePending\":%s,\"reflexStatus\":%u,\"reflexLastResult\":%u,"
         "\"reflexHookMask\":%u,\"reflexModuleVersionMajor\":%u,"
         "\"reflexModuleVersionMinor\":%u,\"reflexModuleVersionPatch\":%u,"
-        "\"reflexModuleGeneration\":%llu",
+        "\"reflexModuleGeneration\":%llu,\"reflexRefusedVersion\":\"%s\"",
         control.vsyncMode, control.reflexFrameLimitFps,
         VsyncRuntimeCurrent() && DynamicMfgSupported() ? "true" : "false",
         vsync.available ? "true" : "false", vsync.overrideApplied ? "true" : "false",
@@ -2833,7 +3107,8 @@ bool WriteBridgeStatus(const ControlConfig& control, DWORD pid)
         reflex.pending ? "true" : "false", reflex.restorePending ? "true" : "false",
         static_cast<uint32_t>(reflex.status), reflex.lastSetResult,
         reflex.currentHookMask, reflex.moduleVersionMajor, reflex.moduleVersionMinor,
-        reflex.moduleVersionPatch, static_cast<unsigned long long>(reflex.moduleGeneration));
+        reflex.moduleVersionPatch, static_cast<unsigned long long>(reflex.moduleGeneration),
+        refusedReflex);
     serialized.insert(serialized.rfind('}'), pacing);
     serialized.insert(serialized.rfind('}'), XessStatusFragment(control));
     serialized.insert(serialized.rfind('}'), OptiScalerStatusFragment());
@@ -3196,6 +3471,12 @@ void RecordGameFrameGenerationIntent(const sl::ViewportHandle& viewport,
     gGameFrameGenerationViewport.store(
         static_cast<uint32_t>(viewport), std::memory_order_release);
     gGameFrameGenerationOn.store(enabled, std::memory_order_release);
+#if MFG_UNLOCK_XESS
+    // vkxefg.1: the XeMFG Vulkan host stays off while the game's own DLSS Frame Generation is on (harness);
+    // xemfgsa.1: under XeMFG standalone that switch turns XeMFG on and off instead, on both hosts.
+    xess_vulkan::SetGameFrameGeneration(enabled);
+    xess_d3d12::GameFrameGeneration(enabled);
+#endif
 }
 
 bool ControlRequestsEnabled(const ControlSnapshot& snapshot,
@@ -3759,6 +4040,30 @@ bool GameEnablesUiRecomposition(const sl::DLSSGOptions& source) noexcept
         && source.enableUserInterfaceRecomposition == sl::Boolean::eTrue;
 }
 
+// admitoff.1: RTX 30/20 startup admission failed (or the boundary is fatal), so
+// the Create gate refuses every DLSS-G feature (120) before the provider, and
+// Streamline would retry that Create on every frame (Doom TDA, RTX 3080 Ti: a
+// failed Create per frame, VRAM to 41 GB, crash). The game's On reaches
+// Streamline as Off instead.
+bool AmpereAdmissionHeld() noexcept
+{
+    return UseAmpere() && ampere_backend::AdmissionUnavailable();
+}
+
+// The held Off releases what Streamline keeps for DLSS-G, as the preset
+// switch's Off does.
+void HoldAmpereOptionsOff(sl::DLSSGOptions& adjusted)
+{
+    adjusted.mode = sl::DLSSGMode::eOff;
+    adjusted.flags = static_cast<sl::DLSSGFlags>(static_cast<uint32_t>(adjusted.flags)
+        & ~static_cast<uint32_t>(sl::DLSSGFlags::eRetainResourcesWhenOff));
+    static std::atomic<bool> logged{false};
+    if (!logged.exchange(true, std::memory_order_relaxed))
+        Log(L"RTX 30/20 DLSS-G held Off: startup admission is unavailable (startup mask 0x%02X, failure %u); "
+            L"the game's frame generation request reaches Streamline as Off for the rest of this session",
+            ampere_backend::Diagnostics().startupFailureMask, ampere_backend::FailureCode());
+}
+
 sl::DLSSGOptions BuildAdjustedOptions(
     const sl::DLSSGOptions& source, const ControlSnapshot& snapshot,
     bool preserveNext)
@@ -3783,7 +4088,8 @@ sl::DLSSGOptions BuildAdjustedOptions(
     }
     if (UseAmpere())
     {
-        const auto decision = AmpereOptions(source, snapshot);
+        const bool held = ampere_backend::AdmissionUnavailable();
+        const auto decision = ampere_policy::HoldOffWithoutAdmission(AmpereOptions(source, snapshot), held);
         if (decision.mode == ampere_policy::OptionsMode::eOff)
             adjusted.mode = sl::DLSSGMode::eOff;
         else if (decision.mode == ampere_policy::OptionsMode::eDynamic)
@@ -3801,6 +4107,8 @@ sl::DLSSGOptions BuildAdjustedOptions(
                 ? static_cast<float>(snapshot.control.dynamicTargetFrameRate) : 0.0f;
         adjusted.flags = static_cast<sl::DLSSGFlags>(static_cast<uint32_t>(adjusted.flags)
             & ~static_cast<uint32_t>(sl::DLSSGFlags::eShowOnlyInterpolatedFrame));
+        if (held && source.mode != sl::DLSSGMode::eOff)
+            HoldAmpereOptionsOff(adjusted);
     }
     if (snapshot.control.generatedOnlyDebug)
     {
@@ -4252,7 +4560,8 @@ void AdvancePresetSwitch(const sl::ViewportHandle& viewport, bool submit)
             result = UseAmpere() ? PassPublicSet(*route, viewport, source)
                 : CallRouteSetOptions(*route, viewport, source);
             gLastSetOptionsResult.store(static_cast<int32_t>(result), std::memory_order_relaxed);
-            RecordSetOptionsLifecycle(*route, viewport, source.mode != sl::DLSSGMode::eOff, result);
+            RecordSetOptionsLifecycle(*route, viewport,
+                source.mode != sl::DLSSGMode::eOff && !AmpereAdmissionHeld(), result);
         }
         if (!IsAcceptedControlResult(result))
             Log(L"DLSS-G preset switch: frame generation On after the re-create failed: result=%d",
@@ -4435,6 +4744,7 @@ bool SameMfgControl(const ControlConfig& left,
         && left.dlssgPreset == right.dlssgPreset
         && left.dlssSrPreset == right.dlssSrPreset
         && left.dlssRrPreset == right.dlssRrPreset
+        && left.dlss5 == right.dlss5
         && left.vsyncMode == right.vsyncMode
         && left.reflexFrameLimitFps == right.reflexFrameLimitFps
         && left.dynamicExperimental56 == right.dynamicExperimental56
@@ -5217,7 +5527,9 @@ bool WINAPI VulkanCreateGate(void* argument1, uintptr_t argument2, const void* a
     uintptr_t argument5, uintptr_t argument6, entry_detour::Handle handle, const void* caller) noexcept
 {
     const auto entry = entry_detour::ReadSnapshot(handle);
-    if (!entry.current) return false;
+    // ngxforward.1: on RTX 40/50 an entry another hook covers still forwards natively.
+    if (!entry.current && !(entry.overlaid && !UseAmpere() && !gpu_dispatch::UsesTranslatedProgram())) return false;
+    if (!entry.current) ampere_backend::ReportOverlaidEntry(entry);
     const bool version1 = entry.kind == entry_detour::Kind::eNgxVulkanCreateFeature1
         || entry.kind == entry_detour::Kind::eNgxRuntimeVulkanCreateFeature1;
     const uintptr_t feature = version1 ? reinterpret_cast<uintptr_t>(argument3) : argument2;
@@ -5264,6 +5576,15 @@ bool WINAPI VulkanCreateGate(void* argument1, uintptr_t argument2, const void* a
         && midpoint_fix::OutputPullMaskRequiresRestart())
         return false;
 #endif
+    // V1.6.2 vkpreset.1 (RTX 40/50): a runtime FG, SR or RR Create runs through
+    // its route's thunk (FG lifetime, SR/RR presets) instead of the relay.
+    const bool runtimeEntry = entry.kind == entry_detour::Kind::eNgxRuntimeVulkanCreateFeature
+        || entry.kind == entry_detour::Kind::eNgxRuntimeVulkanCreateFeature1;
+    if (runtimeEntry && ampere_backend::DivertNativeVulkanCall(handle, true, feature))
+        return false;
+    // An FG Create no tracked runtime Create spans leaves the tracker inexact.
+    if (feature == NVSDK_NGX_Feature_FrameGeneration)
+        ampere_backend::ObserveProviderFrameGenerationCreate();
     return true;
 }
 
@@ -5277,7 +5598,10 @@ bool WINAPI VulkanEvaluateGate(void* argument1, uintptr_t argument2, const void*
         return entry.current && entry.kind == entry_detour::Kind::eNgxVulkanEvaluateFeature
             && ampere_backend::VulkanProviderGate(argument1, argument2, argument3, argument4,
                 argument5, argument6, handle, caller);
-    return entry.current
+    // ngxforward.1: as in VulkanCreateGate, an entry another hook covers forwards natively.
+    const bool overlaid = !entry.current && entry.overlaid && !gpu_dispatch::UsesTranslatedProgram();
+    if (overlaid) ampere_backend::ReportOverlaidEntry(entry);
+    const bool allowed = (entry.current || overlaid)
 #if MFG_UNLOCK_OUTPUT_PULL_MASK_ONLY
         && (entry.kind != entry_detour::Kind::eNgxVulkanEvaluateFeature
             || !midpoint_fix::OutputPullMaskRequiresRestart())
@@ -5285,6 +5609,13 @@ bool WINAPI VulkanEvaluateGate(void* argument1, uintptr_t argument2, const void*
         && gpu_dispatch::AllowVulkanEvaluate(gpu_dispatch::Selected(),
         entry.kind == entry_detour::Kind::eNgxVulkanEvaluateFeature,
         gVulkanAdapterVerified.load(std::memory_order_acquire));
+    // vkpreset.1 (RTX 40/50): while an SR/RR feature is tracked, runtime
+    // Evaluates run through the route's thunk, which can substitute our
+    // re-created feature for the game's.
+    if (allowed && entry.kind == entry_detour::Kind::eNgxRuntimeVulkanEvaluateFeature
+        && ampere_backend::DivertNativeVulkanCall(handle, false, 0))
+        return false;
+    return allowed;
 }
 
 bool InstallNgxVulkanCreateEntry(HMODULE owner,
@@ -5312,7 +5643,7 @@ bool InstallNgxVulkanCreateEntry(HMODULE owner,
         target, callback, &VulkanCreateGate, reinterpret_cast<void*>(&RejectUnsupportedVulkanCall),
         options, &handle);
     const entry_detour::Snapshot state = entry_detour::ReadSnapshot(handle);
-    Log(L"NGX Vulkan %hs entry detour: installed=%d current=%d "
+    LogOnChange(L"NGX Vulkan %hs entry detour: installed=%d current=%d "
         L"cachedPointersCovered=%d method=%hs failure=%u "
         L"targetRva=0x%X path=%s", exportName, installed, state.current,
         state.cachedPointersCovered, entry_detour::MethodName(state.method),
@@ -5393,7 +5724,7 @@ bool InstallNgxVulkanEvaluateEntry(HMODULE owner,
         target, callback, &VulkanEvaluateGate, reinterpret_cast<void*>(&RejectUnsupportedVulkanCall),
         options, &handle);
     const entry_detour::Snapshot state = entry_detour::ReadSnapshot(handle);
-    Log(L"NGX Vulkan EvaluateFeature entry detour: installed=%d current=%d "
+    LogOnChange(L"NGX Vulkan EvaluateFeature entry detour: installed=%d current=%d "
         L"cachedPointersCovered=%d method=%hs failure=%u "
         L"targetRva=0x%X path=%s", installed, state.current,
         state.cachedPointersCovered, entry_detour::MethodName(state.method),
@@ -5459,7 +5790,7 @@ void PrepareVulkanProviderCapabilities(entry_detour::Handle handle)
     }
 }
 
-void WINAPI BeforeNgxVulkanInit(void*, uintptr_t, const void*,
+void WINAPI BeforeNgxVulkanInit(void*, uintptr_t, const void* instance,
     void* physicalDevice, uintptr_t device, uintptr_t, entry_detour::Handle handle,
     const void*) noexcept
 {
@@ -5468,7 +5799,11 @@ void WINAPI BeforeNgxVulkanInit(void*, uintptr_t, const void*,
     gVulkanAdapterVerified.store(verified, std::memory_order_release);
     if (verified)
     {
+        // vkdlss5.1: the DLSS 5 Vulkan stage's device and its direct provider route.
+        dlss5::vulkan::ObserveInit(const_cast<void*>(instance), physicalDevice, reinterpret_cast<void*>(device));
         if (NativeDlssgPresetGpu()) dlssg_preset::Prepare();
+        // vkpreset.1: the SR/RR DRS hook, before NVIDIA's Vulkan Init reads those keys.
+        dlss_sr::PrepareForVulkan();
         // As slSetD3DDevice does: the real-frame readout needs the interval trace.
         temporal_interval_trace::SetEnabled(true);
         // The base Init names its VkDevice (fifth argument).
@@ -5481,7 +5816,7 @@ void WINAPI BeforeNgxVulkanInit(void*, uintptr_t, const void*,
 }
 
 void WINAPI BeforeNgxVulkanProjectInit(void*, uintptr_t, const void*,
-    void*, uintptr_t, uintptr_t physicalDevice, entry_detour::Handle handle,
+    void*, uintptr_t instance, uintptr_t physicalDevice, entry_detour::Handle handle,
     const void*) noexcept
 {
     const bool verified = physicalDevice
@@ -5490,7 +5825,12 @@ void WINAPI BeforeNgxVulkanProjectInit(void*, uintptr_t, const void*,
     gVulkanAdapterVerified.store(verified, std::memory_order_release);
     if (verified)
     {
+        // vkdlss5.1: the DLSS 5 Vulkan stage's instance and adapter (the project
+        // Init's VkDevice is its seventh argument; the game's CreateFeature1 names it).
+        dlss5::vulkan::ObserveInit(reinterpret_cast<void*>(instance), reinterpret_cast<void*>(physicalDevice), nullptr);
         if (NativeDlssgPresetGpu()) dlssg_preset::Prepare();
+        // vkpreset.1: the SR/RR DRS hook, before NVIDIA's Vulkan Init reads those keys.
+        dlss_sr::PrepareForVulkan();
         temporal_interval_trace::SetEnabled(true);
         gModuleInventoryDirty.store(true, std::memory_order_release);
         InspectAlreadyLoadedModules();
@@ -5557,7 +5897,7 @@ bool TryInstallNgxVulkanAdapterEntryDetours(HMODULE module,
             options, &handle);
         const entry_detour::Snapshot state =
             entry_detour::ReadSnapshot(handle);
-        Log(L"NGX Vulkan adapter entry %hs: installed=%d current=%d "
+        LogOnChange(L"NGX Vulkan adapter entry %hs: installed=%d current=%d "
             L"method=%hs failure=%u targetRva=0x%X path=%s",
             entry.name, installed, state.current,
             entry_detour::MethodName(state.method),
@@ -5685,6 +6025,27 @@ sl::Result HandlePublicSetOptions(uint32_t routeSlot,
         || options.mode == sl::DLSSGMode::eAuto
         || options.mode == sl::DLSSGMode::eDynamic;
     RecordGameFrameGenerationIntent(viewport, enabled);
+#if MFG_UNLOCK_XESS
+    // xemfgsa.1: XeMFG standalone replaces the game's DLSS Frame Generation. The game's switch (recorded above)
+    // turns XeMFG on and off, and DLSS-G itself gets Off, so two frame generators never stack.
+    if (enabled && XemfgReplacesDlssg())
+    {
+        sl::DLSSGOptions off{};
+        if (!CopySupportedOptions(&options, off, true))
+            return PassPublicSet(*route, viewport, options);
+        off.mode = sl::DLSSGMode::eOff;
+        gSetOptionsSeen.store(true, std::memory_order_release);
+        static std::atomic<bool> logged{false};
+        if (!logged.exchange(true, std::memory_order_relaxed))
+            Log(L"XeMFG standalone: the game's DLSS Frame Generation is held at Off; its switch turns XeMFG on and off");
+        // Straight to the provider: PassPublicSet's RTX 30 options would follow the fixed multiplier instead.
+        ScopedInternalControlBypass bypass;
+        const sl::Result result = original(viewport, off);
+        gLastSetOptionsResult.store(static_cast<int32_t>(result), std::memory_order_relaxed);
+        RecordSetOptionsLifecycle(*route, viewport, false, result);
+        return HostControlResult(result);
+    }
+#endif
     if (!enabled)
     {
         gSetOptionsSeen.store(true, std::memory_order_release);
@@ -5704,7 +6065,8 @@ sl::Result HandlePublicSetOptions(uint32_t routeSlot,
         gSetOptionsSeen.store(true, std::memory_order_release);
         gLastSetOptionsResult.store(static_cast<int32_t>(result),
             std::memory_order_relaxed);
-        RecordSetOptionsLifecycle(*route, viewport, true, result);
+        // admitoff.1: a held request reached Streamline as Off.
+        RecordSetOptionsLifecycle(*route, viewport, !AmpereAdmissionHeld(), result);
         if (route->wrapperPatched && IsAcceptedControlResult(result)
             && !gFrameGenerationCreateObserved.load(
                 std::memory_order_acquire)
@@ -5904,6 +6266,26 @@ sl::Result HandleInternalSetData(uint32_t routeSlot,
         || source.mode == sl::DLSSGMode::eAuto
         || source.mode == sl::DLSSGMode::eDynamic;
     RecordGameFrameGenerationIntent(publicViewport, enabled);
+#if MFG_UNLOCK_XESS
+    // xemfgsa.1: as HandlePublicSetOptions, XeMFG standalone holds DLSS-G at Off (our copy leads the chain).
+    if (enabled && XemfgReplacesDlssg())
+    {
+        sl::DLSSGOptions off = CopyKnownOptions(source, false);
+        off.mode = sl::DLSSGMode::eOff;
+        sl::ViewportHandle viewportCopy{viewportValue};
+        viewportCopy.next = &off;
+        off.next = const_cast<sl::BaseStructure*>(inputs);
+        gSetOptionsSeen.store(true, std::memory_order_release);
+        sl::Result result;
+        {
+            ScopedInternalControlBypass bypass;
+            result = original(&viewportCopy, commandBuffer);
+        }
+        gLastSetOptionsResult.store(static_cast<int32_t>(result), std::memory_order_relaxed);
+        RecordSetOptionsLifecycle(*route, publicViewport, false, result);
+        return HostControlResult(result);
+    }
+#endif
     if (!enabled)
     {
         gSetOptionsSeen.store(true, std::memory_order_release);
@@ -5927,7 +6309,8 @@ sl::Result HandleInternalSetData(uint32_t routeSlot,
         gSetOptionsSeen.store(true, std::memory_order_release);
         gLastSetOptionsResult.store(static_cast<int32_t>(result),
             std::memory_order_relaxed);
-        RecordSetOptionsLifecycle(*route, publicViewport, true, result);
+        // admitoff.1: a held request reached Streamline as Off.
+        RecordSetOptionsLifecycle(*route, publicViewport, !AmpereAdmissionHeld(), result);
         if (!IsAcceptedControlResult(result) || !BridgeReady())
             return HostControlResult(result);
     }
@@ -6601,6 +6984,76 @@ uint32_t ResolvedDlssgControlRoute(void* resolved)
     return EnsureControlRoute(owner, discovered.path, discovered.generation, false, 0);
 }
 
+#if MFG_UNLOCK_XESS
+// xemfgsa.1: the game's latency markers and Reflex sleep, for XeMFG standalone's XeLL (frame ids and pacing). One
+// Streamline per process: the first resolved function of each kind is the one forwarded to.
+std::atomic<PFun_slPCLSetMarker*> gOriginalPclSetMarker{nullptr};
+using PFun_slReflexSetMarkerLegacy = sl::Result(uint32_t marker, const sl::FrameToken& frame);   // SL 2.0-2.4
+std::atomic<PFun_slReflexSetMarkerLegacy*> gOriginalReflexSetMarker{nullptr};
+std::atomic<PFun_slReflexSleep*> gOriginalReflexSleep{nullptr};
+
+sl::Result HookSlPclSetMarker(sl::PCLMarker marker, const sl::FrameToken& frame)
+{
+    auto* original = gOriginalPclSetMarker.load(std::memory_order_acquire);
+    if (!original) return sl::Result::eErrorNotInitialized;
+    const sl::Result result = original(marker, frame);
+    xess_d3d12::LatencyMarker(static_cast<uint32_t>(marker), static_cast<uint32_t>(frame));
+    return result;
+}
+
+sl::Result HookSlReflexSetMarker(uint32_t marker, const sl::FrameToken& frame)
+{
+    auto* original = gOriginalReflexSetMarker.load(std::memory_order_acquire);
+    if (!original) return sl::Result::eErrorNotInitialized;
+    const sl::Result result = original(marker, frame);
+    xess_d3d12::LatencyMarker(marker, static_cast<uint32_t>(frame));
+    return result;
+}
+
+sl::Result HookSlReflexSleep(const sl::FrameToken& frame)
+{
+    auto* original = gOriginalReflexSleep.load(std::memory_order_acquire);
+    if (!original) return sl::Result::eErrorNotInitialized;
+    // xemfgsa.2: while XeMFG generates, the frame sleeps in XeLL only (the driver's Reflex sleep would be a second
+    // pacer, judging the game by XeFG's extra presents: Subnautica 2 fell from 30 to 17 base fps).
+    if (xess_d3d12::ReplacesReflexSleep())
+    {
+        static std::atomic<bool> logged{false};
+        if (!logged.exchange(true, std::memory_order_relaxed))
+            Log(L"XeMFG standalone: the game's Reflex sleep goes to XeLL while XeMFG generates");
+        xess_d3d12::LatencySleep(static_cast<uint32_t>(frame), false);
+        return sl::Result::eOk;
+    }
+    const sl::Result result = original(frame);
+    xess_d3d12::LatencySleep(static_cast<uint32_t>(frame), result == sl::Result::eOk);
+    return result;
+}
+
+template<class Fn> void WrapFeatureFunction(std::atomic<Fn*>& slot, Fn* hook, void*& function, const wchar_t* name)
+{
+    auto* candidate = reinterpret_cast<Fn*>(function);
+    if (candidate == hook) return;
+    Fn* expected = nullptr;
+    const bool first = slot.compare_exchange_strong(expected, candidate, std::memory_order_acq_rel);
+    if (first || expected == candidate)
+    {
+        function = reinterpret_cast<void*>(hook);
+        if (first) Log(L"XeMFG standalone: %s wrapped (the game's latency markers and sleep reach XeLL)", name);
+    }
+}
+
+void WrapLatencyFunction(sl::Feature feature, const char* functionName, void*& function)
+{
+    if (!xess_d3d12::Enabled()) return;
+    if (feature == sl::kFeaturePCL && strcmp(functionName, "slPCLSetMarker") == 0)
+        WrapFeatureFunction(gOriginalPclSetMarker, &HookSlPclSetMarker, function, L"slPCLSetMarker");
+    else if (feature == sl::kFeatureReflex && strcmp(functionName, "slReflexSetMarker") == 0)
+        WrapFeatureFunction(gOriginalReflexSetMarker, &HookSlReflexSetMarker, function, L"slReflexSetMarker");
+    else if (feature == sl::kFeatureReflex && strcmp(functionName, "slReflexSleep") == 0)
+        WrapFeatureFunction(gOriginalReflexSleep, &HookSlReflexSleep, function, L"slReflexSleep");
+}
+#endif
+
 sl::Result HookSlGetFeatureFunction(
     sl::Feature feature, const char* functionName, void*& function)
 {
@@ -6613,6 +7066,10 @@ sl::Result HookSlGetFeatureFunction(
         InspectAlreadyLoadedModules();
 
     const sl::Result result = original(feature, functionName, function);
+#if MFG_UNLOCK_XESS
+    if (result == sl::Result::eOk && function && functionName)
+        WrapLatencyFunction(feature, functionName, function);
+#endif
     if (result != sl::Result::eOk || feature != sl::kFeatureDLSS_G)
         return result;
     if (function && functionName && strcmp(functionName, "slDLSSGSetOptions") == 0)
@@ -6712,6 +7169,27 @@ void LogFirstTags(const sl::ResourceTag* tags, uint32_t numTags, bool framed,
         LogFirstTagOfType(tags[index], framed, hasList);
 }
 
+// DLSS 5 Present stage with Block Hudless: frame generation must not
+// interpolate the game's unprocessed HUD-less image, so a copy of the tags
+// goes on with that tag cleared (a null resource untags it). Every consumer
+// below, ours included, sees the forwarded tags.
+const sl::ResourceTag* WithholdHudless(const sl::ResourceTag* tags, uint32_t numTags,
+    std::vector<sl::ResourceTag>& copy) noexcept
+{
+    if (!tags || numTags > 1024 || !dlss5::BlockHudless()) return tags;
+    bool tagged = false;
+    for (uint32_t index = 0; index < numTags; ++index)
+        tagged |= tags[index].type == sl::kBufferTypeHUDLessColor && tags[index].resource;
+    if (!tagged) return tags;
+    try { copy.assign(tags, tags + numTags); }
+    catch (...) { return tags; }
+    if (!dlss5::WithholdTags(copy.data(), numTags, sl::kBufferTypeHUDLessColor)) return tags;
+    static std::atomic<bool> logged{false};
+    if (!logged.exchange(true, std::memory_order_relaxed))
+        Log(L"DLSS 5 Present stage: the game's HUD-less tag is withheld from frame generation (Block Hudless)");
+    return copy.data();
+}
+
 sl::Result HookSlSetTag(const sl::ViewportHandle& viewport,
     const sl::ResourceTag* tags, uint32_t numTags, sl::CommandBuffer* cmdBuffer)
 {
@@ -6720,6 +7198,8 @@ sl::Result HookSlSetTag(const sl::ViewportHandle& viewport,
         return sl::Result::eErrorNotInitialized;
     if (!numTags)
         return sl::Result::eOk;
+    std::vector<sl::ResourceTag> forwarded;
+    tags = WithholdHudless(tags, numTags, forwarded);
     const auto batch = PrepareUiResourceTags(viewport, tags, numTags, false, 0);
     const sl::Result result = original(viewport, tags, numTags, cmdBuffer);
     gSetTagCalls.fetch_add(1, std::memory_order_relaxed);
@@ -6727,6 +7207,10 @@ sl::Result HookSlSetTag(const sl::ViewportHandle& viewport,
     {
         RecordUiResourceTags(batch);
         LogFirstTags(tags, numTags, false, cmdBuffer != nullptr);
+#if MFG_UNLOCK_XESS
+        // xemfgsa.1: XeMFG standalone's inputs (the latest frame token's).
+        xess_d3d12::StreamlineTags(static_cast<uint32_t>(viewport), false, 0, tags, numTags, cmdBuffer);
+#endif
     }
     return result;
 }
@@ -6740,6 +7224,8 @@ sl::Result HookSlSetTagForFrame(const sl::FrameToken& frame,
         return sl::Result::eErrorNotInitialized;
     if (!numTags)
         return sl::Result::eOk;
+    std::vector<sl::ResourceTag> forwarded;
+    tags = WithholdHudless(tags, numTags, forwarded);
     const auto batch = PrepareUiResourceTags(viewport, tags, numTags, true,
         static_cast<uint32_t>(frame));
     const sl::Result result = original(frame, viewport, tags, numTags, cmdBuffer);
@@ -6748,7 +7234,28 @@ sl::Result HookSlSetTagForFrame(const sl::FrameToken& frame,
     {
         RecordUiResourceTags(batch);
         LogFirstTags(tags, numTags, true, cmdBuffer != nullptr);
+#if MFG_UNLOCK_XESS
+        // xemfgsa.1: XeMFG standalone's inputs.
+        xess_d3d12::StreamlineTags(static_cast<uint32_t>(viewport), true, static_cast<uint32_t>(frame), tags, numTags,
+            cmdBuffer);
+#endif
     }
+    return result;
+}
+
+// xemfgsa.1: the game's per-frame camera (jitter, motion-vector scale, reset, depth convention, near/far/FOV) for
+// XeMFG standalone, after Streamline accepted it.
+sl::Result HookSlSetConstants(const sl::Constants& values, const sl::FrameToken& frame,
+    const sl::ViewportHandle& viewport)
+{
+    auto* original = gOriginalSetConstants.load(std::memory_order_acquire);
+    if (!original)
+        return sl::Result::eErrorNotInitialized;
+    const sl::Result result = original(values, frame, viewport);
+#if MFG_UNLOCK_XESS
+    if (result == sl::Result::eOk)
+        xess_d3d12::StreamlineConstants(values, static_cast<uint32_t>(frame), static_cast<uint32_t>(viewport));
+#endif
     return result;
 }
 
@@ -6920,10 +7427,11 @@ sl::Result HookOptiScalerSlSetD3DDevice(void* device)
 }
 
 // sl::VulkanInfo v1-v3 carry the same device and physical-device prefix.
-void ReadVulkanInfo(const VulkanInfoPrefix& info, void*& physicalDevice, void*& device) noexcept
+void ReadVulkanInfo(const VulkanInfoPrefix& info, void*& physicalDevice, void*& device, void*& instance) noexcept
 {
     physicalDevice = nullptr;
     device = nullptr;
+    instance = nullptr;
     __try
     {
         if (info.structVersion >= sl::kStructVersion1
@@ -6931,12 +7439,14 @@ void ReadVulkanInfo(const VulkanInfoPrefix& info, void*& physicalDevice, void*& 
         {
             physicalDevice = info.physicalDevice;
             device = info.device;
+            instance = info.instance;
         }
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
         physicalDevice = nullptr;
         device = nullptr;
+        instance = nullptr;
     }
 }
 
@@ -6952,13 +7462,18 @@ sl::Result HookSlSetVulkanInfo(const VulkanInfoPrefix& info)
     InvalidateUiInputEvidence();
     void* physicalDevice = nullptr;
     void* device = nullptr;
-    ReadVulkanInfo(info, physicalDevice, device);
+    void* instance = nullptr;
+    ReadVulkanInfo(info, physicalDevice, device, instance);
     const bool verified = physicalDevice
         && gpu_backend::ObserveVulkanPhysicalDevice(physicalDevice);
     gVulkanAdapterVerified.store(verified, std::memory_order_release);
     if (verified)
     {
+        // vkdlss5.1: Streamline names the game's VkDevice here (its NGX Init is the project-ID form).
+        dlss5::vulkan::ObserveInit(instance, physicalDevice, device);
         if (NativeDlssgPresetGpu()) dlssg_preset::Prepare();
+        // vkpreset.1: the SR/RR DRS hook, before NVIDIA's Vulkan Init reads those keys.
+        dlss_sr::PrepareForVulkan();
         temporal_interval_trace::SetEnabled(true);
         if (UseAmpere()) ampere_backend::ObserveVulkanDevice(device, true);
         gModuleInventoryDirty.store(true, std::memory_order_release);
@@ -7627,9 +8142,43 @@ sl::Result HookSlUpgradeInterface(void** baseInterface)
         return sl::Result::eErrorNotInitialized;
     const bool owned = baseInterface
         && single_overlay::OwnsInterface(*baseInterface);
+    // diag171.1: every upgrade (first 32): who asked, what went in, what came
+    // back. Shows whether the swap chain's factory went through Streamline.
+    void* const caller = _ReturnAddress();
+    void* const input = baseInterface ? *baseInterface : nullptr;
+    const bool describe = gSlUpgradeInterfaceCalls.load(std::memory_order_relaxed) < 32;
+    wchar_t inputText[256]{};
+    if (describe)
+        single_overlay::DescribeInterface(input, inputText, 256);
     const sl::Result result = original(baseInterface);
     const uint64_t call =
         gSlUpgradeInterfaceCalls.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (describe && call <= 32)
+    {
+        void* const output = baseInterface ? *baseInterface : nullptr;
+        wchar_t outputText[256]{};
+        if (output != input)
+            single_overlay::DescribeInterface(output, outputText, 256);
+        else
+            wcscpy_s(outputText, L"unchanged");
+        HMODULE callerModule = nullptr;
+        wchar_t callerPath[MAX_PATH]{};
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+                | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                static_cast<LPCWSTR>(caller), &callerModule)
+            && callerModule)
+            GetModuleFileNameW(callerModule, callerPath, MAX_PATH);
+        const wchar_t* callerLeaf = wcsrchr(callerPath, L'\\');
+        Log(L"Streamline slUpgradeInterface call=%llu result=%d "
+            L"ownedInput=%d caller=%ls+0x%llX input={%ls} output={%ls}",
+            static_cast<unsigned long long>(call), static_cast<int>(result),
+            owned ? 1 : 0,
+            callerLeaf ? callerLeaf + 1 : (callerPath[0] ? callerPath : L"(none)"),
+            static_cast<unsigned long long>(callerModule
+                ? reinterpret_cast<uintptr_t>(caller)
+                    - reinterpret_cast<uintptr_t>(callerModule) : 0),
+            inputText, outputText);
+    }
     if (result == sl::Result::eOk && !owned && baseInterface && *baseInterface
         && single_overlay::WrapUpgradedInterface(baseInterface))
     {
@@ -7907,12 +8456,23 @@ bool TryInstallSlInitEntryDetour(HMODULE interposer, void* resolvedTarget)
     }
     const entry_detour::Snapshot state = entry_detour::ReadSnapshot(
         entry_detour::Kind::eSlInit);
-    Log(L"Streamline slInit entry detour: installed=%d current=%d "
+    LogOnChange(L"Streamline slInit entry detour: installed=%d current=%d "
         L"cachedPointersCovered=%d failure=%u targetRva=0x%X path=%s",
         installed, state.current, state.cachedPointersCovered,
         static_cast<uint32_t>(state.failure), state.targetRva,
         path.c_str());
     return installed;
+}
+
+// The NGX Vulkan Init exports (the runtime's and the providers' adapter entries).
+bool IsNgxVulkanInitEntry(const char* name) noexcept
+{
+    constexpr const char* kNames[] = {"NVSDK_NGX_VULKAN_Init", "NVSDK_NGX_VULKAN_Init_Ext",
+        "NVSDK_NGX_VULKAN_Init_Ext2", "NVSDK_NGX_VULKAN_Init_with_ProjectID",
+        "NVSDK_NGX_VULKAN_Init_ProjectID", "NVSDK_NGX_VULKAN_Init_ProjectID_Ext"};
+    for (const char* entry : kNames)
+        if (std::strcmp(name, entry) == 0) return true;
+    return false;
 }
 
 FARPROC WINAPI HookMainGetProcAddress(HMODULE module, LPCSTR functionName)
@@ -7923,8 +8483,12 @@ FARPROC WINAPI HookMainGetProcAddress(HMODULE module, LPCSTR functionName)
         return nullptr;
     FARPROC resolved = original(module, functionName);
     resolved = fault_capture::ResolveProc(module, functionName, resolved);
+    // The NGX SDK library in the executable loads the runtime and calls its
+    // Init straight after resolving it: install the module's NGX entries
+    // (Init pre-calls included) now, not on the discovery worker. vkpreset.1:
+    // the Vulkan Init entries too; their pre-call verifies the VkPhysicalDevice.
     if (resolved && reinterpret_cast<uintptr_t>(functionName) > 0xFFFFu
-        && ngx_initialization::IsEntry(functionName))
+        && (ngx_initialization::IsEntry(functionName) || IsNgxVulkanInitEntry(functionName)))
         InspectLoadedModule(module, LoadedModulePath(module));
     if (resolved && NativeDlssgPresetGpu()) dlssg_preset::PrepareForExport(module, functionName);
     if (resolved) single_overlay::application_imports::ArmModule(module);
@@ -8002,6 +8566,13 @@ FARPROC WINAPI HookMainGetProcAddress(HMODULE module, LPCSTR functionName)
             Log(L"Streamline UI tag dynamic gateway installed: slSetTagForFrame path=%s",
                 LoadedModulePath(module).c_str());
         return reinterpret_cast<FARPROC>(&HookSlSetTagForFrame);
+    }
+    if (std::strcmp(functionName, "slSetConstants") == 0)
+    {
+        auto* candidate = reinterpret_cast<PFun_slSetConstants*>(resolved);
+        if (candidate != &HookSlSetConstants)
+            gOriginalSetConstants.store(candidate, std::memory_order_release);
+        return reinterpret_cast<FARPROC>(&HookSlSetConstants);
     }
     if (std::strcmp(functionName, "slUpgradeInterface") == 0)
     {
@@ -8301,6 +8872,16 @@ bool InstallUiTagHooks()
     {
         gOriginalSetTagForFrame.store(
             reinterpret_cast<PFun_slSetTagForFrame*>(frameOriginal),
+            std::memory_order_release);
+    }
+
+    // xemfgsa.1: the camera constants beside the tags (XeMFG standalone; forwards unchanged otherwise).
+    void* constantsOriginal = nullptr;
+    HookMainExecutableImport("sl.interposer.dll", "slSetConstants",
+        reinterpret_cast<void*>(&HookSlSetConstants), constantsOriginal);
+    if (constantsOriginal)
+    {
+        gOriginalSetConstants.store(reinterpret_cast<PFun_slSetConstants*>(constantsOriginal),
             std::memory_order_release);
     }
 
@@ -9258,10 +9839,16 @@ ModuleRecord InspectLoadedModule(HMODULE module, const std::wstring& suppliedPat
         TryInstallNgxRuntimeEvaluateEntryDetour(
             snapshot.module, snapshot.path, snapshot.generation);
         // RTX 30 systems: the runtime's Vulkan Release, requirements and
-        // capability parameters, before its Vulkan Create entries.
+        // capability parameters, before its Vulkan Create entries. RTX 40/50
+        // (vkpreset.1): its Vulkan Release, for live preset switching.
         if (IsNgxRuntimeModule(snapshot.module))
-            ampere_backend::InstallVulkanRoute(
+        {
+            const bool vulkanRoute = ampere_backend::InstallVulkanRoute(
                 snapshot.module, snapshot.path.c_str(), snapshot.generation, true);
+            if (NativeDlssgPresetGpu())
+                LogOnChange(L"NGX Vulkan runtime ReleaseFeature hook (live preset switching): "
+                    L"installed=%d path=%s", vulkanRoute, snapshot.path.c_str());
+        }
         TryInstallNgxRuntimeVulkanCreateEntryDetours(
             snapshot.module, snapshot.path, snapshot.generation);
         TryInstallNgxRuntimeVulkanEvaluateEntryDetour(
@@ -9517,11 +10104,71 @@ bool UnicodeNameEquals(const UNICODE_STRING* name, const wchar_t* expected) noex
         && _wcsnicmp(name->Buffer, expected, length) == 0;
 }
 
+// alpha.15 (B4-18): who maps nvngx_dlssnr.dll (NVIDIA's NGX runtime, another DLSS 5 add-on, or our direct route).
+// Under the loader lock only the raw return addresses and the path are copied; the worker describes them.
+struct ProviderLoad
+{
+    std::atomic<bool> ready{false};
+    bool logged = false;
+    void* base = nullptr;
+    USHORT frames = 0;
+    void* stack[16]{};
+    wchar_t path[MAX_PATH]{};
+};
+std::array<ProviderLoad, 4> gProviderLoads;
+std::atomic<uint32_t> gProviderLoadCount{0};
+
+void CaptureProviderLoad(const MfgLdrDllNotificationData& data) noexcept
+{
+    const uint32_t index = gProviderLoadCount.fetch_add(1, std::memory_order_acq_rel);
+    if (index >= gProviderLoads.size()) return;
+    auto& load = gProviderLoads[index];
+    load.base = data.loaded.dllBase;
+    load.frames = RtlCaptureStackBackTrace(1, static_cast<DWORD>(std::size(load.stack)), load.stack, nullptr);
+    const UNICODE_STRING* name = data.loaded.fullDllName;
+    if (name && name->Buffer)
+        wcsncpy_s(load.path, name->Buffer, std::min<size_t>(name->Length / sizeof(wchar_t), MAX_PATH - 1));
+    load.ready.store(true, std::memory_order_release);
+}
+
+void LogProviderLoads()
+{
+    const uint32_t count = std::min<uint32_t>(gProviderLoadCount.load(std::memory_order_acquire),
+        static_cast<uint32_t>(gProviderLoads.size()));
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        auto& load = gProviderLoads[i];
+        if (load.logged || !load.ready.load(std::memory_order_acquire)) continue;
+        load.logged = true;
+        std::wstring stack, loader;
+        for (USHORT frame = 0; frame < load.frames; ++frame)
+        {
+            wchar_t path[MAX_PATH]{}, text[MAX_PATH + 32]{};
+            HMODULE module = nullptr;
+            const bool named = GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                static_cast<LPCWSTR>(load.stack[frame]), &module) && module && GetModuleFileNameW(module, path, MAX_PATH);
+            const wchar_t* name = named ? (wcsrchr(path, L'\\') ? wcsrchr(path, L'\\') + 1 : path) : L"?";
+            swprintf_s(text, L"%s%ls+0x%llX", frame ? L" < " : L"", name, static_cast<unsigned long long>(
+                static_cast<const char*>(load.stack[frame]) - reinterpret_cast<const char*>(module)));
+            stack += text;
+            // The loading module: the first frame outside the loader itself.
+            if (named && loader.empty() && _wcsicmp(name, L"ntdll.dll") && _wcsicmp(name, L"KERNELBASE.dll")
+                && _wcsicmp(name, L"KERNEL32.DLL"))
+                loader = path;
+        }
+        Log(L"DLSS 5 provider mapped: nvngx_dlssnr.dll base=0x%p path=%s loader=%s stack=%s", load.base, load.path,
+            loader.empty() ? L"-" : loader.c_str(), stack.c_str());
+    }
+}
+
 void CALLBACK OnDllNotification(
     ULONG reason, const MfgLdrDllNotificationData* data, void*)
 {
     static constexpr ULONG kDllLoaded = 1;
     static constexpr ULONG kDllUnloaded = 2;
+    if (data && reason == kDllLoaded && data->loaded.dllBase
+        && UnicodeNameEquals(data->loaded.baseDllName, L"nvngx_dlssnr.dll"))
+        CaptureProviderLoad(*data);
     if (data && reason == kDllLoaded && data->loaded.dllBase
         && UnicodeNameEquals(data->loaded.baseDllName, L"sl.interposer.dll"))
     {
@@ -9571,27 +10218,110 @@ bool RegisterDllNotification()
     return registered;
 }
 
+#if MFG_UNLOCK_SESSION_DIAGNOSTICS
+// diag.1: what the backend was doing, logged when it changes and once a minute with the counters; the crash and
+// exit records repeat the last sample.
+void LogSessionState(const ControlConfig& control, bool heartbeat)
+{
+    wchar_t state[512]{};
+    int used = swprintf_s(state, L"route=%hs ready=%d routeFailure=%u control=%s %ux gameFG=%d appliedFG=%d restart=%d",
+        PatchRouteName(), BridgeReady(), gUniversalRouteFailure.load(std::memory_order_acquire),
+        control.followGame ? L"follow" : control.dynamic ? L"dynamic" : L"fixed", control.multiplier,
+        gGameFrameGenerationOn.load(std::memory_order_acquire), gAppliedFrameGenerationOn.load(std::memory_order_acquire),
+        gRestartRequired.load(std::memory_order_acquire));
+    wchar_t counters[512]{};
+    int counted = swprintf_s(counters, L"setOptions=%llu getState=%llu ngxCreate=%llu fgCreate=%llu ngxEvaluate=%llu "
+        L"presented=%u",
+        static_cast<unsigned long long>(gSetOptionsCalls.load(std::memory_order_relaxed)),
+        static_cast<unsigned long long>(gGetStateCalls.load(std::memory_order_relaxed)),
+        static_cast<unsigned long long>(gNgxCreateCalls.load(std::memory_order_relaxed)),
+        static_cast<unsigned long long>(gNgxFrameGenerationCreateCalls.load(std::memory_order_relaxed)),
+        static_cast<unsigned long long>(gNgxEvaluateCalls.load(std::memory_order_relaxed)),
+        gActualFramesPresented.load(std::memory_order_relaxed));
+#if MFG_UNLOCK_XESS
+    const auto xess = xess_mod::ReadSnapshot();
+    if (xess && xess->providerLoaded && used > 0 && counted > 0)
+    {
+        swprintf_s(state + used, _countof(state) - used, L" xefg=%s%s%s game=%d applied=%u capacity=%u model=%u "
+            L"result=%d fgResult=%d", xess->initialized ? L"init" : L"-", xess->enabled ? L"+on" : L"",
+            xess->composition ? L"+ui" : L"", xess->gameEnabled, xess->applied, xess->capacity, xess->modelActive,
+            xess->lastResult, xess->lastFrameGenResult);
+        swprintf_s(counters + counted, _countof(counters) - counted, L" xefgAppFrames=%llu xefgPresented=%u",
+            static_cast<unsigned long long>(xess->appFrames), xess->framesPresented);
+    }
+#endif
+    if (session_diagnostics::PublishState(state, counters))
+        Log(L"State: %s", state);
+    else if (heartbeat)
+        Log(L"State heartbeat: %s | %s suppressedRepeats=%llu", state, counters,
+            session_diagnostics::SuppressedRepeats());
+}
+#endif
+
+#if MFG_UNLOCK_SESSION_DIAGNOSTICS
+#define MFG_SESSION_DIAGNOSTICS_LABEL L"+diag.1"
+#else
+#define MFG_SESSION_DIAGNOSTICS_LABEL L""
+#endif
+
+// alpha.15 (B4-03/B4-10): the worker's start-up steps, logged directly (not queued) and named by the start-up hang
+// watchdog. Enshrouded and DOOM TDA standalone logs ended 77 ms in with no line saying which step stalled.
+void StartupStep(const wchar_t* step)
+{
+    Log(L"Worker start-up: %s", step);
+#if MFG_UNLOCK_SESSION_DIAGNOSTICS
+    session_diagnostics::StartupStep(step);
+#endif
+}
+
 DWORD WINAPI PatchWorker(void* context)
 {
     EnsureAmpereFeatureLifetimeObserver();
     const DWORD pid = GetCurrentProcessId();
     // The game folder, or %TEMP% when it cannot be written.
     const std::wstring& logDirectory = diagnostic_paths::LogDirectory();
-    const std::wstring logPath=diagnostic_paths::RuntimeLog();
+    std::wstring logPath=diagnostic_paths::RuntimeLog();
+#if MFG_UNLOCK_SESSION_DIAGNOSTICS
+    std::wstring busyLog;
+    DWORD busyError = 0;
+#endif
     if (!logPath.empty())
     {
         // Keep the previous session's log (a crashed session is usually
         // followed by a relaunch) beside the new one as *.previous.log.
-        const std::wstring previousLog = logPath.substr(0, logPath.size() - 4) + L".previous.log";
+        // logkeep.1: and the one before as *.previous2.log. A launcher
+        // stub of the same exe (Death Stranding 2, 0.3 s, no device) rotated
+        // the session that had worked out of the only previous slot.
+        const std::wstring stem = logPath.substr(0, logPath.size() - 4);
+        const std::wstring previousLog = stem + L".previous.log";
+        MoveFileExW(previousLog.c_str(), (stem + L".previous2.log").c_str(), MOVEFILE_REPLACE_EXISTING);
         MoveFileExW(logPath.c_str(), previousLog.c_str(), MOVEFILE_REPLACE_EXISTING);
         gLog = _wfsopen(logPath.c_str(), L"w, ccs=UTF-8", _SH_DENYWR);
+#if MFG_UNLOCK_SESSION_DIAGNOSTICS
+        // diag.1: a log still held open (a crashed session's handles closing, a scan on close) would leave this
+        // session without any log; it writes beside it under its process id instead.
+        if (!gLog)
+        {
+            busyError = GetLastError();
+            busyLog = logPath;
+            logPath = logPath.substr(0, logPath.size() - 4) + L"." + std::to_wstring(pid) + L".log";
+            gLog = _wfsopen(logPath.c_str(), L"w, ccs=UTF-8", _SH_DENYWR);
+        }
+#endif
     }
     gLogReady.store(gLog != nullptr, std::memory_order_release);
-    single_module::DrainLog(&MidpointLog);
+    single_module::DrainLog(&QueuedLog);
+#if MFG_UNLOCK_SESSION_DIAGNOSTICS
+    // diag.1: the environment header, then crash and exit records for the rest of the session.
+    session_diagnostics::Start(gLog, logPath.c_str(), &MidpointLog, &single_module::TryDrainLog);
+    if (gLog && !busyLog.empty())
+        Log(L"Runtime log %s could not be opened (error %lu); this session logs to %s instead", busyLog.c_str(),
+            busyError, logPath.c_str());
+#endif
     fault_capture::Initialize(&MidpointLog);
     // Opt-in; before the game reads its adapter name for its settings.
     gpu_name_override::ArmFromSettings();
-    single_module::DrainLog(&MidpointLog);
+    single_module::DrainLog(&QueuedLog);
 
     const std::wstring mappingName = MfgUnlockObjectName(L"Status", pid);
     HANDLE mapping = OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, mappingName.c_str());
@@ -9619,21 +10349,28 @@ DWORD WINAPI PatchWorker(void* context)
     // Never delete a file another live process may still own.
     temporal_interval_trace::Initialize(logDirectory.c_str(), executablePath.c_str());
     ControlConfig savedControl = ReadInitialControl();
-    optiscaler_host::SetUiOptIn(savedControl.optiScalerUi == 1);
+    optiscaler_host::SetUiMode(static_cast<optiscaler_host::UiMode>(savedControl.optiScalerUi));
     bool uiDelegated = optiscaler_host::UiDelegated();
     const ControlConfig initialControl = EffectiveControl(savedControl);
     StoreControl(initialControl);
+#if MFG_UNLOCK_XESS
+    // vkxefg.1: before the game's first Vulkan instance (its API version is raised only while the harness-only
+    // standalone host is on; OptiScaler raises it for its XeFG output).
+    ConfigureXemfg(initialControl);
+#endif
     {
         const auto host = optiscaler_host::Read();
         if (host.detected)
             Log(L"OptiScaler: route=%hs uiOwner=%s version=%s (%s) path=%s pluginCaller=%d",
-                optiscaler_host::RouteName(host.route), uiDelegated ? L"optiscaler" : L"rtxmfg",
+                optiscaler_host::RouteName(host.route), host.uiHidden ? L"optiscaler" : uiDelegated ? L"shared" : L"rtxmfg",
                 host.productVersion, host.fileVersion, host.path, host.pluginCallerAccepted);
     }
 #if MFG_UNLOCK_XESS
     bool xessStarted = false;
     const auto startXess = [&] {
         xessStarted = true;
+        single_module::DrainLog(&QueuedLog);
+        StartupStep(L"XeSS route");
         const bool xessImportsReady = xess_mod::InstallImports(static_cast<HMODULE>(context));
         if (!xessImportsReady)
             Log(L"XESS SDK discovery disabled: backend module ownership/pin verification failed.");
@@ -9641,6 +10378,9 @@ DWORD WINAPI PatchWorker(void* context)
         xess_mod::ConfigureModel(initialControl.xessModel, OptiScalerHostModel());
         if (xessImportsReady)
             xess_mod::DiscoverSdkModules();
+        // asi_start, sdk_route_requires_optiscaler and vk_host_config reach the file before the next step.
+        single_module::DrainLog(&QueuedLog);
+        StartupStep(L"XeSS route started");
     };
     // xefgrace.1: under OptiScaler the XeFG route comes first. OptiScaler resolves its XeFG
     // exports before plug-ins load and can create its context a few hundred ms after start
@@ -9672,7 +10412,7 @@ DWORD WINAPI PatchWorker(void* context)
     LogAmpereArchitectureDetection(ampere_provider_arch::DetectAndArm());
     Log(L"Diagnostics reused per executable: log=%s status=%s processBirth=%llu executable=%s",
         logPath.c_str(),gStatusPath.c_str(),static_cast<unsigned long long>(diagnostic_paths::ProcessBirth()),executablePath.c_str());
-    Log(L"RTXMFG build=1.6.1 source=v1.5-flipmeter-20261006 base=intel6.6+optiscaler.1+ring2.3+dltb.2+slhost.1+flipmeter.18+hairdiscovery.1.4.2+reflexfg.2+capture.2+optixell.1+optiout.1+optipace.1+model2x.1+mvfill.1+uioff.1+uistable.1+mfgport.1+hudmatch.1+optiport.1+optcapture.1+optiportdefault.1+xefgdiscovery.1+slrestart.1+nvapipin.1+modeltoggle.1+uirefresh.1+noport.1+optiredirect.1+reflexport.1+portback.1+optionly.1+delayload.1+rtx30.3+xellungated.1+specialk.1a+themidaimports.1+modelchoice.1+xefgmodel.1+splat.2+scenechange.1+xellinput.1+rtx30sl2732.1+mfgunlocker.1+presetc.3+rtx30presetc.1+rtx30stable.1+rtx30ota.1+cudawrapped.2+l10n.7+pin.4+turing.1+sm120.1+unet.1+nvlist.1+rtx30nvapi.1+rtx30buffers.1+gpuname.1+arcnative.3+rtx30flip.2+cudaowner.1+dredtable.1+optidlssg.1+xefgflipmeter.2+releaseleak.1+flipkey.1+cap6.1+optirtx30.1+livepreset.2+routegen.1+hitch.1+xefg134.1+rtx30vulkan.1+vkholes.1+vkvsync.1+vkfps.1+srpreset.1+srpreset.2+srpreset.3+srpreset.4+seam.1+scene.1+logpath.1+rtx20dlssg.1+slinitloop.1+lean160.1+xefgrace.1+latency.1+livepresetall.1+rtx50.1+slinitfg.1+slinitfg.2+psorefused.1 outputPullMask=%d occupancyHint=%d "
+    Log(L"RTXMFG build=1.7.0 source=v1.5-flipmeter-20261006 base=intel6.6+optiscaler.1+ring2.3+dltb.2+slhost.1+flipmeter.18+hairdiscovery.1.4.2+reflexfg.2+capture.2+optixell.1+optiout.1+optipace.1+model2x.1+mvfill.1+uioff.1+uistable.1+mfgport.1+hudmatch.1+optiport.1+optcapture.1+optiportdefault.1+xefgdiscovery.1+slrestart.1+nvapipin.1+modeltoggle.1+uirefresh.1+noport.1+optiredirect.1+reflexport.1+portback.1+optionly.1+delayload.1+rtx30.3+xellungated.1+specialk.1a+themidaimports.1+modelchoice.1+xefgmodel.1+splat.2+scenechange.1+xellinput.1+rtx30sl2732.1+mfgunlocker.1+presetc.3+rtx30presetc.1+rtx30stable.1+rtx30ota.1+cudawrapped.2+l10n.8+pin.4+turing.1+sm120.1+unet.1+nvlist.1+rtx30nvapi.1+rtx30buffers.1+gpuname.1+arcnative.3+rtx30flip.2+cudaowner.1+dredtable.1+optidlssg.1+xefgflipmeter.2+releaseleak.1+flipkey.1+cap6.1+optirtx30.1+livepreset.2+routegen.1+hitch.1+xefg134.1+rtx30vulkan.1+vkholes.1+vkvsync.1+vkfps.1+srpreset.1+srpreset.2+srpreset.3+srpreset.4+seam.1+scene.1+logpath.1+rtx20dlssg.1+slinitloop.1+lean160.1+xefgrace.1+latency.1+livepresetall.1+rtx50.1+slinitfg.1+slinitfg.2+psorefused.1+ring2.4+flipqueue.2+vsync.1+coupled.1+wine.1+follow.1+prodtarget.1+menucap.1+vkpreset.1+vsync.2+gatepass.1+vkxefg.1+vkxefg.2+vkxefg.3+vkxefg.4+vkxefg.5+hostgate.1+menu16.1+amdkeep.1+rtx30presetstatus.1+vkswapext.1+presentqueue.1+lockin.1+logkeep.1+amdflip.1+amdqueue.1+presenterlead.1+cudafault.1+mailbox.1+stallguard.1+reflexgate.1+slinitfg.3+dlaalabel.1+crashhost.1+ngxforward.1+vkreflex.1+amdcount.1+hdrpq.1+amdlog.1+amdqueue.2+amdqueue.3+heldrate.1+dlss5.1+dlss5queue.1+dlss5tab.1+dlss5inputs.1+dlss5present.1+dlss5layout.1+dlss5auto.1+dlss5autolabel.1+dlss5rgbamv.1+dlss5unwrap.2+dlss5optiui.1+dlss5optichain.2+dlss5optikey.1+dlss5compare.5+dlss5unwrap.3+dlss5inputs.2+vkdlss5.1+xefgmenu.1+dlss5boost.1+dlss5boost.2+dlss5boost.3+dlss5boost.4+dlss5dots.1+diag171.1+ringcap.1+xemfgsa.1+xemfgsa.2+xemfgsa.3+xemfgsa.4+xemfgsa.5+xemfgsa.6+dlss5adv.1+hairshade.1+hairtrans.3+hairbounce.1+hairalbedo.1+hairtrans.4+hairrefl.1+hairdebug.1+hairstencil.1+hairfold.1+dlss5halfrate.1+dlss5gate.1+vkstages.1+xemfghint.1+underlinetabs.1+halfrateoff.1+firstready.1+interopmenu.3+halfgrid.1+menupoll.1+autoscale.1+autoscale.2+outputwait.1+menufallback.1+dlss5owner.1+runtimesearch.1+startwatch.1+seamstats.1+dlss5cost.1+dx11note.1+faultalive.1+exposureoff.1+amd6x.1+bimodal.1+hdrbridge.1+optiuirevert.1+deepheld.1+smallchain.1+factoryhook.1+smallchain.2+flipkeyoff.1+optimenu.1+admitoffmin.1" MFG_SESSION_DIAGNOSTICS_LABEL L" outputPullMask=%d occupancyHint=%d "
         L"uiInputs=framed-observations uiRecomposition=game-managed",
         MFG_UNLOCK_OUTPUT_PULL_MASK_ONLY,
         MFG_UNLOCK_OUTPUT_PULL_MASK_OCCUPANCY);
@@ -9763,10 +10503,14 @@ DWORD WINAPI PatchWorker(void* context)
     uint32_t xessDiscoveryTicks = 0;
 #endif
     reflex_control::SetRuntimeValidator(&ReflexRuntimeCurrent);
+    StartupStep(L"Reflex discovery");
     DiscoverReflexModule();
+    StartupStep(L"presentation policy");
     UpdatePresentationPolicy(activeControl);
+    StartupStep(L"bridge status");
     if (!WriteBridgeStatus(activeControl, pid))
         Log(L"Could not publish CET bridge status file: %s", gStatusPath.c_str());
+    StartupStep(L"watching the control file");
 
     // The active frontend writes its selected config path when the user changes
     // the mode. Watch it off the presenting thread and atomically publish
@@ -9775,10 +10519,40 @@ DWORD WINAPI PatchWorker(void* context)
     uint32_t inventoryTicks = 0;
     bool previousReady = BridgeReady();
     std::string previousRoute = PatchRouteName();
+#if MFG_UNLOCK_SESSION_DIAGNOSTICS
+    uint32_t stateSeconds = 0;
+    LogSessionState(activeControl, false);
+    // alpha.15 (B4-02): whether a GPU driver's first-chance fault ended the session (X4: the log just stopped).
+    bool faultAliveLogged = false, faultSeen = false;
+    uint64_t faultPresents = 0;
+#endif
     for (;;)
     {
         Sleep(100);
-        single_module::DrainLog(&MidpointLog);
+        single_module::DrainLog(&QueuedLog);
+        LogProviderLoads();
+#if MFG_UNLOCK_SESSION_DIAGNOSTICS
+        ULONGLONG faultTick = 0;
+        ULONG64 faultAddress = 0;
+        if (!faultAliveLogged && session_diagnostics::DriverFault(faultTick, faultAddress))
+        {
+            if (!faultSeen)
+            {
+                faultSeen = true;
+                faultPresents = gTelemetryPresents.load(std::memory_order_relaxed);
+            }
+            const ULONGLONG now = GetTickCount64();
+            if (now >= faultTick + 5000)
+            {
+                faultAliveLogged = true;
+                wchar_t where[160]{};
+                session_diagnostics::DescribeAddress(faultAddress, where, _countof(where));
+                Log(L"Still running %.1f s after the first-chance fault at %s; presents since: %llu",
+                    double(now - faultTick) / 1000.0, where, static_cast<unsigned long long>(
+                        gTelemetryPresents.load(std::memory_order_relaxed) - faultPresents));
+            }
+        }
+#endif
         ++inventoryTicks;
         if (gModuleInventoryDirty.exchange(false, std::memory_order_acq_rel))
         {
@@ -9787,6 +10561,7 @@ DWORD WINAPI PatchWorker(void* context)
             DiscoverReflexModule();
 #if MFG_UNLOCK_XESS
             xess_mod::DiscoverSdkModules();
+            xess_d3d12::DiscoverUpscalers();   // xemfgsa.1: XeSS SR and FidelityFX API modules
             xessDiscoveryTicks = 0;
 #endif
         }
@@ -9796,6 +10571,7 @@ DWORD WINAPI PatchWorker(void* context)
         {
             xessDiscoveryTicks = 0;
             xess_mod::DiscoverSdkModules();
+            xess_d3d12::DiscoverUpscalers();
         }
 #endif
         FILETIME latestWriteTime{};
@@ -9811,13 +10587,14 @@ DWORD WINAPI PatchWorker(void* context)
             else
             {
                 savedControl = control;
-                optiscaler_host::SetUiOptIn(control.optiScalerUi == 1);
+                optiscaler_host::SetUiMode(static_cast<optiscaler_host::UiMode>(control.optiScalerUi));
                 uiDelegated = optiscaler_host::UiDelegated();
                 control = EffectiveControl(control);
                 const bool mfgChanged = !SameMfgControl(activeControl, control);
                 activeControl = control;
 #if MFG_UNLOCK_XESS
                 xess_mod::ConfigureModel(control.xessModel, OptiScalerHostModel());
+                ConfigureXemfg(control);
 #endif
                 if (mfgChanged)
                     StoreControl(activeControl);
@@ -9849,6 +10626,7 @@ DWORD WINAPI PatchWorker(void* context)
             activeControl = control;
 #if MFG_UNLOCK_XESS
             xess_mod::ConfigureModel(control.xessModel, OptiScalerHostModel());
+            ConfigureXemfg(control);
 #endif
             if (mfgChanged)
                 StoreControl(activeControl);
@@ -9856,7 +10634,7 @@ DWORD WINAPI PatchWorker(void* context)
             WriteBridgeStatus(activeControl, pid);
             const auto host = optiscaler_host::Read();
             Log(L"OptiScaler mode %s: route=%hs version=%s path=%s",
-                uiDelegated ? L"on (OptiScaler's menu owns the controls)" : L"off",
+                uiDelegated ? L"on (OptiScaler's menu owns frame generation)" : L"off",
                 optiscaler_host::RouteName(host.route), host.productVersion, host.path);
         }
 
@@ -9883,6 +10661,11 @@ DWORD WINAPI PatchWorker(void* context)
         {
             WriteBridgeStatus(activeControl, pid);
             heartbeatTicks = 0;
+#if MFG_UNLOCK_SESSION_DIAGNOSTICS
+            const bool minute = ++stateSeconds >= 60;
+            if (minute) stateSeconds = 0;
+            LogSessionState(activeControl, minute);
+#endif
         }
     }
 }
@@ -9892,6 +10675,7 @@ BOOL SampleFrameTelemetry(uint64_t owner, uint32_t presentCount,
     bool outputAvailable, bool cumulative, bool dlssgPresented = false)
 {
     gFpsOutputPresentTick.store(GetTickCount64(), std::memory_order_release);
+    gTelemetryPresents.fetch_add(1, std::memory_order_relaxed);
     std::lock_guard telemetryLock(gFpsTelemetryMutex);
     if (!gAppliedFrameGenerationOn.load(std::memory_order_acquire))
     {
@@ -9986,11 +10770,12 @@ extern "C" BOOL WINAPI MfgUnlockCoreEntry(HINSTANCE instance, DWORD reason, LPVO
         {
             ControlConfig saved{};
             if (ReadControlFile(gConfigPath, saved))
-                optiscaler_host::SetUiOptIn(saved.optiScalerUi == 1);
+                optiscaler_host::SetUiMode(static_cast<optiscaler_host::UiMode>(saved.optiScalerUi));
         }
         dlssg_preset::SetInitialSelectionLoader(&ReadInitialDlssgPreset);
         dlssg_preset::SetCreateQuiescenceProbe(&ampere_backend::FrameGenerationQuiescent);
         dlss_sr::SetLogCallback(&MidpointLog);
+        dlss5::SetLogCallback(&MidpointLog);
         dlss_sr::SetInitialSelectionLoader(&ReadInitialDlssSrPreset);
         dlss_sr::SetInitialRrSelectionLoader(&ReadInitialDlssRrPreset);
         dlss_sr::SetDrsHookInstaller(&InstallDlssSrDrsHook);

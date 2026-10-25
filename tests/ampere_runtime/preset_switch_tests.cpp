@@ -432,6 +432,35 @@ void RouteOwnedCases()
     Check(configuration->preset == kPresetC && destroyed == before + 1 && ReadSnapshot(module).observedPreset == kPresetC,
         "the next Create reads the new preset through the route reader");
 
+    // alpha.11 (GitHub issue 107): the status reports the translated route's
+    // provider; the RTX 40/50 selected-provider slot is 0 on that route.
+    Check(StatusProvider(0x1000, false, 0x2000) == 0x1000 && StatusProvider(0x1000, true, 0x2000) == 0x2000
+        && StatusProvider(0x1000, true, 0) == 0x1000 && StatusProvider(0, true, 0) == 0
+        && StatusProvider(0, false, 0x2000) == 0,
+        "status provider: RTX 40/50 the selected one, RTX 30/20 its route's provider once it recorded one");
+    const auto status = [](uintptr_t selected, bool translated, HMODULE provider) {
+        return ReadSnapshot(reinterpret_cast<HMODULE>(StatusProvider(selected, translated,
+            reinterpret_cast<uintptr_t>(provider))));
+    };
+    {
+        std::lock_guard lock(gPresetCMutex);
+        for (auto& support : gPresetC)
+            if (!support.module || support.module == module) { support = {module, true}; break; }
+    }
+    snapshot = status(0, true, module);
+    Check(snapshot.observedPresetValid && snapshot.observedPreset == kPresetC && snapshot.overrideReads > 0
+        && snapshot.providerReads > 0 && snapshot.presetCAvailable && snapshot.cachedReaderInstalled,
+        "RTX 30/20 status: observed Preset C, its reads and C support come from the route's provider");
+    snapshot = status(0, false, module);
+    Check(!snapshot.observedPresetValid && snapshot.observedPreset == 0 && snapshot.providerReads == 0
+        && !snapshot.presetCAvailable && !snapshot.cachedReaderInstalled,
+        "without a selected provider the RTX 40/50 status stays empty, as before");
+    {
+        std::lock_guard lock(gPresetCMutex);
+        for (auto& support : gPresetC)
+            if (support.module == module) support = {};
+    }
+
     const HMODULE other = reinterpret_cast<HMODULE>(0x7200000);
     RecordRouteRead(other, reinterpret_cast<void*>(0x5000), true, kPresetA, true);
     Check(ReadSnapshot(other).providerReads == 1 && !ReadSnapshot(other).observedPresetValid,

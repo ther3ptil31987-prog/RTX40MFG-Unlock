@@ -12,7 +12,9 @@ void FactoryReady() noexcept {}
 bool PrepareInput() noexcept { return false; }
 }
 namespace single_overlay::dx12 {
-Session* CreateSession(IDXGISwapChain*,IUnknown*,HMODULE) noexcept { return nullptr; }
+Session* CreateSession(IDXGISwapChain*,IUnknown*,HMODULE,bool) noexcept { return nullptr; }
+bool WindowSession(HWND) noexcept { return false; }
+bool OutputSwapchainWanted() noexcept { return false; }
 bool RetireSession(Session*) noexcept { return true; }
 void DestroySession(Session*) noexcept {}
 bool BeginPresent(Session*,UINT,bool) noexcept { return false; }

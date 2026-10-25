@@ -11,6 +11,7 @@ bool OverlayAllowed() noexcept;
 HMODULE LoadSystemModule(const wchar_t* basename) noexcept;
 void Log(const wchar_t* text) noexcept;
 void DrainLog(void (*sink)(const wchar_t*)) noexcept;
+bool TryDrainLog(void (*sink)(const wchar_t*)) noexcept;
 }
 
 extern "C" BOOL WINAPI MfgUnlockCoreEntry(HINSTANCE, DWORD, LPVOID);

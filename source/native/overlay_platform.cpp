@@ -1,6 +1,10 @@
 #include "overlay_platform.h"
 #include "overlay_hook.h"
 #include "optiscaler_host.h"
+#include "optiscaler_menu_key.h"
+#include "physical_key.h"
+#include "dlss_sr.h"
+#include "dlss5.h"
 #include "overlay_scaling.h"
 #include "standalone_ui.h"
 #include "single_hotkey.h"
@@ -10,6 +14,7 @@
 #include <imgui_internal.h>
 #include <Windowsx.h>
 #include <algorithm>
+#include <climits>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -55,11 +60,20 @@ bool gHavePreviousClip = false;
 std::mutex gClipMutex;
 void DetachWindow(HWND window, bool releaseClient = true);
 
+// Beside OptiScaler's menu (dlss5.8c); defined with the input code below.
+namespace shared_menu
+{
+bool Active() noexcept;
+bool Ready() noexcept;
+int Key() noexcept;
+}
+
 // "MFG Unlocker <version>###RTXMFG": the window ID ignores the visible text, so the
 // saved position and size survive updates and the RTXMFG -> MFG Unlocker rename.
+// Beside OptiScaler's menu the panel keeps a position of its own.
 const char* PanelTitle()
 {
-    static const std::string title = []
+    static const std::string text = []
     {
         wchar_t version[96]{};
         std::string text = "MFG Unlocker";
@@ -70,9 +84,11 @@ const char* PanelTitle()
             if (WideCharToMultiByte(CP_UTF8, 0, version, -1, utf8, static_cast<int>(sizeof(utf8)), nullptr, nullptr) > 1)
                 text.append(" ").append(utf8);
         }
-        return text + "###RTXMFG";
+        return text;
     }();
-    return title.c_str();
+    static const std::string own = text + "###RTXMFG";
+    static const std::string shared = text + "###RTXMFG-OptiScaler";
+    return (shared_menu::Active() ? shared : own).c_str();
 }
 // Builds up to 1.5.0-beta.5 saved the panel as "DLSS MFG".
 constexpr const char* kLegacyPanelName = "DLSS MFG";
@@ -161,7 +177,7 @@ bool Foreground(HWND window) noexcept
 bool CaptureInput() noexcept
 {
     return !gInsideOverlay && single_module::OverlayAllowed() && gVisible.load(std::memory_order_acquire)
-        && Foreground(gActiveWindow.load(std::memory_order_acquire));
+        && shared_menu::Ready() && Foreground(gActiveWindow.load(std::memory_order_acquire));
 }
 
 void SetVisible(bool visible, HWND window)
@@ -367,6 +383,19 @@ void ReleaseRetiredRawMouse(HWND window, const RAWMOUSE& mouse)
         if (mouse.usButtonFlags & (2u << (index * 2)))
             UpdateMouseCapture(window, releases[index],
                 index >= 3 ? MAKEWPARAM(0, index == 3 ? XBUTTON1 : XBUTTON2) : 0);
+}
+
+// Render thread, open menu: the cursor where it is now. Window messages carry
+// it only when the game pumps them, once per game frame, but the menu draws on
+// every frame it presents: under frame generation every output frame, at 6x
+// six cursor updates per game frame. Buttons and wheel stay on the messages,
+// which ImGui orders before this position. Same thread as the backend's client
+// rectangle, so both share one DPI context, as in its own cursor fallback.
+void PollCursor(HWND window, ImGuiIO& io) noexcept
+{
+    POINT cursor{};
+    if (!io.WantSetMousePos && GetCursorPos(&cursor) && ScreenToClient(window, &cursor))
+        io.AddMousePosEvent(float(cursor.x), float(cursor.y));
 }
 
 // DirectInput mouse route. dinput8 reads an exclusive mouse as raw input on its
@@ -590,6 +619,194 @@ bool Serving(HWND window) noexcept
 }
 }
 
+// Beside OptiScaler's menu (OptiScaler's shared UI mode) this menu offers the
+// DLSS presets and DLSS 5. It opens and closes on OptiScaler's menu key, shows
+// only while a feature it controls runs, and stays usable while OptiScaler's
+// menu is open. OptiScaler's input layer then consumes every mouse and key
+// message in PeekMessage/GetMessage and answers GetAsyncKeyState and
+// GetCursorPos with blocked values for every caller, so this menu reads the
+// key and the mouse below it: win32u's NtUserGetAsyncKeyState and GetCursorInfo.
+namespace shared_menu
+{
+std::atomic<int> gKey{-1};              // OptiScaler's menu key: -1 not read, 0 none
+std::atomic<uint64_t> gKeyRead{0};
+std::atomic<bool> gReady{false};
+std::atomic<uint64_t> gReadySince{0};   // the startup hint's start
+std::atomic<uint32_t> gLogLines{0};
+// Render thread only.
+uint64_t gNextReadyCheck = 0;
+bool gKeyHeld = false;
+optiscaler_menu_key::Follower gFollower;
+uint32_t gButtons = 0;
+POINT gReal{LONG_MIN, LONG_MIN};
+POINT gReported{LONG_MIN, LONG_MIN};
+bool gOptiScalerCursor = false;
+
+void Log(const wchar_t* line) noexcept
+{
+    if (gLogLines.fetch_add(1, std::memory_order_relaxed) < 32) single_module::Log(line);
+}
+
+bool Active() noexcept
+{
+    return optiscaler_host::UiDelegated() && !optiscaler_host::UiHidden();
+}
+
+bool Ready() noexcept
+{
+    return !Active() || gReady.load(std::memory_order_acquire);
+}
+
+bool PhysicalDown(int key) noexcept
+{
+    return PhysicalKeyDown(key);
+}
+
+// [Menu] ShortcutKey in OptiScaler.ini beside OptiScaler's module.
+int ReadKey() noexcept
+{
+    wchar_t path[MAX_PATH]{};
+    const HMODULE host = optiscaler_host::Module();
+    const DWORD length = host ? GetModuleFileNameW(host, path, MAX_PATH) : 0;
+    wchar_t* slash = length && length < MAX_PATH ? wcsrchr(path, L'\\') : nullptr;
+    if (!slash || wcscpy_s(slash + 1, static_cast<size_t>(path + MAX_PATH - (slash + 1)), L"OptiScaler.ini"))
+        return optiscaler_menu_key::kDefaultKey;
+    wchar_t value[64]{};
+    GetPrivateProfileStringW(L"Menu", L"ShortcutKey", L"auto", value, static_cast<DWORD>(std::size(value)), path);
+    return optiscaler_menu_key::ParseShortcutKey(value);
+}
+
+void StoreKey(int key) noexcept
+{
+    gKeyRead.store(GetTickCount64(), std::memory_order_release);
+    if (gKey.exchange(key, std::memory_order_acq_rel) == key) return;
+    wchar_t line[160]{};
+    swprintf_s(line, L"MFG_PROXY_UI shared menu: OptiScaler menu key 0x%02X%ls", key,
+        key ? L"" : L" (none; this menu keeps its own key)");
+    Log(line);
+}
+
+// OptiScaler's menu key while this menu shares it; 0 = this menu's own key
+// (outside shared mode, or OptiScaler has no menu key).
+int Key() noexcept
+{
+    if (!Active()) return 0;
+    int key = gKey.load(std::memory_order_acquire);
+    if (key < 0)
+    {
+        key = ReadKey();
+        StoreKey(key);
+    }
+    return key;
+}
+
+// Render thread: OptiScaler writes a rebound key to its INI when it saves.
+void RefreshKey() noexcept
+{
+    if (!Active() || Key() < 0
+        || GetTickCount64() - gKeyRead.load(std::memory_order_acquire) < 10000) return;
+    StoreKey(ReadKey());
+}
+
+// Render thread: whether DLSS Super Resolution, DLAA, Ray Reconstruction or
+// DLSS 5 runs, checked four times a second.
+bool RefreshReady() noexcept
+{
+    if (!Active()) return true;
+    const uint64_t now = GetTickCount64();
+    if (now < gNextReadyCheck) return gReady.load(std::memory_order_acquire);
+    gNextReadyCheck = now + 250;
+    const auto dlss = dlss_sr::Read();
+    const bool neural = dlss5::Running();
+    const bool ready = dlss.running || dlss.rayReconstructionRunning || neural;
+    if (ready != gReady.exchange(ready, std::memory_order_acq_rel))
+    {
+        if (ready) gReadySince.store(now, std::memory_order_release);
+        wchar_t line[160]{};
+        swprintf_s(line, L"MFG_PROXY_UI shared menu %ls (DLSS SR=%d RR=%d DLSS 5=%d)",
+            ready ? L"available" : L"hidden while no DLSS feature runs",
+            dlss.running ? 1 : 0, dlss.rayReconstructionRunning ? 1 : 0, neural ? 1 : 0);
+        Log(line);
+    }
+    return ready;
+}
+
+// Render thread, game in the foreground. OptiScaler toggles its menu on the
+// key's release; this menu follows it at the press.
+void PollKey(HWND window, int key) noexcept
+{
+    const bool down = PhysicalDown(key);
+    if (down && !gKeyHeld)
+    {
+        const bool reported = (GetAsyncKeyState(key) & 0x8000) != 0;
+        const bool visible = gVisible.load(std::memory_order_acquire);
+        const bool next = gFollower.AfterPress(reported, visible);
+        if (next != visible) SetVisible(next, window);
+        wchar_t line[160]{};
+        swprintf_s(line, L"MFG_PROXY_UI shared menu key: OptiScaler menu %ls, this menu %ls",
+            !reported ? L"closes" : gFollower.BlockingSeen() ? L"opens" : L"toggles",
+            gVisible.load(std::memory_order_acquire) ? L"open" : L"closed");
+        Log(line);
+    }
+    gKeyHeld = down;
+}
+
+// Render thread, this menu open with the game in the foreground: the cursor
+// and buttons, read below OptiScaler's input blocking. Window messages that
+// OptiScaler lets through give the same events, which ImGui drops as
+// duplicates, and the wheel.
+void PollMouse(HWND window, ImGuiIO& io) noexcept
+{
+    using SetContext = HANDLE (WINAPI*)(HANDLE);
+    static const auto set = reinterpret_cast<SetContext>(GetProcAddress(
+        GetModuleHandleW(L"user32.dll"), "SetThreadDpiAwarenessContext"));
+    // Per-monitor aware for these calls: cursor and client rectangle are both physical pixels.
+    HANDLE previous = set ? set(reinterpret_cast<HANDLE>(-4)) : nullptr;
+    if (set && !previous) previous = set(reinterpret_cast<HANDLE>(-3));
+    CURSORINFO cursor{sizeof(cursor)};
+    RECT client{};
+    POINT point{};
+    bool placed = GetCursorInfo(&cursor) && GetClientRect(window, &client) && client.right > 0 && client.bottom > 0;
+    if (placed)
+    {
+        point = cursor.ptScreenPos;
+        placed = ScreenToClient(window, &point) != FALSE;
+    }
+    if (previous) set(previous);
+    if (placed)
+        io.AddMousePosEvent((float(point.x) + 0.5f) * io.DisplaySize.x / float(client.right),
+            (float(point.y) + 0.5f) * io.DisplaySize.y / float(client.bottom));
+    // These are the physical buttons; follow the swap setting.
+    const bool swapped = GetSystemMetrics(SM_SWAPBUTTON) != 0;
+    const int keys[3]{swapped ? VK_RBUTTON : VK_LBUTTON, swapped ? VK_LBUTTON : VK_RBUTTON, VK_MBUTTON};
+    for (int button = 0; button < 3; ++button)
+    {
+        const bool down = PhysicalDown(keys[button]);
+        if (down == (((gButtons >> button) & 1u) != 0)) continue;
+        gButtons ^= 1u << button;
+        io.AddMouseSourceEvent(ImGuiMouseSource_Mouse);
+        io.AddMouseButtonEvent(button, down);
+    }
+}
+
+// Render thread: whether OptiScaler draws the cursor. While its menu is open
+// its hooks answer GetCursorPos with the position where the menu opened, so
+// the real cursor moves and the reported one does not. Each source is only
+// compared with itself, which keeps this independent of DPI virtualization.
+bool OptiScalerCursor() noexcept
+{
+    CURSORINFO cursor{sizeof(cursor)};
+    POINT reported{};
+    if (!GetCursorInfo(&cursor) || !GetCursorPos(&reported)) return gOptiScalerCursor;
+    const bool realMoved = cursor.ptScreenPos.x != gReal.x || cursor.ptScreenPos.y != gReal.y;
+    const bool reportedMoved = reported.x != gReported.x || reported.y != gReported.y;
+    if (realMoved && gReal.x != LONG_MIN) gOptiScalerCursor = !reportedMoved;
+    gReal = cursor.ptScreenPos;
+    gReported = reported;
+    return gOptiScalerCursor;
+}
+}
+
 bool ProcessKey(HWND window, int key, bool down)
 {
     if (!single_module::OverlayAllowed())
@@ -599,6 +816,8 @@ bool ProcessKey(HWND window, int key, bool down)
         if (gVisible.load(std::memory_order_acquire)) SetVisible(false, window);
         return false;
     }
+    // Beside OptiScaler's menu, its key is polled each frame and reaches OptiScaler.
+    if (shared_menu::Key()) return false;
     const bool wasBinding = gMenuKey.Binding();
     const auto action = gMenuKey.Process(key, down);
     if (action == KeyAction::Toggle)
@@ -606,23 +825,51 @@ bool ProcessKey(HWND window, int key, bool down)
     return wasBinding || action != KeyAction::None || key == gMenuKey.Key();
 }
 
+// A compact one-line pill in the menu's own style: its panel colour and
+// rounding, a small inset, and a thin accent in the title-bar blue. The minimum
+// size override keeps it one text line tall. Returns its bottom edge.
+template<class Content>
+float Pill(const char* id, ImVec2 position, ImVec2 pivot, float uiScale, Content&& content)
+{
+    ImGui::SetNextWindowPos(position, ImGuiCond_Always, pivot);
+    ImGui::SetNextWindowBgAlpha(0.7f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f*uiScale, 2.0f*uiScale));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowMinSize, ImVec2(1.0f, 1.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, ImGui::GetStyle().FrameRounding);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    float bottom = position.y;
+    if (ImGui::Begin(id, nullptr,
+        ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs
+        | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav))
+    {
+        const ImVec2 at = ImGui::GetWindowPos(), size = ImGui::GetWindowSize();
+        const float edge = 3.0f*uiScale, width = 2.0f*uiScale;
+        ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(at.x+edge, at.y+edge),
+            ImVec2(at.x+edge+width, at.y+size.y-edge), ImGui::GetColorU32(ImGuiCol_TitleBgActive), width);
+        content();
+        bottom = at.y + size.y;
+    }
+    ImGui::End();
+    ImGui::PopStyleVar(4);
+    return bottom;
+}
+
+// DLSS 5 Compare as its last evaluation applied it, within the last half second;
+// swapped: the original is on the right (Swap sides).
+bool CompareLabels(float& split, bool& held, bool* swapped = nullptr) noexcept
+{
+    const auto view = dlss5::LastCompare();
+    if (!view.tick || view.split <= 0.0f || GetTickCount64() - view.tick > 500) return false;
+    split = view.split;
+    held = view.held;
+    if (swapped) *swapped = view.swapped;
+    return true;
+}
+
 std::string KeyLabel()
 {
-    const int key = gMenuKey.Key();
-    if (key == VK_BACK) return "Backspace";
-    if (key == VK_OEM_PLUS) return "=";
-    const UINT scan = MapVirtualKeyW(key, MAPVK_VK_TO_VSC_EX);
-    const LONG parameter = LONG((scan & 0xFF) << 16) | (scan & 0xFF00 ? 1 << 24 : 0);
-    wchar_t label[96]{};
-    if (GetKeyNameTextW(parameter, label, static_cast<int>(std::size(label))))
-    {
-        const int bytes = WideCharToMultiByte(CP_UTF8, 0, label, -1, nullptr, 0, nullptr, nullptr);
-        std::string text(bytes, '\0');
-        WideCharToMultiByte(CP_UTF8, 0, label, -1, text.data(), bytes, nullptr, nullptr);
-        if (!text.empty()) text.pop_back();
-        return text;
-    }
-    char fallback[16]{}; sprintf_s(fallback, "0x%02X", key); return fallback;
+    const int shared = shared_menu::Key();
+    return KeyName(shared ? shared : gMenuKey.Key());
 }
 
 LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
@@ -645,6 +892,9 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
     }
     if (!original) return DefWindowProcW(window, message, wparam, lparam);
     UpdateMouseCapture(window, message, wparam);
+    // OptiScaler's menu key reaches OptiScaler (and the game) even while this menu is open.
+    const int sharedKey = hasClient ? shared_menu::Key() : 0;
+    bool passKey = sharedKey && (message == WM_KEYDOWN || message == WM_KEYUP) && static_cast<int>(wparam) == sharedKey;
     if (hasClient && (message == WM_KEYDOWN || message == WM_KEYUP))
     {
         if (ProcessKey(window, static_cast<int>(wparam), message == WM_KEYDOWN)) return 0;
@@ -665,10 +915,12 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             && input.header.dwSize <= copied)
         {
             if (hasClient && input.header.dwType == RIM_TYPEKEYBOARD
-                && input.header.dwSize >= offsetof(RAWINPUT, data) + sizeof(RAWKEYBOARD)
-                && ProcessKey(window, input.data.keyboard.VKey,
-                    !(input.data.keyboard.Flags & RI_KEY_BREAK)))
-                return DefWindowProcW(window, message, wparam, lparam);
+                && input.header.dwSize >= offsetof(RAWINPUT, data) + sizeof(RAWKEYBOARD))
+            {
+                if (sharedKey && input.data.keyboard.VKey == sharedKey) passKey = true;
+                else if (ProcessKey(window, input.data.keyboard.VKey, !(input.data.keyboard.Flags & RI_KEY_BREAK)))
+                    return DefWindowProcW(window, message, wparam, lparam);
+            }
             if (input.header.dwType == RIM_TYPEMOUSE
                 && input.header.dwSize >= offsetof(RAWINPUT, data) + sizeof(RAWMOUSE))
             {
@@ -698,8 +950,8 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             SetCursor(nullptr); // ImGui draws its own cursor at the game position.
             return TRUE;
         }
-        if ((MouseMessage(message) && gWantMouse.load(std::memory_order_acquire))
-            || (KeyboardMessage(message) && gWantKeyboard.load(std::memory_order_acquire)))
+        if (!passKey && ((MouseMessage(message) && gWantMouse.load(std::memory_order_acquire))
+            || (KeyboardMessage(message) && gWantKeyboard.load(std::memory_order_acquire))))
         {
             // WM_INPUT still requires the OS cleanup performed by DefWindowProc.
             return message == WM_INPUT
@@ -1063,10 +1315,16 @@ bool PlatformState::WantsFrame() const noexcept
     // The edge state is shared with window/raw messages, so polling cannot
     // toggle twice for a single press. It also covers custom input pumps.
     const bool foreground = context && inputAttached && Foreground(window);
+    // Beside OptiScaler's menu: its menu key, and only while a DLSS feature runs.
+    const bool shared = shared_menu::Active();
+    if (shared) shared_menu::RefreshKey();
+    const bool ready = shared_menu::RefreshReady();
+    const int sharedKey = shared_menu::Key();
     if (foreground)
     {
         InternalScope internal;
-        if (gFirstLaunchPending)
+        // OptiScaler's menu opens on its key, so this one does not open by itself.
+        if (gFirstLaunchPending && !shared)
         {
             SetVisible(true, window);
             if (gVisible.load(std::memory_order_acquire))
@@ -1075,7 +1333,8 @@ bool PlatformState::WantsFrame() const noexcept
                 gFirstLaunchSavePending = true;
             }
         }
-        if (gMenuKey.Binding())
+        if (sharedKey) shared_menu::PollKey(window, sharedKey);
+        else if (gMenuKey.Binding())
         {
             for (int key = VK_BACK; key < 255 && gMenuKey.Binding(); ++key)
                 if (key == VK_ESCAPE || MenuHotkey::Bindable(key))
@@ -1088,9 +1347,14 @@ bool PlatformState::WantsFrame() const noexcept
         }
     }
     if (context && inputAttached) mouse_route::Refresh(window, foreground);
+    if (!ready) return false;
+    // Beside OptiScaler's menu the startup hint follows the first DLSS feature.
+    const uint64_t hintStart = shared ? shared_menu::gReadySince.load(std::memory_order_acquire) : firstFrame;
+    float split = 0.0f;
+    bool held = false;
     return context && inputAttached && IsWindow(window) && (gVisible.load(std::memory_order_acquire)
-        || gPinned.load(std::memory_order_acquire) || standalone_ui::PinnedFps()
-        || GetTickCount64() - firstFrame < 7000);
+        || gPinned.load(std::memory_order_acquire) || (standalone_ui::PinnedFps() && !shared)
+        || GetTickCount64() - hintStart < 7000 || CompareLabels(split, held));
 }
 
 bool PlatformState::NewFrame(uint32_t outputWidth, uint32_t outputHeight)
@@ -1101,6 +1365,7 @@ bool PlatformState::NewFrame(uint32_t outputWidth, uint32_t outputHeight)
     {
         ImGui::GetIO().ClearInputKeys();
         ImGui::GetIO().ClearInputMouse();
+        shared_menu::gButtons = 0;
     }
     inputWasVisible = visible;
     std::deque<InputMessage> messages;
@@ -1144,15 +1409,29 @@ bool PlatformState::NewFrame(uint32_t outputWidth, uint32_t outputHeight)
     // A closed menu (startup hint, pinned views) stays on screen during play.
     // The backend still reads the cursor while the game is focused, so take no
     // mouse, draw no cursor and leave the game's cursor shape alone.
-    io.MouseDrawCursor = visible;
+    // Beside an open OptiScaler menu, OptiScaler draws the cursor and owns its shape.
+    const bool shared = visible && shared_menu::Active() && Foreground(window);
+    // On XeFG's output this menu covers OptiScaler's cursor, so over this menu the cursor is ours.
+    const bool optiScalerCursor =
+        shared && shared_menu::OptiScalerCursor() && !(afterFrameGeneration && io.WantCaptureMouse);
+    io.MouseDrawCursor = visible && !optiScalerCursor;
     if (visible) io.ConfigFlags &= ~(ImGuiConfigFlags_NoMouse | ImGuiConfigFlags_NoMouseCursorChange);
     else io.ConfigFlags |= ImGuiConfigFlags_NoMouse | ImGuiConfigFlags_NoMouseCursorChange;
+    if (optiScalerCursor) io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
     ImGui_ImplWin32_NewFrame();
-    // The backend reads the cursor only while it tracks no window area. When
-    // the hook drives the mouse, its last cursor is the position.
-    if (visible && mouse_route::Serving(window) && Foreground(window))
-        if (const auto position = mouse_route::Map(mouse_route::gCursor.load(std::memory_order_acquire), io.DisplaySize))
-            io.AddMousePosEvent(position->x, position->y);
+    // The backend reads the cursor only while it tracks no window area, so the
+    // open menu reads it here: the hook's last cursor when the hook drives the
+    // mouse, else the cursor itself. Beside OptiScaler, PollMouse reads it.
+    if (visible && Foreground(window))
+    {
+        if (mouse_route::Serving(window))
+        {
+            if (const auto position = mouse_route::Map(mouse_route::gCursor.load(std::memory_order_acquire), io.DisplaySize))
+                io.AddMousePosEvent(position->x, position->y);
+        }
+        else if (!shared) PollCursor(window, io);
+    }
+    if (shared) shared_menu::PollMouse(window, io);
     const auto scaling = CalculateOverlayScaling(outputWidth, outputHeight,
         io.DisplaySize.x, io.DisplaySize.y, ImGui_ImplWin32_GetDpiScaleForHwnd(window));
     if (!scaling.valid) return false;
@@ -1190,31 +1469,50 @@ void PlatformState::Draw()
     const bool pinned = !open && gPinned.load(std::memory_order_acquire);
     const float margin = 16.0f*uiScale;
     float cornerBottom = margin; // the startup hint goes below the FPS readout
-    if (!open && !pinned && standalone_ui::PinnedFps())
+    const float inset = 8.0f*uiScale;
+    float pillTop = inset; // the Compare pills go just below the FPS readout
+    if (shared_menu::Active())
     {
-        // A compact one-line pill in the menu's own style: its panel colour and
-        // rounding, a small inset, and a thin accent in the title-bar blue. The
-        // minimum size override keeps it one text line tall.
-        const float inset = 8.0f*uiScale;
-        ImGui::SetNextWindowPos(ImVec2(inset, inset), ImGuiCond_Always);
-        ImGui::SetNextWindowBgAlpha(0.7f);
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f*uiScale, 2.0f*uiScale));
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowMinSize, ImVec2(1.0f, 1.0f));
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, ImGui::GetStyle().FrameRounding);
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
-        if (ImGui::Begin("##RTX40MFG pinned fps", nullptr,
-            ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs
-            | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav))
+        // Beside OptiScaler its frame generation and FPS overlay (top left) are
+        // OptiScaler's, so the DLSS FG readout stays off; the Compare pills keep
+        // the place they would have below it.
+        pillTop = inset + ImGui::GetTextLineHeight() + 4.0f*uiScale + ImGui::GetStyle().ItemSpacing.y;
+    }
+    else if (!open && !pinned && standalone_ui::PinnedFps())
+    {
+        const float bottom = Pill("##RTX40MFG pinned fps", ImVec2(inset, inset), ImVec2(0.0f, 0.0f), uiScale,
+            [] { standalone_ui::DrawPinnedFps(); });
+        cornerBottom = std::max(margin, bottom + ImGui::GetStyle().ItemSpacing.y);
+        pillTop = bottom + ImGui::GetStyle().ItemSpacing.y;
+    }
+    // DLSS 5 Compare: the divider over the finished image, for every Hook Method,
+    // and which side is which in the same pills at the screen's left and right
+    // edges, just below the FPS readout ("DLSS 5 On" on the left with Swap
+    // sides); "DLSS 5 Off" on both while the compare key is held.
+    float split = 0.0f;
+    bool held = false, swapped = false;
+    if (CompareLabels(split, held, &swapped))
+    {
+        const auto display = ImGui::GetIO().DisplaySize;
+        if (!held)
         {
-            const ImVec2 position = ImGui::GetWindowPos(), size = ImGui::GetWindowSize();
-            const float edge = 3.0f*uiScale, width = 2.0f*uiScale;
-            ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(position.x+edge, position.y+edge),
-                ImVec2(position.x+edge+width, position.y+size.y-edge), ImGui::GetColorU32(ImGuiCol_TitleBgActive), width);
-            standalone_ui::DrawPinnedFps();
-            cornerBottom = std::max(margin, position.y + size.y + ImGui::GetStyle().ItemSpacing.y);
+            // Visible but quiet: a white line (2 px at 1080p, 3 at 4K) in soft dark edges.
+            const float x = std::round(split*display.x);
+            const float core = std::max(1.0f, std::round(display.x/1280.0f));
+            auto* draw = ImGui::GetBackgroundDrawList();
+            draw->AddRectFilled(ImVec2(x - 0.5f*core - 1.0f, 0.0f), ImVec2(x + 0.5f*core + 1.0f, display.y), IM_COL32(0, 0, 0, 140));
+            draw->AddRectFilled(ImVec2(x - 0.5f*core, 0.0f), ImVec2(x + 0.5f*core, display.y), IM_COL32(255, 255, 255, 230));
+            dlss5::NoteOverlayDivider();
         }
-        ImGui::End();
-        ImGui::PopStyleVar(4);
+        const char* off = l10n::T("DLSS 5 Off");
+        const char* on = l10n::T("DLSS 5 On");
+        const char* left = !held && swapped ? on : off;
+        const char* right = held ? off : swapped ? off : on;
+        const float bottom = Pill("##RTX40MFG compare left", ImVec2(inset, pillTop), ImVec2(0.0f, 0.0f), uiScale,
+            [left] { ImGui::TextUnformatted(left); });
+        Pill("##RTX40MFG compare right", ImVec2(display.x - inset, pillTop), ImVec2(1.0f, 0.0f), uiScale,
+            [right] { ImGui::TextUnformatted(right); });
+        cornerBottom = std::max(cornerBottom, bottom + ImGui::GetStyle().ItemSpacing.y);
     }
     if (open || pinned)
     {
@@ -1226,9 +1524,12 @@ void PlatformState::Draw()
         if (rescaleLayout)
         {
             ImVec2 size(570.0f*uiScale, 610.0f*uiScale), position(24.0f*uiScale, 24.0f*uiScale);
+            // OptiScaler's menu opens at the top left; beside it this panel starts at the top right.
+            const bool shared = shared_menu::Active();
+            if (shared) position.x = display.x - size.x - 24.0f*uiScale;
             const float ratio = uiScale/layoutScale;
             const ImGuiWindowSettings* saved = ImGui::FindWindowSettingsByID(ImHashStr(PanelTitle()));
-            if (!saved) saved = ImGui::FindWindowSettingsByID(ImHashStr(kLegacyPanelName));
+            if (!saved && !shared) saved = ImGui::FindWindowSettingsByID(ImHashStr(kLegacyPanelName));
             if (const ImGuiWindow* panel = ImGui::FindWindowByName(PanelTitle()))
             {
                 size = ImVec2(panel->SizeFull.x*ratio, panel->SizeFull.y*ratio);
@@ -1290,7 +1591,9 @@ void PlatformState::Draw()
             {
                 ImGui::Text(l10n::T("Menu key: %s"), KeyLabel().c_str());
                 ImGui::SameLine();
-                if (gMenuKey.Binding())
+                if (shared_menu::Key())
+                    ImGui::TextDisabled("%s", l10n::T("Shared with OptiScaler's menu"));
+                else if (gMenuKey.Binding())
                 {
                     ImGui::TextUnformatted(l10n::T("Press a key... Esc cancels"));
                     ImGui::SameLine();
@@ -1334,7 +1637,8 @@ void PlatformState::Draw()
         }
         if (visible && !open) SetVisible(false, window);
     }
-    else if (GetTickCount64() - firstFrame < 7000)
+    else if (GetTickCount64() - (shared_menu::Active()
+        ? shared_menu::gReadySince.load(std::memory_order_acquire) : firstFrame) < 7000)
     {
         ImGui::SetNextWindowPos(ImVec2(margin, cornerBottom), ImGuiCond_Always);
         ImGui::SetNextWindowBgAlpha(0.85f);
@@ -1424,7 +1728,8 @@ void ReadStatus(MfgSingleModuleStatus& status) noexcept
     status.vulkanHooked = gVulkanHooked.load();
     status.overlayVisible = gVisible.load();
     status.renderFailures = gRenderFailures.load();
-    status.shortcutVirtualKey = static_cast<uint32_t>(gMenuKey.Key());
+    const int sharedKey = shared_menu::Active() ? shared_menu::gKey.load(std::memory_order_acquire) : 0;
+    status.shortcutVirtualKey = static_cast<uint32_t>(sharedKey > 0 ? sharedKey : gMenuKey.Key());
     status.shortcutBindingActive = gMenuKey.Binding();
     status.dxgiFrames = gDxgiFrames.load();
     status.vulkanFrames = gVulkanFrames.load();

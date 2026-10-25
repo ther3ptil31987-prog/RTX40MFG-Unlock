@@ -10,6 +10,7 @@
 #include <array>
 #include <atomic>
 #include <cstddef>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <span>
@@ -111,6 +112,34 @@ constexpr int kSurfaceObject = 0, kTextureObject = 1;
 constexpr uint32_t kIdInitialize = 0x0150e828, kIdCreate = 0x1dc7261f, kIdLaunch = 0x5c52bb86,
     kIdDestroy = 0x7fb785ba, kIdDescriptorObject = 0x0ddac234;
 struct Nvapi { NvInitialize initialize{}; NvCreate create{}; NvLaunch launch{}; NvDestroy destroy{}; NvDescriptorObject object{}; };
+
+// cudafault.1 (Ghost of Tsushima, RTX 2060, 22 Oct): the driver faulted inside NvAPI's cubin create (an access violation
+// in nvcuda64.dll) and nothing caught it, since the C++ handlers here do not see SEH, so the game exited. These calls
+// run behind an SEH frame: a fault fails the call with kNvFault and keeps its exception code, the route turns off and
+// the DXIL port keeps the programs.
+constexpr int kNvFault = 0x7FFFFFFF;
+std::atomic<unsigned long> gFaultCode{};
+int Faulted(unsigned long code) noexcept
+{
+    gFaultCode.store(code, std::memory_order_relaxed);
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+int GuardedCreate(NvCreate create, ID3D12Device* device, const void* data, uint32_t size, const char* name, void** handle) noexcept
+{
+    __try { return create(device, data, size, 128, 1, 1, name, handle); }
+    __except (Faulted(GetExceptionCode())) { return kNvFault; }
+}
+int GuardedLaunch(NvLaunch launch, ID3D12GraphicsCommandList* list, void* kernel, uint32_t x, uint32_t y, uint32_t z,
+                  const void* params, uint32_t size) noexcept
+{
+    __try { return launch(list, kernel, x, y, z, params, size); }
+    __except (Faulted(GetExceptionCode())) { return kNvFault; }
+}
+int GuardedObject(NvDescriptorObject object, DescriptorObject* request) noexcept
+{
+    __try { return object(request); }
+    __except (Faulted(GetExceptionCode())) { return kNvFault; }
+}
 
 bool LoadNvapi(Nvapi& api, std::string& reason)
 {
@@ -498,6 +527,22 @@ void Fallback(Reason reason, const char* text, const Layer& layer) noexcept
         catch (...) {}
 }
 
+// cudafault.1: a fault inside the driver while recording turns the route off for the rest of the session; this
+// Dispatch and every later one run the DXIL port.
+std::atomic<bool> gFaultLogged{};
+void RuntimeFault(const char* where) noexcept
+{
+    gActive.store(false, std::memory_order_release);
+    if (gFaultLogged.exchange(true)) return;
+    try
+    {
+        char code[16]{};
+        snprintf(code, sizeof(code), "0x%08lX", gFaultCode.load(std::memory_order_relaxed));
+        Log("cuda_route_fault", std::string("\"call\":\"") + where + "\",\"code\":\"" + code + "\",\"route\":\"off\"");
+    }
+    catch (...) {}
+}
+
 // The layer's Dispatch as a CUDA launch on the same descriptors. False keeps the Dispatch.
 bool Launch(ID3D12GraphicsCommandList* list, const Recording& r, UINT x, UINT y, UINT z) noexcept
 {
@@ -515,7 +560,9 @@ bool Launch(ID3D12GraphicsCommandList* list, const Recording& r, UINT x, UINT y,
         const uint64_t index = (table.ptr - gpuStart.ptr)/gIncrement + offset;
         if (index >= heap.NumDescriptors) return false;
         DescriptorObject request{sizeof(DescriptorObject), 0, gDevice, type, {SIZE_T(cpuStart.ptr + index*gIncrement)}, 0};
-        if (gNvapi.object(&request) != 0 || !request.handle) return false;
+        const int result = GuardedObject(gNvapi.object, &request);
+        if (result == kNvFault) RuntimeFault("descriptor_object");
+        if (result != 0 || !request.handle) return false;
         handle = request.handle;
         return true;
     };
@@ -532,8 +579,9 @@ bool Launch(ID3D12GraphicsCommandList* list, const Recording& r, UINT x, UINT y,
     params.limitH = y*layer.intelH;
     std::memcpy(params.constants, r.constants, sizeof(params.constants));
     const uint32_t gridX = (params.limitW + layer.tileW - 1)/layer.tileW, gridY = (params.limitH + layer.tileH - 1)/layer.tileH;
-    if (gNvapi.launch(list, gKernels[layer.kernel], gridX, gridY, layer.gridZ, &params, sizeof(params)) != 0)
-    { Fallback(kLaunch, "launch", layer); return false; }
+    const int launched = GuardedLaunch(gNvapi.launch, list, gKernels[layer.kernel], gridX, gridY, layer.gridZ, &params, sizeof(params));
+    if (launched == kNvFault) RuntimeFault("launch");
+    if (launched != 0) { Fallback(kLaunch, "launch", layer); return false; }
     gLaunches.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
@@ -1228,10 +1276,15 @@ bool Install(ID3D12Device* device, HMODULE providerModule, std::span<const unsig
         for (size_t i = 0; i < std::size(kKernels); ++i)
         {
             void* handle{};
-            if (gNvapi.create(device, fatbin.data(), uint32_t(fatbin.size()), 128, 1, 1, kKernels[i], &handle) != 0 || !handle)
+            const int created = GuardedCreate(gNvapi.create, device, fatbin.data(), uint32_t(fatbin.size()), kKernels[i], &handle);
+            if (created != 0 || !handle)
             {
-                for (size_t j = 0; j < i; ++j) { gNvapi.destroy(device, gKernels[j]); gKernels[j] = nullptr; }
-                MarkUnavailable(std::string("kernel_create_") + kKernels[i]);
+                // After a fault inside the driver nothing more is asked of it (the kernels already made stay).
+                if (created != kNvFault)
+                    for (size_t j = 0; j < i; ++j) { gNvapi.destroy(device, gKernels[j]); gKernels[j] = nullptr; }
+                char code[16]{};
+                snprintf(code, sizeof(code), "0x%08lX", gFaultCode.load(std::memory_order_relaxed));
+                MarkUnavailable(created == kNvFault ? std::string("kernel_create_fault_") + code : std::string("kernel_create_") + kKernels[i]);
                 reason = gReason;
                 return false;
             }

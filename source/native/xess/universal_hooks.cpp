@@ -28,6 +28,10 @@ std::atomic<bool> active{}, prepared{};
 std::atomic<bool> selfReady{};
 std::mutex discoveryMutex;
 bool attempted{};
+// vkxefg.1: the pair the Vulkan host loaded (discoveryMutex), and its calls in progress on this thread.
+HMODULE vulkanFg{}, vulkanLl{};
+std::atomic<bool> vulkanHost{};
+thread_local bool tVulkanHostCall{};
 std::atomic<decltype(&GetProcAddress)> rawGetProc{&GetProcAddress};
 FARPROC RawProc(HMODULE module, LPCSTR name) noexcept { return rawGetProc.load(std::memory_order_acquire)(module, name); }
 struct CreateSlot { std::atomic<HMODULE> owner{}; std::atomic<FARPROC> target{}; };
@@ -132,6 +136,7 @@ bool SdkCaller(void* address) noexcept
 // provider.
 bool HostCaller(void* address) noexcept
 {
+    if (tVulkanHostCall && vulkanHost.load(std::memory_order_acquire)) return true;
     return optiscaler_host::Detected() && optiscaler_host::IsHostAddress(address);
 }
 // Every hooked XeFG entry point except creation takes its context first, as does every XeLL one.
@@ -410,6 +415,8 @@ bool Candidate(HMODULE module, bool fg) noexcept
 }
 }
 HMODULE Self() noexcept { return selfReady.load(std::memory_order_acquire) ? selfModule : nullptr; }
+VulkanHostCallScope::VulkanHostCallScope() noexcept : previous(tVulkanHostCall) { tVulkanHostCall = true; }
+VulkanHostCallScope::~VulkanHostCallScope() { tVulkanHostCall = previous; }
 HMODULE NativeFgModule() noexcept { return Active() ? fgOwner : nullptr; }
 HMODULE NativeLlModule() noexcept { return Active() ? llOwner : nullptr; }
 bool HostOwnsLatency() noexcept { return Active() && hostLatency; }
@@ -436,6 +443,32 @@ bool ResolveNativeSdkCreate(HMODULE importer, const void* caller, HMODULE module
     return true;
 }
 bool Active() noexcept { return active.load(std::memory_order_acquire); }
+bool AdoptVulkanHostPair(HMODULE fg, HMODULE ll) noexcept
+{
+    {
+        std::lock_guard lock(discoveryMutex);
+        if (!selfReady.load(std::memory_order_acquire) || !fg || !ll || fg == ll) return false;
+        if (vulkanFg && (vulkanFg != fg || vulkanLl != ll)) return false;   // one pair per process
+        vulkanFg = fg;
+        vulkanLl = ll;
+        // vkxefg.2: under OptiScaler the route is already active on the pair OptiScaler loaded; the host drives
+        // exactly that pair (owners are immutable after active's publication).
+        if (attempted && Active() && fgOwner == fg && llOwner == ll) vulkanHost.store(true, std::memory_order_release);
+    }
+    DiscoverSdkModules();
+    return Active() && vulkanHost.load(std::memory_order_acquire) && fgOwner == fg && llOwner == ll;
+}
+bool ActiveSdkPair(HMODULE& fg, HMODULE& ll) noexcept
+{
+    if (!Active()) return false;
+    fg = fgOwner;
+    ll = llOwner;
+    return fg && ll && fg != ll;
+}
+bool HostRedirectedExport(HMODULE module, const char* name) noexcept
+{
+    return module && name && HostRedirectedEntry(reinterpret_cast<const void*>(RawProc(module, name)));
+}
 bool InstallImports(HMODULE module) noexcept
 {
     std::lock_guard lock(discoveryMutex);
@@ -487,14 +520,16 @@ void DiscoverSdkModules() noexcept
     // beta.8: XeSS MFG runs under OptiScaler only. Without it a game's own XeSS-FG stays untouched:
     // no resolver detour, no candidate pins, no SDK hooks. Nothing latches, so OptiScaler loaded
     // later still activates the route (contexts created before then stay native).
-    if (!optiscaler_host::Detected())
+    // vkxefg.1: or under RTXMFG's own Vulkan host, on exactly the pair it loaded.
+    const bool vulkanPair = vulkanFg && vulkanLl;
+    if (!optiscaler_host::Detected() && !vulkanPair)
     {
         static std::atomic<bool> logged{};
         if (!logged.exchange(true, std::memory_order_relaxed))
             WriteLog("sdk_route_requires_optiscaler", "\"optiscaler\":false,\"native_xefg\":\"untouched\"");
         return;
     }
-    InstallResolver();
+    if (!vulkanPair) InstallResolver();
     if (attempted) return;
     try {
         std::array<HMODULE, 2048> modules{};
@@ -526,7 +561,19 @@ void DiscoverSdkModules() noexcept
                 + std::to_string(list.size()) + ",\"optiscaler_copy\":" + (preferred ? "true" : "false"));
             return preferred;
         };
-        const HMODULE fg = choose(fgs, "fg"), ll = choose(lls, "ll");
+        HMODULE fg = choose(fgs, "fg"), ll = choose(lls, "ll");
+        if (vulkanPair)
+        {
+            // The Vulkan host's own pair, and only when discovery admits both of its modules.
+            const bool fgFound = std::find(fgs.begin(), fgs.end(), vulkanFg) != fgs.end();
+            const bool llFound = std::find(lls.begin(), lls.end(), vulkanLl) != lls.end();
+            WriteLog("sdk_vulkan_host_pair", std::string("\"fg_admitted\":")+(fgFound ? "true" : "false")+
+                ",\"ll_admitted\":"+(llFound ? "true" : "false")+",\"fg_candidates\":"+std::to_string(fgs.size())+
+                ",\"ll_candidates\":"+std::to_string(lls.size()));
+            if (!fgFound || !llFound) return;
+            fg = vulkanFg;
+            ll = vulkanLl;
+        }
         // Activate one complete pair. Additional providers retain native contexts.
         if (!fg || !ll || fg == ll) return;
         attempted = true;
@@ -580,6 +627,7 @@ void DiscoverSdkModules() noexcept
         // Never remove trampolines after publication, even on partial enablement.
         if (!enabled) { WriteLog("sdk_route_rejected", "\"reason\":\"api_hook_commit_failed_native_only\""); return; }
         active.store(true, std::memory_order_release);
+        if (vulkanPair) vulkanHost.store(true, std::memory_order_release);
         LogSdkModule(fg,"fg"); LogSdkModule(ll,"ll");
         WriteLog("sdk_route_ready", "\"entrypoints\":"+std::to_string(created.size())+
             ",\"fg_module\":"+std::to_string(uintptr_t(fg))+",\"ll_module\":"+std::to_string(uintptr_t(ll))+

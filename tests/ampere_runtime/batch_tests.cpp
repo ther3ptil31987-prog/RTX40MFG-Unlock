@@ -102,7 +102,21 @@ int main()
     Check(!feature.Release(false) && feature.handle == 1, "failed native release retains ownership");
     Check(feature.Release(true) && !feature.handle && !feature.batch.started, "successful native release clears interval history");
     Check(ampere_policy::CapacityValid(1) && ampere_policy::CapacityValid(5)
-        && !ampere_policy::CapacityValid(0) && !ampere_policy::CapacityValid(3), "only legacy 2x and proven six-buffer MFG contracts are admitted");
+        && !ampere_policy::CapacityValid(0) && !ampere_policy::CapacityValid(3), "wrapper layouts and the startup bootstrap stay legacy 2x or six-buffer MFG");
+    // ringcap.1: a Create certifies the ring the wrapper allocated, N = 1..5.
+    bool certified = true;
+    for (uint32_t n = 0; n <= 7; ++n)
+        certified = certified && ampere_policy::CertifiedCapacityValid(n) == (n >= 1 && n <= 5);
+    Check(certified, "a certified ring holds 1 to 5 generated frames, never 0 or more than the program's five");
+    bool fits = true;
+    for (uint32_t created = 0; created <= 6; ++created)
+        for (int count = -1; count <= 7; ++count)
+            fits = fits && ampere_policy::EvaluationFitsCapacity(count, created)
+                == (created >= 1 && created <= 5 && count <= static_cast<int>(created));
+    Check(fits, "an evaluation count above the certified ring is refused; uncertified features admit nothing");
+    Check(ampere_policy::EvaluationFitsCapacity(3, 3) && !ampere_policy::EvaluationFitsCapacity(4, 3)
+        && !ampere_policy::EvaluationFitsCapacity(5, 3),
+        "FF7 Rebirth's four-buffer ring (N=3) admits 4x and refuses 5x/6x counts");
     ampere_diagnostics::Failures diagnostic;
     diagnostic.Record(173, 0xBAD00005u);
     diagnostic.Record(131);

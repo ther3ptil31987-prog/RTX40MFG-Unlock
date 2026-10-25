@@ -76,6 +76,22 @@ std::atomic<RuntimeValidator> gRuntimeValidator{nullptr};
 size_t gSelected = kNoRoute;
 Status gDiscoveryStatus = Status::eWaitingForModule;
 
+// reflexgate.1: refused module generations (gDiscoveryMutex). A version
+// refusal is final for that generation, so rescans skip its resolver; an
+// incomplete entry set is retried but reported once.
+struct RefusedModule
+{
+    HMODULE module = nullptr;
+    uint64_t generation = 0;
+    Status status = Status::eWaitingForModule;
+};
+std::array<RefusedModule, kRouteCount> gRefused{};
+size_t gRefusedNext = 0;
+// The last refusal, for the snapshot (gStateMutex).
+bool gRefusedModule = false;
+bool gRefusedVersionRead = false;
+std::array<uint32_t, 4> gRefusedVersion{};
+
 struct ThreadContext
 {
     unsigned depth = 0;
@@ -158,10 +174,49 @@ bool ReadVersion(HMODULE module, std::array<uint32_t, 4>& version) noexcept
         return false;
     version = {HIWORD(info.dwFileVersionMS), LOWORD(info.dwFileVersionMS),
         HIWORD(info.dwFileVersionLS), LOWORD(info.dwFileVersionLS)};
-    // ReflexOptions v1 and these public entry signatures are unchanged in
-    // the supported 2.14.0/2.14.1 plugins. Dynamic/V-Sync compatibility is a
-    // separate runtime policy, not a prerequisite for a fixed-mode cap.
-    return version[0] == 2 && version[1] == 14 && version[2] <= 1;
+    return true;
+}
+
+// reflexgate.1: every NVIDIA OTA plugin from 2.7.10 to 2.14.16 sends
+// slReflexSetOptions to slSetData(options, nullptr) and slReflexGetState to
+// slGetData(nullptr, state, nullptr). slSetData finds ReflexOptions v1 by type
+// and copies all 0x30 bytes (frameLimitUs at +0x24); slGetData writes
+// lowLatencyAvailable as 0/1 at +0x20 (disassembled in 2.10.3, 2.14.0 and
+// 2.14.16). Dynamic/V-Sync compatibility is a separate runtime policy, not a
+// prerequisite for a fixed-mode cap.
+bool SupportedVersion(const std::array<uint32_t, 4>& version) noexcept
+{
+    return version[0] == 2 && version[1] >= 7 && version[1] <= 14;
+}
+
+// Caller holds gDiscoveryMutex.
+RefusedModule* FindRefused(HMODULE module, uint64_t generation) noexcept
+{
+    for (RefusedModule& refused : gRefused)
+        if (refused.module == module && refused.generation == generation) return &refused;
+    return nullptr;
+}
+
+// Records a refusal; true the first time this module generation is refused
+// for this reason.
+bool Refuse(HMODULE module, uint64_t generation, Status status,
+    const std::array<uint32_t, 4>& version, bool versionRead) noexcept
+{
+    bool first = false;
+    {
+        std::lock_guard lock(gDiscoveryMutex);
+        RefusedModule* refused = FindRefused(module, generation);
+        if (!refused) refused = &gRefused[gRefusedNext++ % gRefused.size()];
+        first = refused->module != module || refused->generation != generation
+            || refused->status != status;
+        *refused = {module, generation, status};
+    }
+    std::lock_guard lock(gStateMutex);
+    if (gSelected == kNoRoute) gDiscoveryStatus = status;
+    gRefusedModule = true;
+    gRefusedVersionRead = versionRead;
+    gRefusedVersion = version;
+    return first;
 }
 
 bool MatchingPath(HMODULE module, const wchar_t* expected) noexcept
@@ -618,51 +673,60 @@ void SetRuntimeValidator(RuntimeValidator validator) noexcept
     gRuntimeValidator.store(validator, std::memory_order_release);
 }
 
-void ObserveModule(HMODULE module, const wchar_t* path, uint64_t generation) noexcept
+Observation ObserveModule(HMODULE module, const wchar_t* path, uint64_t generation,
+    std::array<uint32_t, 4>* versionOut) noexcept
 {
-    if (!module || !generation || !MatchingPath(module, path)) return;
+    if (versionOut) *versionOut = {};
+    if (!module || !generation || !MatchingPath(module, path)) return Observation::eNone;
     for (Route& route : gRoutes)
     {
         if (route.owner.load(std::memory_order_acquire) != module) continue;
         if (route.generation != generation) route.stale.store(true, std::memory_order_release);
-        return;
+        return Observation::eNone;
+    }
+    {
+        std::lock_guard lock(gDiscoveryMutex);
+        const RefusedModule* refused = FindRefused(module, generation);
+        if (refused && refused->status == Status::eUnsupportedModule) return Observation::eNone;
     }
     // Reserve/publish immutable route metadata before enabling any entry. The
     // resolver runs without our locks, and returns only module-owned functions.
     HMODULE retained = nullptr;
     if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
-            reinterpret_cast<LPCWSTR>(module), &retained) || retained != module) return;
+            reinterpret_cast<LPCWSTR>(module), &retained) || retained != module) return Observation::eNone;
     struct ModuleLease
     {
         HMODULE module;
         ~ModuleLease() { FreeLibrary(module); }
     } lease{retained};
     const auto resolver = reinterpret_cast<Resolver>(GetProcAddress(module, "slGetPluginFunction"));
-    if (!OwnedExecutable(module, reinterpret_cast<void*>(resolver))) return;
+    if (!OwnedExecutable(module, reinterpret_cast<void*>(resolver))) return Observation::eNone;
     std::array<void*, kEntryCount> targets{};
-    for (size_t i = 0; i < targets.size(); ++i)
+    bool complete = true;
+    for (size_t i = 0; i < targets.size() && complete; ++i)
     {
         targets[i] = Resolve(resolver, kNames[i]);
         if (!OwnedExecutable(module, targets[i]))
         {
-            if (i == 0) return; // A different Streamline feature is not Reflex.
-            std::lock_guard lock(gStateMutex);
-            if (gSelected == kNoRoute) gDiscoveryStatus = Status::eHookUnavailable;
-            return;
+            if (i == 0) return Observation::eNone; // A different Streamline feature is not Reflex.
+            complete = false;
+            break;
         }
         for (size_t j = 0; j < i; ++j)
-            if (targets[i] == targets[j]) return;
+            if (targets[i] == targets[j]) return Observation::eNone;
     }
     std::array<uint32_t, 4> version{};
-    if (!ReadVersion(module, version))
-    {
-        std::lock_guard lock(gStateMutex);
-        if (gSelected == kNoRoute) gDiscoveryStatus = Status::eUnsupportedModule;
-        return;
-    }
+    const bool versionRead = ReadVersion(module, version);
+    if (versionOut) *versionOut = version;
+    if (!complete)
+        return Refuse(module, generation, Status::eHookUnavailable, version, versionRead)
+            ? Observation::eHookUnavailable : Observation::eNone;
+    if (!versionRead || !SupportedVersion(version))
+        return Refuse(module, generation, Status::eUnsupportedModule, version, versionRead)
+            ? Observation::eRefusedVersion : Observation::eNone;
     HMODULE pinned = nullptr;
     if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
-            reinterpret_cast<LPCWSTR>(resolver), &pinned) || pinned != module) return;
+            reinterpret_cast<LPCWSTR>(resolver), &pinned) || pinned != module) return Observation::eNone;
     size_t index = kNoRoute;
     {
         std::lock_guard lock(gDiscoveryMutex);
@@ -674,11 +738,11 @@ void ObserveModule(HMODULE module, const wchar_t* path, uint64_t generation) noe
             {
                 if (route.generation != generation || route.targets != targets)
                     route.stale.store(true, std::memory_order_release);
-                return;
+                return Observation::eNone;
             }
             if (!existing && index == kNoRoute) index = i;
         }
-        if (index == kNoRoute) return;
+        if (index == kNoRoute) return Observation::eNone;
         Route& route = gRoutes[index];
         route.generation = generation;
         route.version = version;
@@ -697,6 +761,7 @@ void ObserveModule(HMODULE module, const wchar_t* path, uint64_t generation) noe
         void* original = nullptr;
         entry_detour::Install(kKinds[i], module, targets[i], kThunks[index][i], original, options);
     }
+    return Observation::eRouted;
 }
 
 Snapshot ReadSnapshot() noexcept
@@ -741,6 +806,9 @@ Snapshot ReadSnapshot() noexcept
         result.requestedFrameLimitFps = gDesired.fps;
         result.requestedFrameLimitUs = gDesired.us;
         result.eligible = desired.eligible;
+        result.refusedModule = gRefusedModule;
+        result.refusedVersionRead = gRefusedVersionRead;
+        result.refusedVersion = gRefusedVersion;
     }
     if (selected != kNoRoute && !Current(selected, &result))
     {

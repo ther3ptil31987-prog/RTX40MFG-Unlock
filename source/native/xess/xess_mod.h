@@ -5,6 +5,8 @@
 #include <memory>
 #include <string>
 
+struct ID3D12Device;
+
 namespace xess_mod
 {
 struct Snapshot
@@ -84,7 +86,31 @@ struct HostCallScope
     HostCallScope(const HostCallScope&) = delete;
     bool previous;
 };
+// alpha.15 (B4-05): whether the host-owned XeFG context kept RTXMFG's menu on its native output chain at its last
+// initialization; reason = the attach's refusal (a literal) when not.
+bool HostOutputAttached(const void* handle, const char** reason) noexcept;
 bool HostOwnedHandle(const void* handle, bool fg) noexcept;
+// vkxefg.1: RTXMFG's own Vulkan host (xess/vulkan/vk_host.cpp) loads libxess_fg/libxell itself and drives XeFG on
+// the xvk D3D12-on-Vulkan layer. Adopting its pair activates the SDK route on exactly those modules (no OptiScaler
+// needed); calls the host makes inside a VulkanHostCallScope then take the OptiScaler host path (port, unlock,
+// pacing owner). Returns whether the route is active on that pair.
+bool AdoptVulkanHostPair(HMODULE fg, HMODULE ll) noexcept;
+// vkxefg.2: the pair the active route drives (OptiScaler's, when it loaded one first), false while inactive.
+bool ActiveSdkPair(HMODULE& fg, HMODULE& ll) noexcept;
+// vkxefg.2: the export's code jumps into OptiScaler (its XeLL input took it).
+bool HostRedirectedExport(HMODULE module, const char* name) noexcept;
+struct VulkanHostCallScope
+{
+    VulkanHostCallScope() noexcept;
+    ~VulkanHostCallScope();
+    VulkanHostCallScope(const VulkanHostCallScope&) = delete;
+    bool previous;
+};
+// The host's xvk device: driver-specific presentation paths (NVAPI flip metering) never get its queues.
+void SetVulkanHostDevice(ID3D12Device* device) noexcept;
+// xemfgsa.3: the XeMFG standalone D3D12 host's device (xess/d3d12_host.cpp): its flip queue is off and XeFG's native
+// chain keeps the game's buffer count, as on the Vulkan host (ConfigureFlipQueue, HostNativeBuffers).
+void SetStandaloneHostDevice(ID3D12Device* device) noexcept;
 void WriteLog(const char* stage, const std::string& fields) noexcept;
 HMODULE Self() noexcept;
 bool Active() noexcept;

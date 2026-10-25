@@ -3,6 +3,8 @@
 #include "checked_memory.h"
 #include "../sha256_util.h"
 #include <bcrypt.h>
+#include <cstddef>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -99,8 +101,16 @@ bool ShaderCache::Translate(std::span<const std::byte> source,ShaderKind kind,st
         const auto begin=s.find("; Resource Bindings:"),end=s.find("target datalayout",begin);
         return begin!=std::string::npos&&end!=std::string::npos?s.substr(begin,end-begin):std::string{};
     };
+    // The path tracer keeps its NVIDIA-extension (SER) sequences and every
+    // TraceRay; the hair shaders must have no extension sequence left.
+    const auto count=[](const std::string& s,std::string_view needle) {
+        size_t n=0;for(size_t at=s.find(needle);at!=std::string::npos;at=s.find(needle,at+needle.size()))++n;return n;
+    };
+    const bool path=kind==ShaderKind::PathTracer;
     if(bindings(original).empty()||bindings(original)!=bindings(finalIr)
-        ||finalIr.find("call i32 @dx.op.bufferUpdateCounter")!=std::string::npos
+        ||(path?count(finalIr,"call i32 @dx.op.bufferUpdateCounter")!=count(original,"call i32 @dx.op.bufferUpdateCounter")
+            ||count(finalIr,"call void @dx.op.traceRay")!=count(original,"call void @dx.op.traceRay")
+            :finalIr.find("call i32 @dx.op.bufferUpdateCounter")!=std::string::npos)
         ||(kind==ShaderKind::Prepass&&finalIr.find("HairPrevPositionBuffers")==std::string::npos)) {
         output.clear();error="shader interface or extension validation failed";return false;
     }
@@ -138,18 +148,75 @@ bool ShaderCache::Prepare(HMODULE game,const std::array<uint32_t,4>& rvas,const 
         selected=identity;originals_[i]=p;
         if(i==0&&!Translate(source,kind,closest_,error))return false;
         if(i==2&&!Translate(source,kind,prepass_,error))return false;
+        if(i==0)closestApplied_=RoundHitDistance()&&RoundHitDistanceSupported(*identity);
+        if(i==2)prepassApplied_=RoundHitDistance()&&RoundHitDistanceSupported(*identity);
+        if(i==0)closestAlbedo_=HairAlbedoLinear()&&identity->albedo;
+        if(i==2)prepassAlbedo_=HairAlbedoLinear()&&identity->albedo;
     }
+    prepassTranslucent_=HairTranslucency()&&prepassIdentity_&&prepassIdentity_->translucency;
+    PreparePathTracer(game);
     return Ready();
+}
+// Hair translucency: the translucency-only libraries (the game's path tracer
+// and its shadow passes), each found in the image by its exact size and
+// SHA-256 and translated once. Unknown or failed: the game's own library stays
+// in use (PathTracerState lists each library's outcome).
+void ShaderCache::PreparePathTracer(HMODULE game) {
+    translucent_.clear();
+    bool any=false;
+    for(const auto& shader:KnownShaders())any=any||(shader.kind==ShaderKind::PathTracer&&TranslationWanted(shader));
+    if(!any) {pathTracerState_="off";return;}
+    pathTracerState_.clear();
+    for(const auto& shader:KnownShaders())if(shader.kind==ShaderKind::PathTracer) {
+        if(!pathTracerState_.empty())pathTracerState_+=", ";
+        pathTracerState_+=std::string(shader.label?shader.label:"library")+" "
+            +(TranslationWanted(shader)?PrepareTranslucent(game,shader):std::string("unchanged"));
+    }
+    if(pathTracerState_.empty())pathTracerState_="no known libraries";
+}
+std::string ShaderCache::PrepareTranslucent(HMODULE game,const ShaderIdentity& shader) {
+    const ShaderIdentity* known=&shader;
+    try {
+        const auto* base=reinterpret_cast<const std::byte*>(game);
+        IMAGE_DOS_HEADER dos{};IMAGE_NT_HEADERS64 nt{};
+        if(!CopyChecked(&dos,base,sizeof(dos))||dos.e_magic!=IMAGE_DOS_SIGNATURE||dos.e_lfanew<=0
+            ||!CopyChecked(&nt,base+dos.e_lfanew,sizeof(nt))||nt.Signature!=IMAGE_NT_SIGNATURE)return "game image headers unreadable";
+        const auto* sections=base+dos.e_lfanew+offsetof(IMAGE_NT_HEADERS64,OptionalHeader)+nt.FileHeader.SizeOfOptionalHeader;
+        std::vector<std::byte> source;
+        for(WORD i=0;i<nt.FileHeader.NumberOfSections&&source.empty();++i) {
+            IMAGE_SECTION_HEADER section{};
+            if(!CopyChecked(&section,sections+size_t(i)*sizeof(section),sizeof(section)))break;
+            if(!(section.Characteristics&IMAGE_SCN_MEM_READ)||(section.Characteristics&IMAGE_SCN_MEM_EXECUTE)||section.Misc.VirtualSize<known->size)continue;
+            const auto* p=base+section.VirtualAddress;const size_t n=section.Misc.VirtualSize;
+            if(!Readable(p,n))continue;
+            for(size_t at=0;at+known->size<=n;at+=4) {
+                uint32_t size{};
+                if(std::memcmp(p+at,"DXBC",4))continue;
+                std::memcpy(&size,p+at+24,sizeof(size));
+                if(size!=known->size)continue;
+                std::vector<std::byte> candidate(p+at,p+at+size);
+                if(HashEquals(candidate,known->sha256)) {source=std::move(candidate);break;}
+            }
+        }
+        if(source.empty())return "not found (unknown game build)";
+        std::string error;std::vector<std::byte> translated;
+        if(!Translate(source,ShaderKind::PathTracer,translated,error))return "translation failed: "+error;
+        translucent_.push_back({known,std::move(translated)});
+        return "translated";
+    } catch(...) {return "preparation failed";}
 }
 std::span<const std::byte> ShaderCache::Replacement(const void* data,size_t size) const noexcept {
     // Some engines copy embedded DXIL before creating the state object. Size is
     // only a cheap filter; exact live content establishes the shader identity.
     try {
-        if(!Ready()||!closestIdentity_||!prepassIdentity_||(size!=closestIdentity_->size&&size!=prepassIdentity_->size)||!Readable(data,size))return {};
-        const auto* identity=size==closestIdentity_->size?closestIdentity_:prepassIdentity_;
+        if(!Ready()||!closestIdentity_||!prepassIdentity_)return {};
+        const std::vector<std::byte>* replacement=size==closestIdentity_->size?&closest_:size==prepassIdentity_->size?&prepass_:nullptr;
+        const ShaderIdentity* identity=size==closestIdentity_->size?closestIdentity_:size==prepassIdentity_->size?prepassIdentity_:nullptr;
+        for(const auto& library:translucent_)if(!identity&&size==library.identity->size) {identity=library.identity;replacement=&library.bytes;}
+        if(!identity||!Readable(data,size))return {};
         std::vector<std::byte> copy(size);
         if(!CopyChecked(copy.data(),data,size)||!HashEquals(copy,identity->sha256))return {};
-        return identity==closestIdentity_?std::span<const std::byte>(closest_):std::span<const std::byte>(prepass_);
+        return std::span<const std::byte>(*replacement);
     } catch(...) {}
     return {};
 }

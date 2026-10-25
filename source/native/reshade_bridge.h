@@ -1,4 +1,5 @@
 #pragma once
+#include "dlss5_policy.h"
 #include "build_variant.h"
 
 #include <Windows.h>
@@ -269,5 +270,26 @@ struct MfgUnlockReShadeSnapshot
     // Source of dlssFpsMilli: 0 unavailable, 1 present callback, 2 DXGI
     // present count, 4 DLSS-G's own presented-frame count.
     uint32_t fpsOutputSource = 0;
+    // V1.7.0 DLSSNR: saved settings and independently observed execution.
+    dlss5::Settings dlss5{};
+    BOOL dlss5Detected=FALSE, dlss5Pending=FALSE;
+    uint32_t dlss5State=0, dlss5Result=0, dlss5Route=0, dlss5Stage=0, dlss5Passes=0;
+    uint32_t dlss5Width=0, dlss5Height=0, dlss5ExtentWidth=0, dlss5ExtentHeight=0;
+    uint64_t dlss5Evaluations=0;
+    // DLSS 5 Auto: live Resolution Scale, stage GPU time (-1 before the first
+    // measurement) and its budget, adaptive exposure gain.
+    float dlss5EffectiveScale=0.0f, dlss5GpuMs=-1.0f, dlss5BudgetMs=0.0f, dlss5ExposureGain=1.0f;
+    // OptiScaler UI owner (status "optiScalerUiOwner"): 0 none, 1 shared (its menu
+    // owns frame generation, this menu the DLSS presets and DLSS 5), 2 optiscaler
+    // (no RTXMFG menu), 3 rtxmfg.
+    uint32_t optiScalerUiOwner=0;
+    // DLSS 5: the real frame interval its GPU time is a share of (status "dlss5FrameMs").
+    float dlss5FrameMs=0.0f;
+    // Boost: a network evaluation's GPU time; dlss5GpuMs is then the mean per
+    // evaluation (status "dlss5BoostNetworkMs", -1 without Boost).
+    float dlss5BoostNetworkMs=-1.0f;
+    // Resolution Scale Auto holds its quality floor while DLSS 5 stays over
+    // budget (status "dlss5ScaleFloorHeld", autoscale.1).
+    BOOL dlss5ScaleFloorHeld=FALSE;
 };
 

@@ -95,4 +95,68 @@ private:
     std::vector<uint8_t> before, after;
     bool applied{};
 };
+
+// V1.6.1 pacing.1: XeFG's generated-output ring (ring2.1-2.3 of 5 Oct, never in the OptiScaler route). The chain
+// keeps its output textures in a ring of entries (fg78/fg68: array chain+0x108, count +0x110; fg95: +0x110/+0x118),
+// set to ONE entry by the allocator (fg78 0x20792F / fg68 0x2078DF `mov qword ptr [rbx+8],1`, fg95 0x203B0D
+// `mov qword ptr [rcx+8],1`, each followed by the call that sizes the array). Each frame's generation is recorded on
+// the game's queue and first waits on its entry's release value (fg78 0x20B65E frame % count, 0x20B69C Wait). The
+// presenter signals that value only after the batch's paced real frame. With one entry the next generation, and all
+// of the game's GPU work queued after it, waits until the previous batch has been presented: the GPU idles while the
+// outputs are paced, and the real frame -> next first output gap is generation + copies instead of the interval.
+// Two entries let generation k+1 fill entry (k+1)%2 while batch k is presented; each entry's own release value still
+// gates its reuse. The array sizing, per-frame indexing, output allocation (fg95: on demand per count, over every
+// entry) and teardown all use the stored count. The only byte written is the immediate.
+// The instruction is found by exact bytes (the call's displacement aside) in the image's executable sections and must
+// be unique; the count field it writes must be the one a per-frame `div qword ptr [r13+count]` reads; no base
+// relocation may touch it. Throws std::runtime_error with the reason.
+class OutputRing
+{
+public:
+    OutputRing(HMODULE fg, uint8_t depth);
+    ~OutputRing() = default; // production keeps it for the process lifetime (chains are sized with it)
+    OutputRing(const OutputRing&) = delete;
+    OutputRing& operator=(const OutputRing&) = delete;
+    // Writes the original depth back (tests).
+    void Restore();
+    uint32_t Rva() const noexcept { return rva; } // the mov instruction
+    uint32_t CountOffset() const noexcept { return countOffset; }
+    uint8_t Depth() const noexcept { return depth; }
+    bool Applied() const noexcept { return applied; }
+private:
+    uint8_t* immediate{};
+    uint32_t rva{}, countOffset{};
+    uint8_t depth{};
+    DWORD protection{};
+    bool applied{};
+};
+
+// V1.6.2-alpha.20 hdrpq.1: XeFG's HDR10 (PQ) flag. The proxy swap chain's SetColorSpace1 (fg78 0x20DBC0, fg95
+// 0x20A600) passes `space == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020` (0xC) through the context (+48h, fg95 +50h)
+// and its inner context (+5F8h) to XefgContext vtable +98h, the only writer of the model's flag (XefgModel +14Ch); the
+// model copies it into the shaders' per-frame constants. A re-init builds a new model with the flag 0. Set, bright
+// HDR10 areas interpolate badly on high-peak-brightness displays (Discord, 23 Oct: a third-party plug-in fixed it by
+// forcing re-inits, which also undid fg_live_count_no_reinit). The `sete dl` becomes a 3-byte nop: the call passes the
+// preceding xor's 0 and the colour space still reaches the native swap chain (vtable +130h). The function is found by
+// exact bytes (displacements aside) in the executable sections and must be unique; its native-chain field must be the
+// family's, its context field the family's, and its call must reach (through at most one jmp thunk) the forwarder to
+// the inner context +5F8h. fg78 and fg95 only. Throws std::runtime_error with the reason.
+class Hdr10Flag
+{
+public:
+    explicit Hdr10Flag(HMODULE fg);
+    ~Hdr10Flag() = default; // production keeps it for the process lifetime (proxy swap chains call it)
+    Hdr10Flag(const Hdr10Flag&) = delete;
+    Hdr10Flag& operator=(const Hdr10Flag&) = delete;
+    // Writes the stock sete back (tests).
+    void Restore();
+    uint32_t Rva() const noexcept { return rva; } // the proxy's SetColorSpace1
+    uint32_t ContextOffset() const noexcept { return contextOffset; }
+    bool Applied() const noexcept { return applied; }
+private:
+    uint8_t* sete{};
+    uint32_t rva{}, contextOffset{};
+    DWORD protection{};
+    bool applied{};
+};
 }

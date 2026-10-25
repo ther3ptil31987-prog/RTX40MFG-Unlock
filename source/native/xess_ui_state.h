@@ -18,7 +18,36 @@ struct State
     std::string tensorCoreReason;
     std::string runtimeFailure, status, adapter;
     std::string activeFrameGeneration = "none";
+    // xemfgsa.1: XeMFG standalone, RTXMFG as the XeFG host without OptiScaler (the saved switch and frame count, and
+    // the host of the game's API: state off/optiscaler/waiting/active/restart/unavailable, why, input source).
+    BOOL xemfgStandalone = FALSE, xemfgGenerating = FALSE, xemfgGameFg = FALSE, xemfgFsrFg = FALSE;
+    uint32_t xemfgSavedFrames = 0, xemfgFrames = 0;
+    std::string xemfgState, xemfgReason, xemfgSource, xemfgApi;
+    // alpha.15 (B4-12): after a failed runtime search, the RTXMFG-XeSS folder beside MFG Unlocker, the game's EXE folder
+    // and a near-miss name (UTF-8; empty from older backends).
+    std::string xemfgRuntimeSearch, xemfgRuntimeGame, xemfgRuntimeMisnamed;
+    // xemfgsa.5: the game's and XeMFG's frame rates (FPS x 1000) and the sample's age in ms (absent = no sample), the
+    // FPS limit the host applies and whether XeLL holds it.
+    uint32_t xemfgBaseFpsMilli = 0, xemfgOutputFpsMilli = 0, xemfgFpsAgeMs = UINT32_MAX, xemfgFpsLimit = 0;
+    BOOL xemfgFpsLimited = FALSE;
+    // xemfgsa.6: Dynamic MFG's saved settings (xemfgSavedFrames is its most frames: target 0 = the FPS limit, else just
+    // under the refresh rate; rounding 0 at most, 1 nearest, 2 at least), and while it runs its target and cap mode.
+    BOOL xemfgDynamic = FALSE, xemfgAllow1x = TRUE, xemfgTargetAsCap = FALSE;
+    uint32_t xemfgTargetFps = 0, xemfgRounding = 1;
+    BOOL xemfgDynamicActive = FALSE, xemfgDynamicCap = FALSE;
+    uint32_t xemfgDynamicTargetMilli = 0;
 };
+
+// xemfgsa.5: a frame-rate sample fresh enough to show (the backend rewrites its status about once a second).
+inline bool XemfgFpsCurrent(const State& state) noexcept
+{
+    return state.xemfgBaseFpsMilli > 0 && state.xemfgFpsAgeMs <= 2000;
+}
+// XeMFG standalone runs here: the switch is on without OptiScaler and a host has the game's chain (or waits for it).
+inline bool XemfgRuns(const State& state) noexcept
+{
+    return state.xemfgStandalone && !state.optiScaler && (state.xemfgState == "active" || state.xemfgState == "waiting");
+}
 
 // Use the frontend's existing scalar readers. Absent fields stay false or zero,
 // so an older native snapshot cannot imply an applied count.
@@ -29,6 +58,32 @@ State Read(const std::string& text, BoolReader boolean, IntegerReader integer, S
     integer(text, "gpuVendorId", next.gpuVendorId);
     string(text, "activeFrameGeneration", next.activeFrameGeneration);
     boolean(text, "optiScalerDetected", next.optiScaler);
+    boolean(text, "xemfgStandalone", next.xemfgStandalone);
+    boolean(text, "xemfgGenerating", next.xemfgGenerating);
+    boolean(text, "xemfgGameFg", next.xemfgGameFg);
+    boolean(text, "xemfgFsrFg", next.xemfgFsrFg);
+    integer(text, "xemfgSavedFrames", next.xemfgSavedFrames);
+    integer(text, "xemfgFrames", next.xemfgFrames);
+    string(text, "xemfgState", next.xemfgState);
+    string(text, "xemfgReason", next.xemfgReason);
+    string(text, "xemfgSource", next.xemfgSource);
+    string(text, "xemfgApi", next.xemfgApi);
+    string(text, "xemfgRuntimeSearch", next.xemfgRuntimeSearch);
+    string(text, "xemfgRuntimeGame", next.xemfgRuntimeGame);
+    string(text, "xemfgRuntimeMisnamed", next.xemfgRuntimeMisnamed);
+    integer(text, "xemfgBaseFpsMilli", next.xemfgBaseFpsMilli);
+    integer(text, "xemfgOutputFpsMilli", next.xemfgOutputFpsMilli);
+    integer(text, "xemfgFpsAgeMs", next.xemfgFpsAgeMs);
+    integer(text, "xemfgFpsLimit", next.xemfgFpsLimit);
+    boolean(text, "xemfgFpsLimited", next.xemfgFpsLimited);
+    boolean(text, "xemfgDynamic", next.xemfgDynamic);
+    integer(text, "xemfgTargetFps", next.xemfgTargetFps);
+    integer(text, "xemfgRounding", next.xemfgRounding);
+    boolean(text, "xemfgAllow1x", next.xemfgAllow1x);
+    boolean(text, "xemfgTargetAsCap", next.xemfgTargetAsCap);
+    boolean(text, "xemfgDynamicActive", next.xemfgDynamicActive);
+    boolean(text, "xemfgDynamicCap", next.xemfgDynamicCap);
+    integer(text, "xemfgDynamicTargetMilli", next.xemfgDynamicTargetMilli);
     if (!boolean(text, "xessAvailable", next.available) || !next.available) return next;
     boolean(text, "xessHooksActive", next.hooksActive);
     boolean(text, "xessInitialized", next.initialized);
@@ -68,6 +123,8 @@ inline bool DlssMfgFamily(uint32_t gpuFamily) noexcept
 inline Section SettingsSection(const State& state, const std::string& lastActive, bool dlssOffered,
     uint32_t gpuFamily) noexcept
 {
+    // xemfgsa.1: with XeMFG standalone switched on, XeMFG replaces the game's frame generation on every GPU.
+    if (state.xemfgStandalone && !state.optiScaler) return Section::Xess;
     const std::string& selected = state.activeFrameGeneration != "none" ? state.activeFrameGeneration : lastActive;
     if (selected == "xess") return Section::Xess;
     if (selected == "dlss") return Section::Dlss;

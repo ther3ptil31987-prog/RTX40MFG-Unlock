@@ -194,6 +194,13 @@ struct Image
         return result;
     }
 };
+// A legacy 2x layout holds exactly one generated frame; an MFG layout holds
+// 1..5, whatever its startup cached.
+bool RingMaximumValid(const Layout& layout, uint32_t maximum) noexcept
+{
+    return layout.maximumGeneratedFrames == 1 ? maximum == 1
+        : maximum >= 1 && maximum <= layout.maximumGeneratedFrames;
+}
 bool ReadUnchecked(const Layout& layout, Capacity& value) noexcept
 {
     value = {};
@@ -201,9 +208,13 @@ bool ReadUnchecked(const Layout& layout, Capacity& value) noexcept
     if (!fields || !layout.contextSlot) return false;
     value.context = Field<uintptr_t>(layout.contextSlot, 0);
     if (!value.context || (layout.maximumGeneratedFrames != 1
-            && layout.maximumGeneratedFrames != ampere_mfg::kMaximumGeneratedFrames)
-        || Field<uint32_t>(value.context, fields->maximum) != layout.maximumGeneratedFrames) return false;
-    value.maximumGeneratedFrames = layout.maximumGeneratedFrames;
+            && layout.maximumGeneratedFrames != ampere_mfg::kMaximumGeneratedFrames)) return false;
+    // ringcap.1: an MFG wrapper sizes its ring from the maximum its startup
+    // cached (min(DLSSG.MultiFrameCountMax, 5)), which can be below the layout's
+    // five. That maximum N, with exactly N+1 buffers below, is the capacity.
+    const uint32_t maximum = Field<uint32_t>(value.context, fields->maximum);
+    if (!RingMaximumValid(layout, maximum)) return false;
+    value.maximumGeneratedFrames = maximum;
     const bool legacy = UsesPacer(layout);
     value.ringOwner = legacy ? Field<uintptr_t>(value.context, 0x18) : value.context;
     if (!value.ringOwner) return false;
@@ -415,5 +426,48 @@ Observation InspectFailure(const Layout& layout) noexcept
     }
     __except (EXCEPTION_EXECUTE_HANDLER) { result.buffersReadable = false; }
     return result;
+}
+const char* ReadFailure(const Layout& layout) noexcept
+{
+    __try
+    {
+        const Fields* fields = ProfileFields(layout);
+        if (!fields) return "profile-unknown";
+        if (!layout.contextSlot || !Range(layout.contextSlot, sizeof(void*), MEM_IMAGE, layout.module)) return "context-slot-unreadable";
+        const uintptr_t context = Field<uintptr_t>(layout.contextSlot, 0);
+        if (!context) return "context-null";
+        if (!Range(context, fields->maximum + sizeof(uint32_t), MEM_PRIVATE)) return "context-unreadable";
+        const bool legacy = UsesPacer(layout);
+        const uintptr_t ring = legacy ? Field<uintptr_t>(context, 0x18) : context;
+        if (!ring) return "ring-null";
+        if (legacy && !Range(ring, fields->count + sizeof(uint32_t), MEM_PRIVATE)) return "ring-unreadable";
+        const uint32_t count = Field<uint32_t>(ring, fields->count);
+        if (count < 2 || count > ampere_mfg::kPresentationBuffers) return "count-out-of-range";
+        const uintptr_t begin = Field<uintptr_t>(ring, fields->buffers);
+        if (!Range(begin, count * sizeof(uintptr_t), MEM_PRIVATE)) return "vector-unreadable";
+        // ReadUnchecked's checks, in its order.
+        const uint32_t maximum = Field<uint32_t>(context, fields->maximum);
+        if ((layout.maximumGeneratedFrames != 1 && layout.maximumGeneratedFrames != ampere_mfg::kMaximumGeneratedFrames)
+            || !RingMaximumValid(layout, maximum)) return "maximum-out-of-range";
+        if (count < maximum + 1 || (layout.maximumGeneratedFrames != 1 && count != maximum + 1)) return "count-not-maximum-plus-one";
+        if (!Field<uintptr_t>(context, fields->swapchain)) return "swapchain-null";
+        const uintptr_t end = Field<uintptr_t>(ring, fields->buffers + 8);
+        const uintptr_t capacity = Field<uintptr_t>(ring, fields->buffers + 16);
+        const size_t bytes = count * sizeof(uintptr_t);
+        if (begin % alignof(uintptr_t) || begin > UINTPTR_MAX - bytes || end != begin + bytes) return "vector-end-mismatch";
+        if (capacity < end || capacity - begin > 6 * sizeof(uintptr_t)) return "vector-capacity";
+        std::array<uintptr_t, ampere_mfg::kPresentationBuffers> buffers{};
+        memcpy(buffers.data(), reinterpret_cast<void*>(begin), bytes);
+        for (size_t i = 0; i < count; ++i)
+        {
+            if (!buffers[i]) return "entry-null";
+            for (size_t j = 0; j < i; ++j)
+                if (buffers[i] == buffers[j]) return "entry-duplicate";
+        }
+        Capacity first{}, again{};
+        if (!ReadUnchecked(layout, first) || !ReadUnchecked(layout, again) || again != first) return "changed-while-reading";
+        return "readable";
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return "read-fault"; }
 }
 }

@@ -7,7 +7,8 @@
 #include <mutex>
 
 // Frame-generation feature lifetime on the NGX runtime D3D12 route (V1.6.0 live
-// preset switching). ampere_backend counts every runtime-route FG Create while it
+// preset switching) and its Vulkan route (V1.6.2 vkpreset.1; Create and
+// CreateFeature1 alike). ampere_backend counts every runtime-route FG Create while it
 // runs and records each successful one by route and handle until its exact
 // successful Release. A provider FG Create outside every such Create, or a
 // successful Create that cannot be recorded, makes the tracker inexact for the

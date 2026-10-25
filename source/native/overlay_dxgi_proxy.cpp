@@ -8,13 +8,16 @@
 #include "overlay_platform.h"
 #include "vsync_control.h"
 #include <d3d12.h>
+#include <intrin.h>
 #include <mutex>
 #if MFG_UNLOCK_XESS
 #include "xess/xess_mod.h"
+#include "xess/d3d12_host.h"
 #endif
 #include <atomic>
 #include <new>
 #include <array>
+#include <intrin.h>
 
 namespace single_overlay::proxy {
 using Microsoft::WRL::ComPtr;
@@ -35,6 +38,13 @@ thread_local uint32_t creationDepth = 0;
 struct Creation {
     bool outer = creationDepth++ == 0 && !gInsideOverlay && !native::InsideLoader();
     ~Creation() { --creationDepth; }
+};
+// xefgmenu.1: a swapchain creation through a factory proxy, whose return gets
+// the menu; a frame generator's output chain created inside it does not.
+thread_local uint32_t swapchainCreations = 0;
+struct SwapchainCreation : Creation {
+    SwapchainCreation() { if (outer) ++swapchainCreations; }
+    ~SwapchainCreation() { if (outer) --swapchainCreations; }
 };
 template<class T> struct Lease {
     T* object;
@@ -89,8 +99,36 @@ template<class T> bool AlreadyWrapped(T* object, REFIID iid) noexcept {
     ComPtr<IUnknown> own;
     return object->QueryInterface(iid, reinterpret_cast<void**>(own.GetAddressOf())) == S_OK && own;
 }
+// diag171.1: which layers a swap-chain creation passed through. "name+0xRVA"
+// for an address inside a module image, "(none)" outside one.
+void ModuleAt(const void* address,wchar_t* text,size_t count) noexcept {
+    HMODULE module=nullptr;
+    if (!address||!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(address),&module)||!module) { swprintf_s(text,count,L"(none)"); return; }
+    wchar_t path[1024]{};
+    const DWORD n=GetModuleFileNameW(module,path,1024);
+    const wchar_t* leaf=n&&n<1024?wcsrchr(path,L'\\'):nullptr;
+    swprintf_s(text,count,L"%s+0x%llX",leaf?leaf+1:L"(unnamed)",
+        static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(address)-reinterpret_cast<uintptr_t>(module)));
+}
+std::atomic<uint64_t> creationsLogged{0};
+constexpr uint64_t kCreationLines=16;
+void LogSwapchainCreation(const char* method,void* caller,IUnknown* below,HRESULT hr,IUnknown* chain,bool outer) noexcept {
+    const uint64_t line=creationsLogged.fetch_add(1,std::memory_order_relaxed)+1;
+    if (line>kCreationLines) return;
+    wchar_t from[160]{},factory[224]{},created[224]{},text[900]{};
+    ModuleAt(caller,from,160);
+    Describe(below,factory,224);
+    if (SUCCEEDED(hr)) Describe(chain,created,224); else swprintf_s(created,224,L"(failed)");
+    swprintf_s(text,L"MFG_PROXY_UI swapchain creation %llu: method=%hs hr=0x%08lX outer=%u caller=%s factoryBelow={%s} chain={%s}",
+        static_cast<unsigned long long>(line),method,static_cast<unsigned long>(hr),static_cast<unsigned>(outer),from,factory,created);
+    single_module::Log(text);
+}
 
 void WrapSwapchain(IDXGISwapChain** result, IUnknown* queue, IDXGIFactory* parent) noexcept;
+#if MFG_UNLOCK_XESS
+bool WrapHostSwapchain(IDXGISwapChain** result, IUnknown* queue, IDXGIFactory* parent) noexcept;
+#endif
 class FactoryProxy final : public IDXGIFactory7 {
 public:
     ComPtr<IDXGIFactory> original;
@@ -124,36 +162,70 @@ public:
         // never assume the root pointer exposes that revision's vtable.
         return interfaces.Acquire(v,factoryIids[v],factoryLast[v])?interfaces.As<T>(v):nullptr;
     }
+#if MFG_UNLOCK_XESS
+    // xemfgsa.1: XeMFG standalone. The host creates the game's chain on XeFG; the menu's proxy must wrap it (its
+    // presents and its release are the host's frames and teardown), else the host gives it up and the game's chain is
+    // created natively.
+    bool HostCreate(IUnknown* q,HWND w,const DXGI_SWAP_CHAIN_DESC1& d,const DXGI_SWAP_CHAIN_FULLSCREEN_DESC* f,
+        IDXGIOutput* o,void* caller,IDXGISwapChain** out,HRESULT& hr) noexcept {
+        IDXGISwapChain1* created=nullptr;
+        // Asked while off as well: the host notes a chain created before the switch (restart needed).
+        if (!xess_d3d12::CreateSwapChain(q,w,&d,f,o,caller,&created,hr)||!created) return false;
+        IDXGISwapChain* chain=created;
+        if (!WrapHostSwapchain(&chain,q,this)) { xess_d3d12::Abandon(created); return false; }
+        *out=chain;
+        return true;
+    }
+#endif
     HRESULT STDMETHODCALLTYPE CreateSwapChain(IUnknown* q,DXGI_SWAP_CHAIN_DESC* d,IDXGISwapChain** out) override {
-        Lease lease(this); Creation creation;
+        Lease lease(this); SwapchainCreation creation;
+#if MFG_UNLOCK_XESS
+        if (creation.outer&&d&&out) {
+            DXGI_SWAP_CHAIN_DESC1 d1{d->BufferDesc.Width,d->BufferDesc.Height,d->BufferDesc.Format,FALSE,d->SampleDesc,
+                d->BufferUsage,d->BufferCount,DXGI_SCALING_STRETCH,d->SwapEffect,DXGI_ALPHA_MODE_UNSPECIFIED,d->Flags};
+            DXGI_SWAP_CHAIN_FULLSCREEN_DESC f{d->BufferDesc.RefreshRate,d->BufferDesc.ScanlineOrdering,d->BufferDesc.Scaling,d->Windowed};
+            HRESULT hr=E_FAIL;
+            if (HostCreate(q,d->OutputWindow,d1,&f,nullptr,_ReturnAddress(),out,hr)) return hr;
+        }
+#endif
         const HRESULT hr=original->CreateSwapChain(q,d,out);
+        LogSwapchainCreation("CreateSwapChain",_ReturnAddress(),original.Get(),hr,out?*out:nullptr,creation.outer);
         if (SUCCEEDED(hr)&&out&&*out&&creation.outer) WrapSwapchain(out,q,this);
         return hr;
     }
     HRESULT STDMETHODCALLTYPE CreateSwapChainForHwnd(IUnknown* q,HWND w,const DXGI_SWAP_CHAIN_DESC1* d,
         const DXGI_SWAP_CHAIN_FULLSCREEN_DESC* f,IDXGIOutput* o,IDXGISwapChain1** out) override {
-        Lease lease(this); Creation creation;
+        Lease lease(this); SwapchainCreation creation;
         auto* target=Revision<IDXGIFactory2>(2);
         if (!target) return E_NOINTERFACE;
+#if MFG_UNLOCK_XESS
+        if (creation.outer&&d&&out) {
+            HRESULT hr=E_FAIL;
+            if (HostCreate(q,w,*d,f,o,_ReturnAddress(),reinterpret_cast<IDXGISwapChain**>(out),hr)) return hr;
+        }
+#endif
         const HRESULT hr=target->CreateSwapChainForHwnd(q,w,d,f,o,out);
+        LogSwapchainCreation("CreateSwapChainForHwnd",_ReturnAddress(),target,hr,out?*out:nullptr,creation.outer);
         if (SUCCEEDED(hr)&&out&&*out&&creation.outer) WrapSwapchain(reinterpret_cast<IDXGISwapChain**>(out),q,this);
         return hr;
     }
     HRESULT STDMETHODCALLTYPE CreateSwapChainForCoreWindow(IUnknown* q,IUnknown* w,const DXGI_SWAP_CHAIN_DESC1* d,
         IDXGIOutput* o,IDXGISwapChain1** out) override {
-        Lease lease(this); Creation creation;
+        Lease lease(this); SwapchainCreation creation;
         auto* target=Revision<IDXGIFactory2>(2);
         if (!target) return E_NOINTERFACE;
         const HRESULT hr=target->CreateSwapChainForCoreWindow(q,w,d,o,out);
+        LogSwapchainCreation("CreateSwapChainForCoreWindow",_ReturnAddress(),target,hr,out?*out:nullptr,creation.outer);
         if (SUCCEEDED(hr)&&out&&*out&&creation.outer) WrapSwapchain(reinterpret_cast<IDXGISwapChain**>(out),q,this);
         return hr;
     }
     HRESULT STDMETHODCALLTYPE CreateSwapChainForComposition(IUnknown* q,const DXGI_SWAP_CHAIN_DESC1* d,
         IDXGIOutput* o,IDXGISwapChain1** out) override {
-        Lease lease(this); Creation creation;
+        Lease lease(this); SwapchainCreation creation;
         auto* target=Revision<IDXGIFactory2>(2);
         if (!target) return E_NOINTERFACE;
         const HRESULT hr=target->CreateSwapChainForComposition(q,d,o,out);
+        LogSwapchainCreation("CreateSwapChainForComposition",_ReturnAddress(),target,hr,out?*out:nullptr,creation.outer);
         if (SUCCEEDED(hr)&&out&&*out&&creation.outer) WrapSwapchain(reinterpret_cast<IDXGISwapChain**>(out),q,this);
         return hr;
     }
@@ -213,6 +285,13 @@ public:
     uint64_t providerGeneration = 0;
     uint32_t activeMethods = 0;
     bool providerRetired = false;
+    // xefgmenu.1: XeFG's native output chain under OptiScaler (generation =
+    // its context's): the menu only, XeFG's sync intervals unchanged.
+    bool outputLayer = false;
+#if MFG_UNLOCK_XESS
+    // xemfgsa.1: XeFG's proxy chain of the XeMFG standalone host (xess/d3d12_host.h).
+    bool xemfgHost = false;
+#endif
     struct Method {
         SwapchainProxy* object;
         bool valid;
@@ -244,13 +323,30 @@ public:
         interfaces.Clear(); original.Reset(); parent.Reset(); providerChain.Reset();
         return true;
     }
+    // xefgmenu.1: XeFG's output chain loses its menu before XeFG's destruction,
+    // which releases this chain as its last user; until then it keeps
+    // forwarding. New methods wait on the lock while the session retires.
+    bool RetireRenderer(uint64_t generation) noexcept {
+        std::lock_guard lock(methodMutex);
+        if (!outputLayer || !generation || generation != providerGeneration || providerRetired || activeMethods) return false;
+        if (!renderer) return true;
+        if (!dx12::RetireSession(renderer)) return false;
+        dx12::DestroySession(renderer); renderer = nullptr;
+        return true;
+    }
     SwapchainProxy(ComPtr<IDXGISwapChain>&& base,IDXGIFactory* factory,dx12::Session* session,unsigned v) noexcept
         : original(std::move(base)),interfaces(original.Get(),v),parent(factory),renderer(session),version(v) { ++chains; }
     ~SwapchainProxy() {
         dx12::DestroySession(renderer);
+#if MFG_UNLOCK_XESS
+        IDXGISwapChain* const host = xemfgHost ? original.Get() : nullptr;   // identity only after the Reset
+#endif
         // No proxy/renderer locks are held while the existing chain executes
         // its final Release and any nested Steam/Streamline callbacks.
         interfaces.Clear(); original.Reset(); parent.Reset(); --liveChains;
+#if MFG_UNLOCK_XESS
+        if (host) xess_d3d12::ChainReleased(host);
+#endif
     }
     ULONG STDMETHODCALLTYPE AddRef() override { return refs.fetch_add(1,std::memory_order_relaxed)+1; }
     ULONG STDMETHODCALLTYPE Release() override {
@@ -284,18 +380,25 @@ public:
     // The optional V-Sync Off override applies to the application's own
     // top-level Presents only; nested calls keep their arguments.
     vsync_control::Submission AdjustSync(const PresentCall& call,UINT sync,UINT flags) noexcept {
-        if (!call.outer) { vsync_control::Submission same{}; same.interval=same.originalInterval=sync; return same; }
+        if (!call.outer || outputLayer) { vsync_control::Submission same{}; same.interval=same.originalInterval=sync; return same; }
         return vsync_control::BeforeApplicationPresent(sync,flags,dx12::IsPrincipal(renderer));
     }
     HRESULT STDMETHODCALLTYPE Present(UINT sync,UINT flags) override {
         Method lease(this); if (!lease.valid) return DXGI_ERROR_INVALID_CALL; PresentCall call(this);
 #if MFG_UNLOCK_XESS
-        if (call.outer && providerGeneration && !(flags & DXGI_PRESENT_TEST))
+        if (call.outer && providerChain && !(flags & DXGI_PRESENT_TEST))
             xess_mod::PreparePresent(providerChain.Get(), providerGeneration);
 #endif
         const bool entered=call.outer&&dx12::BeginPresent(renderer,flags,false);
         const auto vsync=AdjustSync(call,sync,flags);
+#if MFG_UNLOCK_XESS
+        const bool host=xemfgHost&&call.outer&&!(flags & DXGI_PRESENT_TEST);
+        if (host) xess_d3d12::BeforePresent(original.Get());
+#endif
         const HRESULT hr=original->Present(vsync.interval,flags);
+#if MFG_UNLOCK_XESS
+        if (host) xess_d3d12::AfterPresent(original.Get(),hr);
+#endif
         vsync_control::AfterApplicationPresent(vsync,hr);
         if (entered) dx12::EndPresent(renderer,hr,flags);
         return hr;
@@ -303,13 +406,20 @@ public:
     HRESULT STDMETHODCALLTYPE Present1(UINT sync,UINT flags,const DXGI_PRESENT_PARAMETERS* params) override {
         Method lease(this); if (!lease.valid) return DXGI_ERROR_INVALID_CALL; PresentCall call(this);
 #if MFG_UNLOCK_XESS
-        if (call.outer && providerGeneration && !(flags & DXGI_PRESENT_TEST))
+        if (call.outer && providerChain && !(flags & DXGI_PRESENT_TEST))
             xess_mod::PreparePresent(providerChain.Get(), providerGeneration);
 #endif
         const bool partial=params&&(params->DirtyRectsCount||params->pScrollRect||params->pScrollOffset);
         const bool entered=call.outer&&dx12::BeginPresent(renderer,flags,partial);
         const auto vsync=AdjustSync(call,sync,flags);
+#if MFG_UNLOCK_XESS
+        const bool host=xemfgHost&&call.outer&&!(flags & DXGI_PRESENT_TEST);
+        if (host) xess_d3d12::BeforePresent(original.Get());
+#endif
         const HRESULT hr=interfaces.As<IDXGISwapChain1>(1)->Present1(vsync.interval,flags,params);
+#if MFG_UNLOCK_XESS
+        if (host) xess_d3d12::AfterPresent(original.Get(),hr);
+#endif
         vsync_control::AfterApplicationPresent(vsync,hr);
         if (entered) dx12::EndPresent(renderer,hr,flags);
         return hr;
@@ -377,8 +487,25 @@ public:
     }
 };
 
+// alpha.15 (B4-26): a DirectX 11 (or 10) device where a D3D12 queue belongs (Metro Redux). Log only: the session
+// below still refuses it as before.
+bool OlderApiDevice(IUnknown* queue) noexcept {
+    static constexpr GUID kD3D11Device{0xdb6f6ddb,0xac77,0x4e88,{0x82,0x53,0x81,0x9d,0xf9,0xbb,0xf1,0x40}};
+    static constexpr GUID kD3D10Device{0x9b7e4c0f,0x342c,0x4106,{0xa1,0x9f,0x4f,0x27,0x04,0xf6,0x89,0xf0}};
+    ComPtr<ID3D12CommandQueue> d3d12;
+    if (SUCCEEDED(queue->QueryInterface(IID_PPV_ARGS(&d3d12)))) return false;
+    for (const GUID& iid : {kD3D11Device,kD3D10Device}) {
+        ComPtr<IUnknown> device;
+        if (SUCCEEDED(queue->QueryInterface(iid,reinterpret_cast<void**>(device.GetAddressOf())))) return true;
+    }
+    return false;
+}
+
 void WrapSwapchain(IDXGISwapChain** output,IUnknown* queue,IDXGIFactory* parent) noexcept {
     if (!output||!*output||!queue||native::InsideLoader()||liveChains.load()>=64) return;
+    static std::atomic<bool> olderApiLogged{false};
+    if (!olderApiLogged.load(std::memory_order_relaxed) && OlderApiDevice(queue) && !olderApiLogged.exchange(true))
+        single_module::Log(L"MFG_PROXY_UI DirectX 11 swap chain: the menu and XeMFG standalone need DirectX 12 or Vulkan; use OptiScaler for this game");
     Capacity capacity(liveChains); if(!capacity.held)return;
     InternalScope internal;
     if (!native::PinInterface(*output,2)||AlreadyWrapped(*output,chainId)) return;
@@ -398,6 +525,37 @@ void WrapSwapchain(IDXGISwapChain** output,IUnknown* queue,IDXGIFactory* parent)
     old->Release(); // Transfer only the reference returned by successful creation.
     single_module::Log(L"MFG_PROXY_UI swapchain proxy attached after existing creation chain completed; nativeTableWrites=0");
 }
+#if MFG_UNLOCK_XESS
+// xemfgsa.1: a proxy over the XeMFG host's chain (XeFG's proxy chain) that carries the host's present calls and the
+// game's release. No menu session: XeFG's chain is libxess_fg's object, which the renderer never takes; the menu sits
+// on XeFG's output chain instead (AttachOutputSwapchain during the takeover).
+bool WrapHostSwapchain(IDXGISwapChain** output,IUnknown*,IDXGIFactory* parent) noexcept {
+    const auto refuse=[](const wchar_t* step) {
+        wchar_t line[128]{}; swprintf_s(line,L"MFG_PROXY_UI XeMFG standalone chain not wrapped: %s",step);
+        single_module::Log(line); return false;
+    };
+    if (!output||!*output) return false;
+    if (native::InsideLoader()) return refuse(L"loader_lock");
+    Capacity capacity(liveChains); if(!capacity.held) return refuse(L"capacity");
+    InternalScope internal;
+    // No AlreadyWrapped test: XeFG's proxy passes unknown interfaces to its output chain, which carries our menu
+    // proxy (AttachOutputSwapchain), and this chain is the one the host just created.
+    if (!native::PinInterface(*output,2)) return refuse(L"pin");
+    ComPtr<IDXGISwapChain3> chain3;
+    if (FAILED((*output)->QueryInterface(IID_PPV_ARGS(&chain3)))||!chain3) return refuse(L"swapchain3");
+    ComPtr<IDXGISwapChain> base=chain3;
+    if (!native::PinInterface(base.Get(),chainLast[3])) return refuse(L"pin_swapchain3");
+    auto* proxy=new(std::nothrow) SwapchainProxy(std::move(base),parent,nullptr,3);
+    if (!proxy) return refuse(L"allocation");
+    proxy->xemfgHost=true;
+    capacity.Transfer();
+    auto* old=*output;
+    *output=proxy;
+    old->Release(); // The creation's reference moves to the proxy.
+    single_module::Log(L"MFG_PROXY_UI XeMFG standalone chain attached");
+    return true;
+}
+#endif
 
 void WrapFactory(REFIID iid,void** output) noexcept {
     if (!output||!*output||!single_module::OverlayAllowed()||Version(iid,factoryIids)<0||liveFactories.load()>=64) return;
@@ -447,6 +605,27 @@ bool Owned(IUnknown* object) noexcept {
     if (!object||!native::PinInterface(object,2)) return false;
     InternalScope internal;
     return AlreadyWrapped(object,factoryId)||AlreadyWrapped(object,chainId);
+}
+void Describe(IUnknown* object,wchar_t* text,size_t count) noexcept {
+    if (!object) { swprintf_s(text,count,L"null"); return; }
+    if (native::InsideLoader()) { swprintf_s(text,count,L"%p (loader lock)",static_cast<void*>(object)); return; }
+    // The pin checks the table and its first entries before any call.
+    if (!native::PinInterface(object,2)) { swprintf_s(text,count,L"%p unreadable-table",static_cast<void*>(object)); return; }
+    InternalScope internal;
+    const bool ours=AlreadyWrapped(object,factoryId)||AlreadyWrapped(object,chainId);
+    struct Kind { IID iid; const char* name; };
+    static const Kind kinds[]={{__uuidof(IDXGIFactory),"factory"},{__uuidof(IDXGISwapChain),"swapchain"},
+        {__uuidof(ID3D12Device),"d3d12-device"},{__uuidof(ID3D12CommandQueue),"d3d12-queue"},{__uuidof(IDXGIAdapter),"adapter"}};
+    const char* kind="other";
+    for (const auto& candidate:kinds) {
+        void* typed=nullptr;
+        const HRESULT hr=object->QueryInterface(candidate.iid,&typed);
+        if (typed) static_cast<IUnknown*>(typed)->Release();
+        if (hr==S_OK&&typed) { kind=candidate.name; break; }
+    }
+    wchar_t table[160]{};
+    ModuleAt((*reinterpret_cast<void***>(object))[0],table,160);
+    swprintf_s(text,count,L"%p %hs ours=%u queryInterface=%s",static_cast<void*>(object),kind,static_cast<unsigned>(ours),table);
 }
 bool WrapUpgraded(void** output) noexcept {
     if (!output||!*output||native::InsideLoader()) return false;
@@ -520,6 +699,55 @@ bool AttachProviderSwapchain(IDXGISwapChain* chain, ID3D12CommandQueue* queue,
     *output = wrapper;
     single_module::Log(L"MFG_PROXY_UI XeSS provider swapchain attached with exact generation and queue");
     return true;
+}
+const char* AttachOutputSwapchain(IDXGISwapChain1** chain, IUnknown* queue, HWND window, uint64_t generation,
+    IDXGISwapChain** keep) noexcept
+{
+    if (keep) *keep = nullptr;
+    if (!chain || !*chain || !queue || !generation || !keep) return "arguments";
+    if (!OutputSwapchainWanted()) return "ui_mode";
+    if (native::InsideLoader()) return "loader_lock";
+    // The factory route wraps what the game's creation returns (dlss5.8a/b):
+    // one menu per window, never this chain as well. xemfgsa.1: XeMFG
+    // standalone's takeover runs inside the factory route, and its game chain
+    // gets no menu (WrapHostSwapchain), so the menu goes here.
+#if MFG_UNLOCK_XESS
+    if (proxy::swapchainCreations && !xess_d3d12::InsideTakeover()) return "factory_route";
+#else
+    if (proxy::swapchainCreations) return "factory_route";
+#endif
+    if (WindowSession(window)) return "window_session";
+    proxy::Capacity capacity(proxy::liveChains);
+    if (!capacity.held) return "capacity";
+    InternalScope internal;
+    ComPtr<IDXGISwapChain3> version3;
+    if (!native::PinInterface(*chain, 2) || proxy::AlreadyWrapped(*chain, proxy::chainId)
+        || FAILED((*chain)->QueryInterface(IID_PPV_ARGS(&version3)))
+        || !native::PinInterface(version3.Get(), proxy::chainLast[3])) return "swapchain_interface";
+    if (!install::PrepareInput()) return "input_unavailable";
+    // Device, queue and LUID identity as for every session.
+    auto* session = CreateSession(version3.Get(), queue, nullptr, true);
+    if (!session) return "session_refused";
+    ComPtr<IDXGISwapChain> base = version3;
+    auto* wrapper = new(std::nothrow) proxy::SwapchainProxy(std::move(base), nullptr, session, 3);
+    if (!wrapper) { DestroySession(session); return "allocation"; }
+    wrapper->providerGeneration = generation;
+    wrapper->outputLayer = true;
+    capacity.Transfer();
+    auto* created = *chain;
+    *chain = wrapper; // XeFG's reference moves to the proxy.
+    created->Release();
+    wrapper->AddRef();
+    *keep = wrapper;
+    single_module::Log(L"MFG_PROXY_UI XeFG output swapchain attached (OptiScaler host route) with exact generation and queue");
+    return nullptr;
+}
+bool RetireOutputSwapchain(IDXGISwapChain* chain, uint64_t generation) noexcept
+{
+    if (!chain || !generation) return false;
+    ComPtr<IUnknown> owned;
+    if (chain->QueryInterface(proxy::chainId, reinterpret_cast<void**>(owned.GetAddressOf())) != S_OK || !owned) return false;
+    return static_cast<proxy::SwapchainProxy*>(owned.Get())->RetireRenderer(generation);
 }
 bool DetachProviderSwapchain(IDXGISwapChain* chain, uint64_t generation) noexcept
 {

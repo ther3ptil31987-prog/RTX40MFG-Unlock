@@ -1,9 +1,10 @@
-# Building v1.6.1
+# Building v1.7.0
 
-The v1.6.1 release combines the DLSS MFG backend, the built-in menu with its
+The v1.7.0 release combines the DLSS MFG backend, the built-in menu with its
 translations, RTX 50, RTX 30 and experimental RTX 20 support, and XeSS Multi Frame
-Generation (XeMFG) through OptiScaler, including the XeMFG tensor-core kernels,
-in one DLL. ProductVersion is 1.6.1; FileVersion is 1.6.1.1021.
+Generation (XeMFG) standalone or through OptiScaler, including the XeMFG
+tensor-core kernels, and the DLSS 5 stage, in one DLL. ProductVersion is
+1.7.0; FileVersion is 1.7.0.1145.
 
 The release target is `RTXMFGUnified`, producing `Release/MFGUnlocker.dll`.
 Use Windows x64, Visual Studio 2022/MSVC 14.38.33130, Windows SDK
@@ -15,6 +16,10 @@ Required external inputs:
 - Dear ImGui revision `3912b3d9a9c1b3f17431aebafd86d2f40ee6e59c`
   from ReShade 6.8.0, including its backends.
 - Vulkan SDK 1.2.176.1 headers and `glslangValidator.exe`.
+- Vulkan SDK 1.4.363.0 headers (the XeMFG Vulkan layer) and its `Bin/dxc.exe` with
+  `dxcompiler.dll` and `spirv-val.exe`, which compile `dlss5.cpp`'s DLSS 5 passes
+  to SPIR-V for the Vulkan stage (`build.ps1 -Dlss5VulkanDxc`; all three pinned
+  by SHA-256, and the generator pins every output).
 - XeSS SDK **3.0.2** public headers (`inc/xess_fg`, `inc/xell`).
 - CUDA Toolkit **13.2** (`nvcc` V13.2.51), for the XeMFG tensor-core kernels
   (`source/native/xess/cuda/xefg_cuda_layers.cu`). `build.ps1` defaults to
@@ -59,14 +64,30 @@ actual paths and a fresh build directory:
     -NativeCacheRoot 'C:/BuildInputs/rtxmfg-sm86' `
     -XessSdkRoot 'C:/SDKs/xess-sdk-3.0.2' `
     -XessProgramsRoot 'C:/BuildInputs/xess-programs' `
-    -BuildDirectory "$PWD/build/v1.6.1" `
-    -EnableNgxCreateResultDiagnostics
+    -BuildDirectory "$PWD/build/v1.7.0" `
+    -EnableNgxCreateResultDiagnostics `
+    -EnableSessionDiagnostics
 ```
 
 This reproduces the release configuration: the built-in menu and bounded hook
-installation are enabled, with the existing bounded NGX Create result log.
+installation are enabled, with the existing bounded NGX Create result log and
+the session diagnostics below.
 GPU fault capture, menu suppression, skipped GPU work and test fault injection
 remain disabled. Do not enable those diagnostic switches for a release build.
+
+Release, alpha and beta builds add `-EnableSessionDiagnostics`
+(`MFG_UNLOCK_SESSION_DIAGNOSTICS`).
+The runtime log then stamps every line with local time and opens with the
+Windows build, CPU, memory, display adapters and driver versions. It logs
+hook-state lines only when they change, and adds a `State` line when the
+frame-generation state changes. It records first-chance faults (observed, never
+handled) and unhandled exceptions with registers and an unwound stack, and
+writes a minidump beside the log (`*.crash.dmp`). A `Session end` record at
+process exit names the exiting thread's stack and the last state. A log that
+stops without `Session end` was ended abruptly: fail-fast, TerminateProcess or
+Task Manager, or a hang. If the runtime log is still held open by another
+process, the session writes `<log>.<pid>.log` and says why. The switch is off by
+default.
 
 The proxy dispatchers, Vulkan shader arrays, adapted ImGui DX12 backend, the
 embedded XeSS program table, MFG Unlocker's own XeFG shaders

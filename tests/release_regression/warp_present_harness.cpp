@@ -1364,6 +1364,165 @@ int RunDirectInputMenu(const wchar_t* dll)
     return gFailures == 0 ? 0 : 10;
 }
 
+// Pixels of Dear ImGui's arrow cursor (border, fill or shadow) whose tip is at
+// a client point, against the clear colour: all of them when the menu draws
+// its cursor there, none when it does not.
+unsigned CursorPixels(WarpFixture& fixture, Chain& chain, POINT tip, const float base[4])
+{
+    constexpr POINT offsets[]{{1, 3}, {1, 6}, {2, 5}, {2, 8}, {3, 7}, {3, 10}, {4, 9}, {5, 10}};
+    unsigned drawn = 0;
+    for (const auto& offset : offsets)
+    {
+        float pixel[4]{};
+        if (ReadCenter(fixture, chain, pixel, UINT(tip.x + offset.x), UINT(tip.y + offset.y))
+            && !PixelMatches(pixel, base))
+            ++drawn;
+    }
+    return drawn;
+}
+
+// Under frame generation the menu draws on every output frame, while the game
+// pumps its window messages once per game frame (Subnautica 2, XeMFG 6x: ~116
+// menu frames and ~20 pumps a second), so the mouse messages wait for the
+// next pump. On frames drawn between two pumps the open menu must put its
+// cursor where the mouse is. The menu draws its own cursor, so the frame shows
+// where the menu thinks the mouse is. A title-bar drag with a pump on every
+// other frame must still move the panel by exactly the drag.
+int RunSlowPumpMenu(const wchar_t* dll)
+{
+    // Physical pixels throughout: window, menu layout, monitors and injected input.
+    if (!Check(SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2),
+            "process is per-monitor DPI aware")) return 1;
+    wchar_t exe[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    const auto layout = std::filesystem::path(exe).parent_path() / L"RTX40MFG-UI-layout.ini";
+    WarpFixture fixture;
+    if (!Check(fixture.Initialize(true), "WARP device, queue and factory created")) return 1;
+    RestoreForeground previousForeground;
+    // Wide enough for clear background beside the default panel (570x610 at 24,24).
+    TestWindow window(L"SlowPumpMenu", 1280, 900, GameWindowProc);
+    if (!Check(window.window != nullptr, "test window created")) return 1;
+    window.Show();
+    // Backbuffer = client area: frame pixels and client coordinates match.
+    RECT client{};
+    if (!Check(GetClientRect(window.window, &client) && client.right > 200 && client.bottom > 200,
+            "test window client area")) return 1;
+    HMODULE module = LoadCandidate(dll);
+    if (!Check(module != nullptr, "candidate loads")) return 1;
+    ComPtr<IDXGIFactory1> applicationFactory;
+    if (!Check(SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&applicationFactory)))
+            && SUCCEEDED(applicationFactory.As(&fixture.factory)),
+            "application factory created through the menu's gateway"))
+        return 1;
+    Chain chain;
+    if (!Check(chain.Create(fixture, window.window, UINT(client.right), UINT(client.bottom), 2,
+                DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL)
+            && Status(module).swapchainWrappersCreated == 1,
+            "application swapchain wrapped by the menu"))
+        return 1;
+    float base[4] = {0.30f, 0.30f, 0.35f, 1.0f};
+    // Frames without a pump are the output frames between two game frames.
+    const auto frames = [&](int count, bool pump) {
+        for (int frame = 0; frame < count; ++frame)
+        {
+            RenderAndPresent(fixture, chain, base);
+            if (pump) window.Pump(2);
+        }
+    };
+    frames(8, true);
+
+    const DWORD ourThread = GetCurrentThreadId();
+    const DWORD foregroundThread = GetWindowThreadProcessId(GetForegroundWindow(), nullptr);
+    const bool attached = foregroundThread != ourThread && AttachThreadInput(ourThread, foregroundThread, TRUE);
+    BringWindowToTop(window.window); SetForegroundWindow(window.window); SetFocus(window.window);
+    if (attached) AttachThreadInput(ourThread, foregroundThread, FALSE);
+    window.Pump(2);
+    if (!Check(GetForegroundWindow() == window.window, "slow-pump menu test owns the foreground window")) return 2;
+
+    WPARAM key = 0;
+    {
+        const MfgSingleModuleStatus current = Status(module);
+        key = current.shortcutBindingActive ? current.shortcutVirtualKey : VK_BACK;
+    }
+    PostMessageW(window.window, WM_KEYDOWN, key, 0x000E0001);
+    PostMessageW(window.window, WM_KEYUP, key, 0xC0E0001);
+    frames(12, true);
+    if (!Check(Status(module).overlayVisible == 1, "menu hotkey made the overlay visible")) return 2;
+    std::optional<PanelLayout> before;
+    for (int attempt = 0; attempt < 40 && !(before = ReadPanel(layout)); ++attempt) frames(1, true);
+    if (!Check(before.has_value(), "menu layout saved with the panel position")) return 2;
+
+    // The cursor starts over the panel; the target is clear background beside
+    // or below it, with room for the arrow.
+    const POINT park{before->x + before->width / 2, before->y + before->height / 2};
+    POINT target{before->x + before->width + 20, before->y + 40};
+    if (target.x > client.right - 24) target = POINT{before->x + 40, before->y + before->height + 12};
+    if (!Check(target.x + 24 < client.right && target.y + 24 < client.bottom,
+            "clear background beside or below the panel")) return 2;
+    const auto screen = [&](POINT point) { ClientToScreen(window.window, &point); return point; };
+    Check(InjectMouse(screen(park), 0), "cursor parked over the panel");
+    Sleep(30); frames(4, true);
+    const unsigned parked = CursorPixels(fixture, chain, target, base);
+    std::printf("NOTE panel=%d,%d %dx%d park=%ld,%ld target=%ld,%ld cursor pixels at target before the move=%u\n",
+        before->x, before->y, before->width, before->height, park.x, park.y, target.x, target.y, parked);
+    Check(parked == 0, "no cursor at the target while the mouse is over the panel");
+
+    // The mouse moves between two pumps: its messages wait in the queue.
+    Check(InjectMouse(screen(target), 0), "cursor moved to the target");
+    Sleep(30);
+    frames(3, false);
+    const unsigned unpumped = CursorPixels(fixture, chain, target, base);
+    std::printf("NOTE cursor pixels at target before the pump=%u\n", unpumped);
+    Check(unpumped >= 6, "open menu: the cursor follows the mouse on frames drawn between two pumps");
+    frames(4, true);
+    const unsigned pumped = CursorPixels(fixture, chain, target, base);
+    std::printf("NOTE cursor pixels at target after the pump=%u\n", pumped);
+    Check(pumped >= 6, "open menu: the pumped messages leave the cursor at the mouse");
+
+    // Title-bar drag at a pump every other frame.
+    POINT grab{before->x + before->width / 2, before->y + 6};
+    const POINT shift{60, 40};
+    bool injected = InjectMouse(screen(grab), 0);
+    Sleep(30); frames(3, true);
+    injected &= InjectMouse(screen(grab), MOUSEEVENTF_LEFTDOWN);
+    Sleep(30); frames(3, true);
+    for (LONG step = 1; step <= 6; ++step)
+    {
+        injected &= InjectMouse(screen(POINT{grab.x + shift.x * step / 6, grab.y + shift.y * step / 6}), 0);
+        Sleep(20); frames(2, step % 2 == 0);
+    }
+    frames(2, true);
+    injected &= InjectMouse(screen(POINT{grab.x + shift.x, grab.y + shift.y}), MOUSEEVENTF_LEFTUP);
+    Sleep(30); frames(3, true);
+    Check(injected, "open menu: title-bar drag injected");
+    // Dear ImGui saves a moved window after io.IniSavingRate (5 s).
+    std::optional<PanelLayout> after;
+    for (const ULONGLONG start = GetTickCount64(); GetTickCount64() - start < 9000;)
+    {
+        frames(2, true);
+        Sleep(40);
+        after = ReadPanel(layout);
+        if (after && (after->x != before->x || after->y != before->y)) break;
+    }
+    std::printf("NOTE panel before=%d,%d after=%d,%d\n", before->x, before->y, after ? after->x : -1, after ? after->y : -1);
+    Check(after && std::abs(after->x - (before->x + shift.x)) <= 3 && std::abs(after->y - (before->y + shift.y)) <= 3,
+        "open menu: the panel follows a title-bar drag pumped every other frame");
+
+    PostMessageW(window.window, WM_KEYDOWN, key, 0x000E0001);
+    PostMessageW(window.window, WM_KEYUP, key, 0xC0E0001);
+    frames(8, true);
+    Check(Status(module).overlayVisible == 0, "second hotkey press closed the menu");
+    Check(SUCCEEDED(fixture.device->GetDeviceRemovedReason()), "device healthy after slow-pump menu use");
+    Chain::Drain(fixture, chain.swapchain.Get());
+    chain.buffers.clear();
+    chain.rtvs.Reset();
+    chain.swapchain.Reset();
+    Chain::Drain(fixture);
+    Check(Status(module).liveSwapchainWrappers == 0, "all swapchain proxies retired after teardown");
+    std::printf("COMPLETE mode=slowpump-menu\n");
+    return gFailures == 0 ? 0 : 10;
+}
+
 // Reads an export from the image's export table, as a protected executable
 // that resolves APIs itself does; GetProcAddress hooks never see it.
 FARPROC ExportAddress(HMODULE module, const char* name)
@@ -1911,6 +2070,7 @@ int wmain(int argc, wchar_t** argv)
     if (mode == L"vsync-override-menu") return RunVsyncOverride(dll);
     if (mode == L"pinned-fps-menu") return RunPinnedFps(dll);
     if (mode == L"directinput-menu") return RunDirectInputMenu(dll);
+    if (mode == L"slowpump-menu") return RunSlowPumpMenu(dll);
     std::printf("unknown mode\n");
     return 2;
 }

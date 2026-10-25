@@ -1,7 +1,9 @@
 #include "optiscaler_host.h"
 
 #include <winternl.h>
+#include <algorithm>
 #include <atomic>
+#include <cstring>
 #include <cwchar>
 
 namespace optiscaler_host
@@ -11,7 +13,9 @@ namespace
 std::atomic<uintptr_t> gBase{0};
 std::atomic<uint32_t> gImageSize{0};
 std::atomic<uint32_t> gRoute{static_cast<uint32_t>(Route::None)};
-std::atomic<bool> gUiOptIn{false};
+std::atomic<uint32_t> gUiMode{static_cast<uint32_t>(UiMode::Default)};
+constexpr uint32_t kUndecided = ~0u;
+std::atomic<uint32_t> gDefaultUiMode{kUndecided};
 std::atomic<bool> gPluginCallerAccepted{false};
 std::atomic<bool> gPluginCallerRejected{false};
 std::atomic<bool> gStarted{false};
@@ -152,6 +156,34 @@ bool CopyString(const wchar_t* text, size_t available, wchar_t* output, size_t c
 bool Equals(const wchar_t* a, const wchar_t* b) noexcept
 {
     return a && b && _wcsicmp(a, b) == 0;
+}
+
+bool Contains(const wchar_t* text, const wchar_t* part) noexcept
+{
+    const size_t length = wcslen(part);
+    for (; text && *text; ++text)
+        if (_wcsnicmp(text, part, length) == 0) return true;
+    return false;
+}
+
+// The executable's file name from the process parameters (fixed for the process; no loader list walk).
+bool ExecutableName(wchar_t* output, size_t count) noexcept
+{
+    output[0] = L'\0';
+    const auto* peb = reinterpret_cast<const PEB*>(NtCurrentTeb()->ProcessEnvironmentBlock);
+    if (!peb || !peb->ProcessParameters) return false;
+    const UNICODE_STRING& path = peb->ProcessParameters->ImagePathName;
+    if (!path.Buffer || !path.Length) return false;
+    const size_t length = path.Length / sizeof(wchar_t);
+    size_t start = length;
+    while (start && path.Buffer[start - 1] != L'\\' && path.Buffer[start - 1] != L'/') --start;
+    return CopyString(path.Buffer + start, length - start, output, count);
+}
+
+uint32_t Mode() noexcept
+{
+    const uint32_t mode = gUiMode.load(std::memory_order_acquire);
+    return mode == static_cast<uint32_t>(UiMode::Default) ? static_cast<uint32_t>(DefaultUiMode()) : mode;
 }
 
 bool ModulePathFromLoader(HMODULE module, wchar_t* output, size_t count) noexcept
@@ -296,9 +328,34 @@ bool AcceptPluginCaller(HMODULE caller) noexcept
     return true;
 }
 
-void SetUiOptIn(bool rtxmfgUi) noexcept
+void SetUiMode(UiMode mode) noexcept
 {
-    gUiOptIn.store(rtxmfgUi, std::memory_order_release);
+    gUiMode.store(static_cast<uint32_t>(mode), std::memory_order_release);
+}
+
+bool ForzaTechExecutable() noexcept
+{
+    const HMODULE executable = GetModuleHandleW(nullptr);
+    for (const wchar_t* key : {L"ProductName", L"FileDescription"})
+    {
+        wchar_t text[128]{};
+        if (ReadVersionString(executable, key, text, _countof(text))
+            && (Contains(text, L"Forza Motorsport") || Contains(text, L"Forza Horizon"))) return true;
+    }
+    wchar_t name[MAX_PATH]{};
+    return ExecutableName(name, _countof(name)) && _wcsnicmp(name, L"forza", 5) == 0;
+}
+
+UiMode DefaultUiMode() noexcept
+{
+    uint32_t mode = gDefaultUiMode.load(std::memory_order_acquire);
+    if (mode == kUndecided)
+    {
+        // Racing first callers compute the same value.
+        mode = static_cast<uint32_t>(ForzaTechExecutable() ? UiMode::Hidden : UiMode::Shared);
+        gDefaultUiMode.store(mode, std::memory_order_release);
+    }
+    return static_cast<UiMode>(mode);
 }
 
 bool Detected() noexcept
@@ -308,7 +365,12 @@ bool Detected() noexcept
 
 bool UiDelegated() noexcept
 {
-    return Detected() && !gUiOptIn.load(std::memory_order_acquire);
+    return Detected() && Mode() != static_cast<uint32_t>(UiMode::Full);
+}
+
+bool UiHidden() noexcept
+{
+    return Detected() && Mode() == static_cast<uint32_t>(UiMode::Hidden);
 }
 
 Route CurrentRoute() noexcept
@@ -339,8 +401,10 @@ Snapshot Read() noexcept
     Snapshot snapshot{};
     snapshot.route = CurrentRoute();
     snapshot.detected = Detected();
-    snapshot.uiOptIn = gUiOptIn.load(std::memory_order_acquire);
+    const uint32_t mode = Mode();
+    snapshot.uiOptIn = mode == static_cast<uint32_t>(UiMode::Full);
     snapshot.uiDelegated = snapshot.detected && !snapshot.uiOptIn;
+    snapshot.uiHidden = snapshot.detected && mode == static_cast<uint32_t>(UiMode::Hidden);
     snapshot.pluginCallerAccepted = gPluginCallerAccepted.load(std::memory_order_acquire);
     snapshot.pluginCallerRejected = gPluginCallerRejected.load(std::memory_order_acquire);
     snapshot.base = gBase.load(std::memory_order_acquire);
@@ -501,6 +565,156 @@ bool ReadXefgFlipMeteringHotkey(std::wstring& setting) noexcept
 {
     wchar_t value[32]{};
     return ReadXefgIni(L"XeFGFlipMeteringHotkey", value, setting) == XefgIniRead::eRead && SwitchWord(value, true);
+}
+
+int ReadXefgAmdFlipMeter(std::wstring& setting) noexcept
+{
+    wchar_t value[32]{};
+    if (ReadXefgIni(L"XeFGAmdFlipMeter", value, setting) != XefgIniRead::eRead) return 1;
+    return SwitchWord(value, false) ? 0 : SwitchWord(value, true) ? 2 : 1;
+}
+
+// V1.6.2-alpha.1 wine.1: Wine/Proton (its ntdll exports wine_get_version). There the flip queue is off unless
+// OptiScaler.ini sets XeFGFlipQueue: under vkd3d-proton it held the game (Stellar Blade, AMD, RADV, 6X: 6 fps base,
+// OptiScaler's Present 93 ms). Tester, 20 Oct: only XeFGFlipQueue = off fixed it (MAILBOX and FIFO alike; output ring
+// 1 made it worse), so the output ring keeps its default depth 2 there.
+bool RunningUnderWine() noexcept
+{
+    static const bool wine = [] {
+        const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+        return ntdll && GetProcAddress(ntdll, "wine_get_version") != nullptr;
+    }();
+    return wine;
+}
+
+// An [XeFG] key the user set: present, not empty and not "auto".
+template<size_t N> bool ReadXefgSetKey(const wchar_t* key, wchar_t (&value)[N], std::wstring& setting) noexcept
+{
+    return ReadXefgIni(key, value, setting) == XefgIniRead::eRead && value[0] && _wcsicmp(value, L"auto") != 0;
+}
+
+uint8_t ReadXefgOutputRing(std::wstring& setting) noexcept
+{
+    wchar_t value[32]{};
+    if (ReadXefgIni(L"XeFGOutputRing", value, setting) != XefgIniRead::eRead) return 2;
+    return _wcsicmp(value, L"1") == 0 || _wcsicmp(value, L"stock") == 0 || SwitchWord(value, false) ? 1 : 2;
+}
+
+bool ReadXefgHdr10FlagOff(std::wstring& setting) noexcept
+{
+    wchar_t value[32]{};
+    if (ReadXefgIni(L"XeFGHdr10Flag", value, setting) != XefgIniRead::eRead) return true;
+    return !(_wcsicmp(value, L"stock") == 0 || _wcsicmp(value, L"intel") == 0 || SwitchWord(value, true));
+}
+
+bool ReadXefgFlipQueue(std::wstring& setting) noexcept
+{
+    wchar_t value[32]{};
+    if (!ReadXefgSetKey(L"XeFGFlipQueue", value, setting))
+    {
+        if (!RunningUnderWine()) return true;
+        setting = L"auto (Wine/Proton)";
+        return false;
+    }
+    return !SwitchWord(value, false);
+}
+
+bool XefgFlipQueueSet() noexcept
+{
+    wchar_t value[32]{};
+    std::wstring setting;
+    return ReadXefgSetKey(L"XeFGFlipQueue", value, setting);
+}
+
+bool ReadXefgFlipQueueFirst(std::wstring& setting) noexcept
+{
+    wchar_t value[32]{};
+    if (ReadXefgIni(L"XeFGFlipQueueFirst", value, setting) != XefgIniRead::eRead) return true;
+    return !(_wcsicmp(value, L"buffer") == 0 || _wcsicmp(value, L"buffered") == 0 || SwitchWord(value, false));
+}
+
+namespace
+{
+// menu16.1: the marker and its terminator in a section of the image that is initialized data, readable, not writable,
+// not executable and not discardable (OptiScaler's .rdata), within min(VirtualSize, SizeOfRawData).
+bool ImageCarriesMenuFix(HMODULE module) noexcept
+{
+    const uint8_t* base = nullptr;
+    uint32_t size = 0;
+    if (!ImageBounds(module, base, size)) return false;
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base+reinterpret_cast<const IMAGE_DOS_HEADER*>(base)->e_lfanew);
+    const auto* section = IMAGE_FIRST_SECTION(nt);
+    const WORD sections = nt->FileHeader.NumberOfSections;
+    if (!Inside(size, static_cast<uint64_t>(reinterpret_cast<const uint8_t*>(section)-base),
+            static_cast<uint64_t>(sections)*sizeof(IMAGE_SECTION_HEADER))) return false;
+    constexpr size_t length = sizeof(kMenuFixMarker);
+    constexpr DWORD excluded = IMAGE_SCN_MEM_WRITE | IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_DISCARDABLE;
+    for (WORD i = 0; i < sections; ++i, ++section)
+    {
+        const DWORD flags = section->Characteristics;
+        if (!(flags & IMAGE_SCN_CNT_INITIALIZED_DATA) || !(flags & IMAGE_SCN_MEM_READ) || (flags & excluded)) continue;
+        const uint64_t bytes = std::min<uint64_t>(section->Misc.VirtualSize, section->SizeOfRawData);
+        if (bytes < length || !Inside(size, section->VirtualAddress, bytes)) continue;
+        const uint8_t* at = base+section->VirtualAddress;
+        const uint8_t* const last = at+(bytes-length);
+        while (at <= last)
+        {
+            at = static_cast<const uint8_t*>(std::memchr(at, kMenuFixMarker[0], static_cast<size_t>(last-at)+1));
+            if (!at) break;
+            if (std::memcmp(at, kMenuFixMarker, length) == 0) return true;
+            ++at;
+        }
+    }
+    return false;
+}
+
+std::atomic<uint32_t> gMenuBuffers{0};
+}
+
+uint32_t MenuBackBuffers() noexcept
+{
+    const uint32_t known = gMenuBuffers.load(std::memory_order_acquire);
+    if (known) return known;
+    // Nothing identified yet: the old limit, not remembered (the first identified image decides).
+    if (!gPublished.load(std::memory_order_acquire)) return kMenuBackBuffers;
+    const uint32_t buffers = ImageCarriesMenuFix(Module()) ? kFixedMenuBackBuffers : kMenuBackBuffers;
+    gMenuBuffers.store(buffers, std::memory_order_release);
+    return buffers;
+}
+
+uint32_t ReadXefgNativeBuffers(std::wstring& setting, uint32_t& requested) noexcept
+{
+    const uint32_t limit = MenuBackBuffers();
+    const uint32_t fallback = limit >= kFixedMenuBackBuffers ? kDefaultNativeBuffers : kMenuBackBuffers;
+    requested = fallback;
+    wchar_t value[16]{};
+    if (ReadXefgIni(L"XeFGNativeBuffers", value, setting) != XefgIniRead::eRead || !value[0] || _wcsicmp(value, L"auto") == 0)
+        return requested;
+    if (SwitchWord(value, false)) return requested = 0;
+    wchar_t* end{};
+    const unsigned long parsed = wcstoul(value, &end, 10);
+    while (end && (*end == L' ' || *end == L'\t')) ++end;
+    if (!end || end == value || *end || value[0] == L'-' || parsed < 2 || parsed > kFixedMenuBackBuffers) return requested;
+    requested = static_cast<uint32_t>(parsed);
+    return requested > limit ? limit : requested;
+}
+
+bool ReadXefgFlipQueueBuffer(uint32_t& percent, std::wstring& setting) noexcept
+{
+    percent = 0;
+    wchar_t value[16]{};
+    if (ReadXefgIni(L"XeFGFlipQueueBufferPct", value, setting) != XefgIniRead::eRead
+        || !value[0] || _wcsicmp(value, L"auto") == 0)
+    {
+        setting.clear();
+        return false;
+    }
+    wchar_t* end{};
+    const unsigned long parsed = wcstoul(value, &end, 10);
+    while (end && (*end == L' ' || *end == L'\t')) ++end;
+    if (!end || end == value || *end || value[0] == L'-' || parsed > 100) return false;
+    percent = static_cast<uint32_t>(parsed);
+    return true;
 }
 
 namespace

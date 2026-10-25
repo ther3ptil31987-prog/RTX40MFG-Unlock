@@ -5,6 +5,11 @@ param(
     [Parameter(Mandatory = $true)][string]$XessSdkRoot,
     [Parameter(Mandatory = $true)][string]$XessProgramsRoot,
     [string]$VulkanIncludeDirectory = 'C:/VulkanSDK/1.2.176.1/Include',
+    # vkxefg.1: the XeMFG Vulkan layer's headers (Vulkan 1.3 synchronization2/maintenance4) and its SPIR-V program set.
+    [string]$XvkVulkanIncludeDirectory = 'C:/VulkanSDK/1.4.363.0/Include',
+    [Parameter(Mandatory = $true)][string]$XvkProgramsRoot,
+    # vkdlss5.1: SPIR-V code generation for the DLSS 5 Vulkan passes (the same SDK's dxc and spirv-val).
+    [string]$Dlss5VulkanDxc = 'C:/VulkanSDK/1.4.363.0/Bin/dxc.exe',
     [string]$CMakeExecutable = 'C:/Program Files/CMake/bin/cmake.exe',
     [string]$VisualStudioInstance = 'C:/Program Files/Microsoft Visual Studio/2022/Professional',
     [string]$MsvcToolsVersion = '14.38.33130',
@@ -14,6 +19,9 @@ param(
     [switch]$EnableGpuFaultCapture,
     [switch]$SkipOverlayGpuWork,
     [switch]$EnableNgxCreateResultDiagnostics,
+    [switch]$EnableSessionDiagnostics,
+    [switch]$EnableXvkCapture,
+    [switch]$EnableXefgVkStandalone,
     [switch]$DisableSingleOverlay,
     [switch]$EnableBoundedOverlayRedesign = $true,
     [switch]$EnableOverlayMenuDraw = $true,
@@ -103,6 +111,13 @@ Assert-InputHash (Join-Path $VulkanIncludeDirectory 'vulkan/vulkan.h') '44410C06
 Assert-InputHash (Join-Path $VulkanIncludeDirectory 'vulkan/vk_platform.h') '9FC121C475DE911518D1975352D3ED6320B3CDDD7D7E28B5E2D89B91E6BD9981'
 Assert-InputHash (Join-Path $VulkanIncludeDirectory 'vulkan/vulkan_core.h') '0C7E4D78E18170758BC4EB15C78065237A0A083211EAE1DF89020E3C954AD79F'
 Assert-InputHash (Join-Path $VulkanIncludeDirectory 'vulkan/vulkan_win32.h') '39F7E94FEA15B8391898DBEF6930C21AC13D59D4DE0298023B99D855068C06F6'
+Assert-InputHash (Join-Path $XvkVulkanIncludeDirectory 'vulkan/vulkan.h') '2D1A6F00BFDCDDBE1C68BF5F574A0FC4CF95C4BE9EAE683123B6DB8AF9D1A1DE'
+Assert-InputHash (Join-Path $XvkVulkanIncludeDirectory 'vulkan/vk_platform.h') '1FC08C530B46E587295AAFB19493EB9D434E963F7E48D3A323ADBEE06F59976C'
+Assert-InputHash (Join-Path $XvkVulkanIncludeDirectory 'vulkan/vulkan_core.h') '944CD8F81D98E94999C7353DD632F73BE471F2DA95AFECBC7D9FFE0AD5295DEB'
+Assert-InputHash (Join-Path $XvkVulkanIncludeDirectory 'vulkan/vulkan_win32.h') '9DC4D69EFA98E5D2B94458C60861B963AB5FE18B7AF6BE20EC7E6C020086C1D5'
+Assert-InputHash $Dlss5VulkanDxc '3E5D38EF9DA6CE20A62EE77B60D7EC750899788EC80EA03D9B861CBC097C8692'
+Assert-InputHash (Join-Path (Split-Path -Parent $Dlss5VulkanDxc) 'dxcompiler.dll') '8C143A53951B9109D40AE8EF530DE4340A24A539E272C34CF38B7BA2F9621FFE'
+Assert-InputHash (Join-Path (Split-Path -Parent $Dlss5VulkanDxc) 'spirv-val.exe') 'EA84BD4B277F344D57FD05971603189DF00B33184010D968BFD648BB46B61A82'
 Assert-InputHash (Join-Path $nativeCache 'ampere_native_manifest.inc') '4C8765C79A4947A7F3A79EC98DB2DB7E3E95584621E853909BF5EDB2DA7D2C24'
 Assert-InputHash (Join-Path $nativeCache3109 'ampere_native_manifest.inc') '90E3E797B5121B6FFBF52C1765FAC9683A9C1641363EE0CC669296754B4B2291'
 Assert-InputHash (Join-Path $nativeCache 'manifest.json') 'B90F4131CD7E9E93C164FE2680C29475EFA2434DD6CF343C8713FCE4E2557E09'
@@ -144,6 +159,9 @@ $arguments = @(
     '-DMFG_UNLOCK_XESS=ON',
     "-DXESS_SDK_ROOT=$XessSdkRoot",
     "-DXESS_PROGRAMS_ROOT=$XessProgramsRoot",
+    "-DXVK_PROGRAMS_ROOT=$XvkProgramsRoot",
+    "-DXVK_VULKAN_INCLUDE_DIR=$XvkVulkanIncludeDirectory",
+    "-DDLSS5_VK_DXC=$Dlss5VulkanDxc",
     "-DMFG_CUDA_ROOT=$CudaRoot",
     "-DVULKAN_INCLUDE_DIR=$VulkanIncludeDirectory",
     "-DGLSLANG_VALIDATOR=$(Join-Path $VulkanIncludeDirectory ../Bin/glslangValidator.exe)",
@@ -151,6 +169,9 @@ $arguments = @(
     "-DMFG_UNLOCK_OVERLAY_SKIP_GPU_WORK=$($SkipOverlayGpuWork.IsPresent.ToString().ToUpperInvariant())",
     "-DMFG_UNLOCK_NGX_CREATE_RESULT_DIAGNOSTICS=$($EnableNgxCreateResultDiagnostics.IsPresent.ToString().ToUpperInvariant())",
     "-DMFG_UNLOCK_GPU_FAULT_CAPTURE=$($EnableGpuFaultCapture.IsPresent.ToString().ToUpperInvariant())",
+    "-DMFG_UNLOCK_SESSION_DIAGNOSTICS=$($EnableSessionDiagnostics.IsPresent.ToString().ToUpperInvariant())",
+    "-DMFG_UNLOCK_XVK_CAPTURE=$($EnableXvkCapture.IsPresent.ToString().ToUpperInvariant())",
+    "-DMFG_UNLOCK_XEFG_VK_STANDALONE=$($EnableXefgVkStandalone.IsPresent.ToString().ToUpperInvariant())",
     "-DMFG_UNLOCK_DIAGNOSTIC_NO_SINGLE_OVERLAY=$($DisableSingleOverlay.IsPresent.ToString().ToUpperInvariant())",
     "-DMFG_UNLOCK_BOUNDED_OVERLAY_REDESIGN=$($EnableBoundedOverlayRedesign.IsPresent.ToString().ToUpperInvariant())",
     "-DMFG_UNLOCK_OVERLAY_MENU_DRAW=$($EnableOverlayMenuDraw.IsPresent.ToString().ToUpperInvariant())",
@@ -204,6 +225,9 @@ Assert-CachePath 'MFG_AMPERE_NATIVE_RESOURCES_ADDITIONAL' (Join-Path $nativeCach
 Assert-CachePath 'MFG_AMPERE_KERNEL_DIRECTORY_ADDITIONAL' (Join-Path $nativeCacheAdditional 'RTX30MFG-Kernels')
 Assert-CacheValue 'MFG_UNLOCK_OVERLAY_SKIP_GPU_WORK' $SkipOverlayGpuWork.IsPresent.ToString().ToUpperInvariant()
 Assert-CacheValue 'MFG_UNLOCK_NGX_CREATE_RESULT_DIAGNOSTICS' $EnableNgxCreateResultDiagnostics.IsPresent.ToString().ToUpperInvariant()
+Assert-CacheValue 'MFG_UNLOCK_SESSION_DIAGNOSTICS' $EnableSessionDiagnostics.IsPresent.ToString().ToUpperInvariant()
+Assert-CacheValue 'MFG_UNLOCK_XVK_CAPTURE' $EnableXvkCapture.IsPresent.ToString().ToUpperInvariant()
+Assert-CacheValue 'MFG_UNLOCK_XEFG_VK_STANDALONE' $EnableXefgVkStandalone.IsPresent.ToString().ToUpperInvariant()
 Assert-CacheValue 'MFG_UNLOCK_OUTPUT_PULL_MASK_ONLY' 'ON'
 Assert-CacheValue 'MFG_UNLOCK_XESS' 'ON'
 Assert-CachePath 'XESS_SDK_ROOT' $XessSdkRoot

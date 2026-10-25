@@ -100,6 +100,9 @@ void SweepReleased() noexcept;
 // (Streamline, ReShade 6.7+), else a natively created child's GetDevice
 // (wrappers without a public unwrap, such as ReShade before 6.7).
 bool ResolveNativeDevice(IUnknown* object,Microsoft::WRL::ComPtr<ID3D12Device5>& out) noexcept;
+// For DLSS 5 (dlss5::SetQueueForward): the runtime method behind this queue's
+// ExecuteCommandLists slot while that slot holds our hook; null otherwise.
+void* QueueExecuteForward(ID3D12CommandQueue* queue) noexcept;
 RuntimeStats ReadRuntimeStats();
 // Device-removal report (DRED breadcrumbs/page fault plus DOTS state), armed
 // only for the prepared DOTS device when the opt-in report is enabled.

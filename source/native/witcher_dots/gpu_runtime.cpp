@@ -1451,12 +1451,15 @@ HRESULT STDMETHODCALLTYPE CreateState(ID3D12Device5* self,const D3D12_STATE_OBJE
     std::vector<D3D12_STATE_SUBOBJECT> objects(desc.pSubobjects,desc.pSubobjects+desc.NumSubobjects);
     std::vector<D3D12_DXIL_LIBRARY_DESC> libraries(desc.NumSubobjects);
     std::vector<D3D12_SUBOBJECT_TO_EXPORTS_ASSOCIATION> associations(desc.NumSubobjects);
-    uint32_t replacements=0;bool closest=false,prepass=false;
+    uint32_t replacements=0;bool closest=false,prepass=false;uint32_t path=0;
+    std::vector<std::pair<size_t,D3D12_SHADER_BYTECODE>> pathOriginals; // translucency-only libraries replaced
     for(UINT i=0;i<desc.NumSubobjects;++i) if(objects[i].Type==D3D12_STATE_SUBOBJECT_TYPE_DXIL_LIBRARY) {
         if(!CopyChecked(&libraries[i],objects[i].pDesc,sizeof(libraries[i])))return call(self,original,iid,output);
         const auto replacement=shaders->Replacement(libraries[i].DXILLibrary.pShaderBytecode,libraries[i].DXILLibrary.BytecodeLength);
         if(!replacement.empty()) {
-            (shaders->ReplacementKind(replacement)==ShaderKind::ClosestHit?closest:prepass)=true;
+            const auto kind=shaders->ReplacementKind(replacement);
+            if(kind==ShaderKind::PathTracer) {pathOriginals.emplace_back(i,libraries[i].DXILLibrary);++path;}
+            else (kind==ShaderKind::ClosestHit?closest:prepass)=true;
             libraries[i].DXILLibrary={replacement.data(),replacement.size()};objects[i].pDesc=&libraries[i];++replacements;
         }
     }
@@ -1469,13 +1472,29 @@ HRESULT STDMETHODCALLTYPE CreateState(ID3D12Device5* self,const D3D12_STATE_OBJE
         associations[i].pSubobjectToAssociate=&objects[(p-begin)/sizeof(D3D12_STATE_SUBOBJECT)];
         objects[i].pDesc=&associations[i];
     }
-    desc.pSubobjects=objects.data();const auto hr=call(self,&desc,iid,output);
+    desc.pSubobjects=objects.data();auto hr=call(self,&desc,iid,output);
+    // Hair translucency fails closed: if the driver refuses a state object with
+    // translucency libraries, it is created again with the game's own ones.
+    HRESULT refused=S_OK;
+    if(FAILED(hr)&&path) {
+        refused=hr;
+        for(const auto& [index,code]:pathOriginals) {libraries[index].DXILLibrary=code;--replacements;}
+        path=0;
+        if(output)*output=nullptr;
+        hr=replacements?call(self,&desc,iid,output):call(self,original,iid,output);
+    }
     if(SUCCEEDED(hr)&&output&&*output) {std::lock_guard lock(C().lock);C().stats.shaderLibraries+=replacements;}
     static std::atomic<uint32_t> logged{};
     if(logged.fetch_add(1,std::memory_order_relaxed)<8) {
         wchar_t line[256]{};
-        swprintf_s(line,L"WITCHER_DOTS state object translated closestHit=%d prepass=%d subobjects=%u result=0x%08X",
-            closest,prepass,desc.NumSubobjects,static_cast<unsigned>(hr));
+        swprintf_s(line,L"WITCHER_DOTS state object translated closestHit=%d prepass=%d translucencyLibraries=%u subobjects=%u result=0x%08X",
+            closest,prepass,path,desc.NumSubobjects,static_cast<unsigned>(hr));
+        single_module::Log(line);
+    }
+    if(FAILED(refused)) {
+        wchar_t line[200]{};
+        swprintf_s(line,L"WITCHER_DOTS hair translucency: the driver refused the translucency libraries (0x%08X); the game's own are used",
+            static_cast<unsigned>(refused));
         single_module::Log(line);
     }
     return hr;
@@ -1530,6 +1549,14 @@ bool Resource(void* owner,size_t offset,ComPtr<ID3D12Resource>& out) {
     }
     return true;
 }
+}
+// DLSS 5 must see the game's submissions; it hooks the runtime method our
+// image-table Execute forwards to, which every tracked queue still reaches.
+void* QueueExecuteForward(ID3D12CommandQueue* queue) noexcept {
+    void** const table=queue?Table(queue):nullptr;void* current{};
+    if(!table||!Read(table,10*sizeof(void*),current)||current!=reinterpret_cast<void*>(&Execute))return nullptr;
+    const auto* entry=FindPublication(reinterpret_cast<uintptr_t>(table+10));
+    return entry&&entry->hook==current?entry->original.load(std::memory_order_acquire):nullptr;
 }
 bool InitializeGpu(ID3D12Device5* device,ShaderCache* shaders,std::string& error) {
     auto& ctx=C();if(!device||!shaders||!shaders->Ready()){error="GPU shader cache not ready";return false;}

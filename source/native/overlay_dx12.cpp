@@ -7,6 +7,12 @@
 #include "overlay_device_identity.h"
 #include "present_counter.h"
 #include "ui_input_coherence.h"
+#include "dlss5.h"
+#include "optiscaler_host.h"
+#if MFG_UNLOCK_XESS
+#include "xess/xess_mod.h"
+#include "xess/d3d12_host.h"
+#endif
 #include <backends/imgui_impl_dx12.h>
 #include <d3d12.h>
 #include <dxgi1_6.h>
@@ -387,12 +393,26 @@ struct State
 struct Session : State
 {
     ComPtr<IDXGISwapChain3> renderingChain;
+    // The creation-argument queue as the application holds it (a wrapper's
+    // object, if any): the DLSS 5 Present stage submits there.
+    ComPtr<ID3D12CommandQueue> applicationQueue;
     bool providerSession = false;
+    // xefgmenu.1: XeFG's native output chain under OptiScaler (every output
+    // frame, generated ones included): the menu only.
+    bool outputLayer = false;
     std::atomic<bool> providerPresented{false};
     bool resizing = false;
     bool wasStillDrawing = false;
-    uint32_t presents = 0;
+    // Atomic so the output layer's overlap wait can WaitOnAddress on it with no lock held; written under mutex.
+    std::atomic<uint32_t> presents{0};
+    // alpha.15 (B4-06): the output layer's Presents, those that overlapped another in-flight Present, those that
+    // then waited for it and got the menu, and those whose wait timed out. Written under mutex.
+    std::atomic<DWORD> presentThread{0};
+    uint64_t outputPresents = 0, overlaps = 0, overlapWaits = 0, overlapTimeouts = 0;
+    int64_t lastPresentTicks = 0, intervalTicks = 0;
+    bool menuDrawn = false, totalsLogged = false;
 };
+static_assert(sizeof(std::atomic<uint32_t>) == sizeof(uint32_t));
 namespace {
 std::mutex gSessionsMutex;
 std::array<Session*, 64> gSessions{};
@@ -411,14 +431,83 @@ bool Principal(Session* session) noexcept
         if (other && other != session && !session->providerSession
             && other->presentationWindow == session->presentationWindow
             && other->providerSession && other->providerPresented.load(std::memory_order_acquire)) return false;
+        // A frame generator's output chain yields to any other layer of its window.
+        if (other && other != session && session->outputLayer && !other->outputLayer
+            && other->presentationWindow == session->presentationWindow) return false;
         if (other && other != session && score(other) > score(session)) return false;
     }
     return true;
 }
 
+// DLSS 5 Present stage: the application's current image, processed on its
+// presentation queue before this Present reaches the next layer (Streamline
+// DLSS-G reads it there). Before our UI, so the menu is never processed.
+void PresentNeural(Session& session) noexcept
+{
+    if (!session.applicationQueue || !dlss5::PresentStageSelected()) return;
+    InternalScope internal;
+    DXGI_SWAP_CHAIN_DESC1 desc{};
+    ComPtr<ID3D12Resource> buffer;
+    const UINT index = session.swapchain->GetCurrentBackBufferIndex();
+    if (FAILED(session.swapchain->GetDesc1(&desc)) || index >= desc.BufferCount
+        || FAILED(session.swapchain->GetBuffer(index, IID_PPV_ARGS(&buffer)))) return;
+    // An FP16 swapchain without SetColorSpace1 presents scRGB.
+    const auto color = !session.colorSpaceObserved && desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT
+        ? DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709 : session.colorSpace;
+    dlss5::PresentTarget target{};
+    target.queue = session.applicationQueue.Get();
+    target.buffer = buffer.Get();
+    target.colorSpace = static_cast<uint32_t>(color);
+    target.owner = reinterpret_cast<uintptr_t>(&session);
+    dlss5::Present(target);
 }
 
-Session* CreateSession(IDXGISwapChain* chain, IUnknown* presentedQueue, HMODULE provider) noexcept
+}
+
+// OptiScaler's frame-generation swapchain: its own wrapper or, as it answers
+// Streamline's unwrap contract with what it wraps, the XeFG swapchain of the
+// XeSS SDK it loaded. The vtable and Present slot must be in one of those two
+// images, and OptiScaler's UI mode must let this menu show.
+bool OptiScalerChain(IDXGISwapChain3* chain) noexcept
+{
+    if (!chain || !optiscaler_host::Detected() || optiscaler_host::UiHidden()) return false;
+#if MFG_UNLOCK_XESS
+    const HMODULE fg = xess_mod::NativeFgModule();
+#else
+    const HMODULE fg = nullptr;
+#endif
+    auto** table = *reinterpret_cast<void***>(chain);
+    for (const HMODULE owner : {optiscaler_host::Module(), fg})
+        if (owner && slots::ImageSlot(owner, table) && slots::ImageEntry(owner, table[8]))
+            return native::PinInterface(chain, 39);
+    return false;
+}
+
+// xefgmenu.1: the same rule for XeFG's native output chain of an OptiScaler context.
+bool OutputSwapchainWanted() noexcept
+{
+#if MFG_UNLOCK_XESS
+    // xemfgsa.1: XeMFG standalone's chains too (XeFG's proxy chain, the game's, is libxess_fg's own object).
+    if (xess_d3d12::InsideTakeover()) return single_module::OverlayAllowed();
+#endif
+    return optiscaler_host::Detected() && !optiscaler_host::UiHidden() && single_module::OverlayAllowed();
+}
+
+// Refusal detail: the failing step and the module whose vtable the unwrapped chain uses.
+void RefuseSession(const wchar_t* step, IDXGISwapChain3* nativeChain) noexcept
+{
+    wchar_t owner[MAX_PATH]{};
+    HMODULE module = nullptr;
+    if (nativeChain && GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(*reinterpret_cast<void***>(nativeChain)), &module))
+        GetModuleFileNameW(module, owner, MAX_PATH);
+    wchar_t message[MAX_PATH + 200]{};
+    swprintf_s(message, L"MFG_PROXY_UI renderer unavailable: native swapchain/queue/device ownership not established (step=%ls swapchain owner=%ls)",
+        step, owner[0] ? owner : L"-");
+    RecordFailure(message);
+}
+
+Session* CreateSession(IDXGISwapChain* chain, IUnknown* presentedQueue, HMODULE provider, bool output) noexcept
 {
     if (!chain || !presentedQueue || native::InsideLoader()) return nullptr;
     InternalScope internal;
@@ -427,29 +516,36 @@ Session* CreateSession(IDXGISwapChain* chain, IUnknown* presentedQueue, HMODULE 
         ComPtr<ID3D12CommandQueue> queue;
         ComPtr<ID3D12Device> device, swapDevice, nativeDevice;
         ComPtr<IUnknown> queueIdentity, swapIdentity;
-        if (FAILED(chain->QueryInterface(IID_PPV_ARGS(&renderingChain)))
-            || !native::PinInterface(renderingChain.Get(), 39)
-            || !(provider
+        const wchar_t* step = nullptr;
+        if (FAILED(chain->QueryInterface(IID_PPV_ARGS(&renderingChain))) || !native::PinInterface(renderingChain.Get(), 39))
+            step = L"swapchain interface";
+        else if (!(provider
                 ? (slots::ImageSlot(provider, *reinterpret_cast<void***>(renderingChain.Get()))
                     && slots::ImageEntry(provider, (*reinterpret_cast<void***>(renderingChain.Get()))[8]))
-                : (native::Unwrap(chain, nativeChain) && native::SystemDxgiObject(nativeChain.Get(), 39)))
-            || !native::Unwrap(presentedQueue, queue)
-            || !native::PinInterface(queue.Get(), 18)
-            || queue->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_DIRECT
-            || FAILED(queue->GetDevice(IID_PPV_ARGS(&device)))
-            || !native::Unwrap(device.Get(), nativeDevice)
-            || !native::PinInterface(nativeDevice.Get(), 43)
-            || FAILED(renderingChain->GetDevice(IID_PPV_ARGS(&swapDevice)))
+                : (native::Unwrap(chain, nativeChain)
+                    && (native::SystemDxgiObject(nativeChain.Get(), 39) || OptiScalerChain(nativeChain.Get())))))
+            step = L"swapchain owner";
+        else if (!native::Unwrap(presentedQueue, queue) || !native::PinInterface(queue.Get(), 18)
+            || queue->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_DIRECT)
+            step = L"presentation queue";
+        else if (FAILED(queue->GetDevice(IID_PPV_ARGS(&device))) || !native::Unwrap(device.Get(), nativeDevice)
+            || !native::PinInterface(nativeDevice.Get(), 43))
+            step = L"queue device";
+        else if (FAILED(renderingChain->GetDevice(IID_PPV_ARGS(&swapDevice)))
             || !DeviceIdentity(nativeDevice.Get(), queueIdentity)
             || !DeviceIdentity(swapDevice.Get(), swapIdentity)
-            || queueIdentity.Get() != swapIdentity.Get()) {
-            RecordFailure(L"MFG_PROXY_UI renderer unavailable: native swapchain/queue/device ownership not established");
+            || queueIdentity.Get() != swapIdentity.Get())
+            step = L"swapchain device";
+        if (step) {
+            RefuseSession(step, nativeChain.Get());
             return nullptr;
         }
         const LUID a = nativeDevice->GetAdapterLuid(), b = swapDevice->GetAdapterLuid();
         if (a.HighPart != b.HighPart || a.LowPart != b.LowPart) return nullptr;
         auto session = std::make_unique<Session>();
         session->providerSession = provider != nullptr;
+        session->outputLayer = output;
+        session->platform.afterFrameGeneration = output;
         DXGI_SWAP_CHAIN_DESC1 desc{};
         if (FAILED(renderingChain->GetHwnd(&session->presentationWindow)) || !session->presentationWindow
             || FAILED(renderingChain->GetDesc1(&desc))) return nullptr;
@@ -461,6 +557,8 @@ Session* CreateSession(IDXGISwapChain* chain, IUnknown* presentedQueue, HMODULE 
         session->renderingChain = renderingChain;
         session->swapchain = renderingChain.Get();
         session->queue = queue;
+        if (FAILED(presentedQueue->QueryInterface(IID_PPV_ARGS(&session->applicationQueue))))
+            session->applicationQueue.Reset();
         session->device = nativeDevice;
         session->presentationArea.store(uint64_t(desc.Width) * desc.Height);
         {
@@ -469,12 +567,30 @@ Session* CreateSession(IDXGISwapChain* chain, IUnknown* presentedQueue, HMODULE 
             if (slot == gSessions.end()) return nullptr;
             *slot = session.get();
         }
-        single_module::Log(L"MFG_PROXY_UI renderer registered layer=creation-return buffers=layer-local index=layer-local queue=creation-argument device=matched");
+        single_module::Log(provider ? L"MFG_PROXY_UI renderer registered layer=creation-return buffers=layer-local index=layer-local queue=creation-argument device=matched"
+            : output ? L"MFG_PROXY_UI renderer registered layer=xefg-output base=OptiScaler XeFG buffers=layer-local index=layer-local queue=creation-argument device=matched"
+            : !native::SystemDxgiObject(nativeChain.Get(), 39)
+            ? L"MFG_PROXY_UI renderer registered layer=creation-return base=OptiScaler swapchain buffers=layer-local index=layer-local queue=creation-argument device=matched"
+            : L"MFG_PROXY_UI renderer registered layer=creation-return buffers=layer-local index=layer-local queue=creation-argument device=matched");
         return session.release();
     } catch (...) {
         RecordFailure(L"MFG_PROXY_UI renderer allocation failed; original presentation retained");
         return nullptr;
     }
+}
+
+namespace {
+// alpha.15 (B4-06): the output layer's overlap totals, once per session.
+void LogOverlapTotals(Session& session) noexcept
+{
+    if (!session.outputLayer || session.totalsLogged) return;
+    session.totalsLogged = true;
+    wchar_t message[256]{};
+    swprintf_s(message, L"MFG_PROXY_UI output layer retired: presents=%llu overlapped=%llu waited=%llu timed_out=%llu",
+        static_cast<unsigned long long>(session.outputPresents), static_cast<unsigned long long>(session.overlaps),
+        static_cast<unsigned long long>(session.overlapWaits), static_cast<unsigned long long>(session.overlapTimeouts));
+    single_module::Log(message);
+}
 }
 
 // Quiesces a provider session while the XeSS context is being destroyed.
@@ -487,6 +603,7 @@ bool RetireSession(Session* session) noexcept
     session->platform.RetireInput();
     if (!session->Shutdown(true)) return false;
     session->retired = true;
+    LogOverlapTotals(*session);
     return true;
 }
 
@@ -497,8 +614,13 @@ void DestroySession(Session* session) noexcept
         std::lock_guard lock(gSessionsMutex);
         for (auto& slot : gSessions) if (slot == session) slot = nullptr;
     }
+    {
+        std::lock_guard lock(session->mutex);
+        LogOverlapTotals(*session);
+    }
     session->retired = true;
     session->platform.RetireInput();
+    dlss5::DrainPresent(reinterpret_cast<uintptr_t>(session));
     // A wrapper holds a method lease across every forwarded callback. Its
     // final release proves no other method can still access this session.
     // A failed GPU drain retains the entire generation, including the native
@@ -515,21 +637,118 @@ bool IsPrincipal(Session* session) noexcept
     return session && Principal(session);
 }
 
+bool WindowSession(HWND window) noexcept
+{
+    if (!window) return false;
+    std::lock_guard lock(gSessionsMutex);
+    for (auto* session : gSessions)
+        if (session && session->presentationWindow == window) return true;
+    return false;
+}
+
+namespace {
+using WaitOnAddressFn = BOOL(WINAPI*)(volatile VOID*, PVOID, SIZE_T, DWORD);
+using WakeByAddressFn = VOID(WINAPI*)(PVOID);
+struct AddressWait
+{
+    WaitOnAddressFn wait = nullptr;
+    WakeByAddressFn wake = nullptr;
+    AddressWait() noexcept
+    {
+        // KernelBase exports them on Windows 8+; resolved here so no new import is linked.
+        if (const HMODULE base = GetModuleHandleW(L"kernelbase.dll")) {
+            wait = reinterpret_cast<WaitOnAddressFn>(GetProcAddress(base, "WaitOnAddress"));
+            wake = reinterpret_cast<WakeByAddressFn>(GetProcAddress(base, "WakeByAddressAll"));
+        }
+        if (!wait || !wake) wait = nullptr, wake = nullptr;
+    }
+};
+const AddressWait& Address() noexcept { static const AddressWait functions; return functions; }
+int64_t TickFrequency() noexcept
+{
+    static const int64_t frequency = [] { LARGE_INTEGER f{}; QueryPerformanceFrequency(&f); return f.QuadPart; }();
+    return frequency;
+}
+
+// alpha.15 (B4-06): XeFG presents its outputs from two threads (the game's for the real frame, its presenter for the
+// generated ones). A Present that arrived while the other was still in flight forwarded without the menu, so single
+// output frames lost the whole overlay. The output layer now waits for it with no lock held (DXGI holds this call
+// behind that Present anyway), at most two output intervals and never more than 20 ms; on timeout it forwards
+// without the menu as before. Only while the menu draws: a closed menu loses nothing and never waits.
+void WaitForOtherPresent(Session& session, UINT flags) noexcept
+{
+    if (flags & DXGI_PRESENT_TEST) return;
+    const int64_t frequency = TickFrequency();
+    LARGE_INTEGER now{};
+    QueryPerformanceCounter(&now);
+    int64_t bound = frequency / 50; // 20 ms
+    DWORD owner = 0;
+    {
+        std::lock_guard lock(session.mutex);
+        ++session.outputPresents;
+        // Mean output interval: Present starts per unit of time, across both threads; pauses are not intervals.
+        const int64_t delta = session.lastPresentTicks ? now.QuadPart - session.lastPresentTicks : 0;
+        if (delta > 0 && delta < frequency / 10)
+            session.intervalTicks = session.intervalTicks ? session.intervalTicks + (delta - session.intervalTicks) / 16 : delta;
+        session.lastPresentTicks = now.QuadPart;
+        if (!session.presents.load(std::memory_order_acquire) || session.resizing || session.retired) return;
+        owner = session.presentThread.load(std::memory_order_relaxed);
+        if (owner == GetCurrentThreadId()) return; // re-entered from inside its own Present: never wait on itself
+        ++session.overlaps;
+        if (!session.menuDrawn) return;
+        if (session.intervalTicks) bound = std::clamp<int64_t>(2 * session.intervalTicks, frequency / 1000, bound);
+    }
+    static std::atomic<bool> logged{false};
+    if (!logged.exchange(true)) {
+        wchar_t message[200]{};
+        swprintf_s(message, L"MFG_PROXY_UI output layer: concurrent Present on thread %lu while thread %lu presents; waiting up to %.1f ms for it",
+            GetCurrentThreadId(), owner, 1000.0 * double(bound) / double(frequency));
+        single_module::Log(message);
+    }
+    const auto& address = Address();
+    const int64_t deadline = now.QuadPart + bound;
+    bool resolved = false;
+    for (;;)
+    {
+        uint32_t observed = session.presents.load(std::memory_order_acquire);
+        if (!observed) { resolved = true; break; }
+        QueryPerformanceCounter(&now);
+        if (now.QuadPart >= deadline) break;
+        const DWORD remaining = static_cast<DWORD>(std::max<int64_t>(1, (deadline - now.QuadPart) * 1000 / frequency));
+        if (address.wait) address.wait(&session.presents, &observed, sizeof observed, remaining);
+        else SwitchToThread();
+    }
+    std::lock_guard lock(session.mutex);
+    ++(resolved ? session.overlapWaits : session.overlapTimeouts);
+}
+}
+
 bool BeginPresent(Session* session, UINT flags, bool partialUpdate) noexcept
 {
-    if (!session || gInsideOverlay) return false;
+    // interopmenu.2: XeFG's real frame reaches its output chain on the game's thread, inside our Vulkan overlay's
+    // forwarding of the game's present; only that scope may be open for the output layer to draw on it.
+    if (!session || (gInsideOverlay && !(session->outputLayer && gForwardingVulkanPresent))) return false;
+    if (session->outputLayer) WaitForOtherPresent(*session, flags);
     std::lock_guard lock(session->mutex);
     if (session->resizing || session->retired) return false;
     ++session->presents;
     if (session->presents != 1) return true; // Concurrent calls forward; only one UI submission can own a frame.
+    session->presentThread.store(GetCurrentThreadId(), std::memory_order_relaxed);
     if ((flags & DXGI_PRESENT_TEST) || ((flags & DXGI_PRESENT_DO_NOT_WAIT) && session->wasStillDrawing)) return true;
+    session->menuDrawn = false;
     if (session->providerSession) session->providerPresented.store(true, std::memory_order_release);
     if (!Principal(session)) return true;
     gDxgiFrames.fetch_add(1, std::memory_order_relaxed);
+#if !MFG_UNLOCK_OVERLAY_SKIP_GPU_WORK
+    // Dirty/scroll presentation reuses pixels outside its rectangles, which
+    // whole-image processing would change. A frame generator's output chain
+    // also presents generated frames: DLSS 5 stays on the game's frames.
+    if (!partialUpdate && !session->retired && !session->outputLayer) PresentNeural(*session);
+#endif
 #if MFG_UNLOCK_OVERLAY_MENU_DRAW && !MFG_UNLOCK_OVERLAY_SKIP_GPU_WORK
     if (install::InputReady() && single_module::OverlayAllowed()) // A concurrent creator never waits on input publication.
     {
-        try { session->Render(partialUpdate); }
+        try { session->menuDrawn = session->Render(partialUpdate) == RenderOutcome::eSubmitted; }
         catch (...) { session->Disable(); RecordFailure(L"MFG_PROXY_UI render exception; UI disabled for this generation"); }
     }
 #endif
@@ -546,16 +765,28 @@ void EndPresent(Session* session, HRESULT result, UINT flags) noexcept
         frame_telemetry::SamplePresentCounter(session->telemetryOwner,count,available);
     }
     if (!(flags & DXGI_PRESENT_TEST)) session->wasStillDrawing = result == DXGI_ERROR_WAS_STILL_DRAWING;
-    if (session->presents) --session->presents;
+    if (session->presents && !--session->presents) session->presentThread.store(0, std::memory_order_relaxed);
+    if (session->outputLayer && Address().wake) Address().wake(&session->presents);
 }
 bool BeginResize(Session* session) noexcept
 {
     if (!session) return true;
+    // XeFG resizes its output chain on the game's thread; its presenter thread
+    // may still be inside a Present there (bounded wait, never under the lock).
+    for (int waited = 0; session->outputLayer && waited < 250; ++waited)
+    {
+        {
+            std::lock_guard lock(session->mutex);
+            if (!session->presents && !session->resizing) break;
+        }
+        Sleep(1);
+    }
     std::lock_guard lock(session->mutex);
     if (session->resizing || session->presents) return false;
     session->resizing = true;
     ui_input_coherence::InvalidateResources();
-    if (!session->Shutdown(false)) { session->resizing = false; return false; }
+    if (!dlss5::DrainPresent(reinterpret_cast<uintptr_t>(session))
+        || !session->Shutdown(false)) { session->resizing = false; return false; }
     return true;
 }
 void EndResize(Session* session, HRESULT result) noexcept

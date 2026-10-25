@@ -28,6 +28,20 @@ template<class Fn> Fn Proc(HMODULE module, const char* name)
 {
     return reinterpret_cast<Fn>(GetProcAddress(module, name));
 }
+std::vector<std::wstring> RuntimeFiles(const std::filesystem::path& directory)
+{
+    std::vector<std::wstring> names;
+    std::error_code error;
+    for (const auto& entry : std::filesystem::directory_iterator(directory, error))
+        if (_wcsnicmp(entry.path().filename().c_str(), L"RTXMFG", 6) == 0)
+            names.push_back(entry.path().filename().wstring());
+    return names;
+}
+std::filesystem::path TempDirectory()
+{
+    wchar_t temp[MAX_PATH + 1]{};
+    return GetTempPathW(MAX_PATH + 1, temp) ? std::filesystem::path(temp) : std::filesystem::path{};
+}
 }
 
 int wmain(int argc, wchar_t** argv)
@@ -35,14 +49,21 @@ int wmain(int argc, wchar_t** argv)
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
     if (argc < 3) return 2;
     const std::filesystem::path path = std::filesystem::absolute(argv[2]);
+    // crashhost.1: run.py starts this harness as UnityCrashHandler64.exe.
+    const bool crashReporter = std::wstring(argv[1]) == L"crash-reporter";
+    const auto tempBefore = RuntimeFiles(TempDirectory());
     HMODULE module = LoadLibraryExW(path.c_str(), nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
     bool passed = Check(module != nullptr, "single file loads");
     if (!module) { printf("win32=%lu\n", GetLastError()); return 1; }
     const auto query = Proc<MfgSingleModuleQueryFn>(module, "MfgUnlockSingleModuleQuery");
     MfgSingleModuleStatus status{};
     status.size = sizeof(status);
-    passed &= Check(query && query(&status) && status.version == 3
-        && status.backendOwner == 1 && !status.duplicateSuppressed, "one integrated backend owns initialization");
+    if (crashReporter)
+        passed &= Check(query && query(&status) && status.version == 3
+            && status.backendOwner == 0 && !status.duplicateSuppressed, "crash reporter host gets proxy forwarding only");
+    else
+        passed &= Check(query && query(&status) && status.version == 3
+            && status.backendOwner == 1 && !status.duplicateSuppressed, "one integrated backend owns initialization");
     for (const auto size : {kMfgSingleModuleStatusSizeV1,kMfgSingleModuleStatusSizeV2,uint32_t(sizeof(status))}) {
         alignas(MfgSingleModuleStatus) unsigned char bytes[sizeof(status)+16];
         memset(bytes,0xA5,sizeof(bytes));
@@ -118,6 +139,17 @@ int wmain(int argc, wchar_t** argv)
             && second.duplicateSuppressed, "second variant suppresses duplicate initialization");
         passed &= Check(query(&status) && status.backendOwner, "first owner survives duplicate load");
         if (duplicate) FreeLibrary(duplicate);
+    }
+    if (crashReporter)
+    {
+        // A started backend writes its log and status file and probes the folder within this time.
+        Sleep(2000);
+        const auto beside = RuntimeFiles(path.parent_path());
+        for (const auto& file : beside) printf("left %ls\n", file.c_str());
+        passed &= Check(beside.empty() && RuntimeFiles(TempDirectory()) == tempBefore,
+            "crash reporter host writes no log, status file or write probe");
+        // Not pinned without a backend: FreeLibrary would unmap the query export.
+        return passed ? 0 : 1;
     }
     FreeLibrary(module);
     passed &= Check(query(&status) && status.backendOwner, "backend remains pinned after FreeLibrary");

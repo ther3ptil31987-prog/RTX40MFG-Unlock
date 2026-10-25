@@ -391,24 +391,71 @@ bool IsProvider(HMODULE caller) noexcept
     return ExportsName(caller, "NVSDK_NGX_GetSnippetVersion");
 }
 
+const wchar_t* ApiName(CreateApi api) noexcept
+{
+    return api == CreateApi::eVulkan ? L"vulkan" : api == CreateApi::eVulkan1 ? L"vulkan1" : L"d3d12";
+}
+
 void LogCreate(const CreateRecord& record, NVSDK_NGX_Result result, const wchar_t* what) noexcept
 {
-    wchar_t text[384]{};
+    wchar_t text[400]{};
     swprintf_s(text, L"DLSS %ls %ls: result=0x%08X handle=%p render=%ux%u output=%ux%u quality=%d "
-        L"gameHint=%ls selection=%ls fixedByDriver=%d",
+        L"gameHint=%ls selection=%ls fixedByDriver=%d api=%ls",
         KindName(record.kind), what, static_cast<uint32_t>(result),
         reinterpret_cast<void*>(record.handle), record.keys.width, record.keys.height,
         record.keys.outWidth, record.keys.outHeight, record.keys.perfQuality,
         PresetName(record.gameHint), record.preset ? PresetName(record.preset) : L"game/driver",
-        gFixedByDriver[Index(record.kind)].load(std::memory_order_acquire));
+        gFixedByDriver[Index(record.kind)].load(std::memory_order_acquire), ApiName(record.api));
     Log(text);
 }
 
-NVSDK_NGX_Result InvokeCreate(CreateFn create, ID3D12GraphicsCommandList* command,NVSDK_NGX_Feature feature,
+// The call's own entry is present (CreateFeature1 also needs its VkDevice).
+bool Callable(const CreateCall& call) noexcept
+{
+    switch (call.api)
+    {
+    case CreateApi::eVulkan: return call.vulkan != nullptr;
+    case CreateApi::eVulkan1: return call.vulkan1 && call.device;
+    default: return call.d3d12 != nullptr;
+    }
+}
+
+NVSDK_NGX_Result Invoke(const CreateCall& call, NVSDK_NGX_Feature feature, const NVSDK_NGX_Parameter* parameters,
+    NVSDK_NGX_Handle** output) noexcept
+{
+    if (!Callable(call)) return NVSDK_NGX_Result_FAIL_NotInitialized;
+    switch (call.api)
+    {
+    case CreateApi::eVulkan: return call.vulkan(call.command, feature, parameters, output);
+    case CreateApi::eVulkan1: return call.vulkan1(call.device, call.command, feature, parameters, output);
+    default: return call.d3d12(static_cast<ID3D12GraphicsCommandList*>(call.command), feature, parameters, output);
+    }
+}
+
+// A live re-create on this Evaluate's command list or buffer, through the
+// entry the game's Create used (CreateFeature1 with the game's VkDevice).
+// Not callable when this Evaluate belongs to another API or the route lacks it.
+CreateCall RecreateCall(const CreateCall& evaluate, const CreateRecord& creation) noexcept
+{
+    CreateCall call{};
+    call.api = creation.api;
+    call.command = evaluate.command;
+    const bool vulkan = evaluate.api != CreateApi::eD3D12;
+    if (creation.api == CreateApi::eD3D12 && !vulkan) call.d3d12 = evaluate.d3d12;
+    else if (creation.api == CreateApi::eVulkan && vulkan) call.vulkan = evaluate.vulkan;
+    else if (creation.api == CreateApi::eVulkan1 && vulkan)
+    {
+        call.vulkan1 = evaluate.vulkan1;
+        call.device = reinterpret_cast<void*>(creation.device);
+    }
+    return call;
+}
+
+NVSDK_NGX_Result InvokeCreate(const CreateCall& call,NVSDK_NGX_Feature feature,
     const NVSDK_NGX_Parameter* parameters,NVSDK_NGX_Handle** output,const SavedHints* saved,
     dlss_sr_override::Request* request,const SavedCreateKeys* keys = nullptr,bool* restored = nullptr) noexcept
 {
-    __try {return create(command,feature,parameters,output);}
+    __try {return Invoke(call,feature,parameters,output);}
     __finally
     {
         const bool hintsOk=RestoreHints(parameters,*saved);
@@ -419,7 +466,7 @@ NVSDK_NGX_Result InvokeCreate(CreateFn create, ID3D12GraphicsCommandList* comman
     }
 }
 
-NVSDK_NGX_Result CreateWithSelection(CreateFn create, ID3D12GraphicsCommandList* command,
+NVSDK_NGX_Result CreateWithSelection(const CreateCall& create,
     const NVSDK_NGX_Parameter* parameters, NVSDK_NGX_Handle** output, const CreateRecord& record,
     bool* confirmed = nullptr,const CreateRecord* replay = nullptr) noexcept
 {
@@ -438,7 +485,7 @@ NVSDK_NGX_Result CreateWithSelection(CreateFn create, ID3D12GraphicsCommandList*
         return NVSDK_NGX_Result_FAIL_InvalidParameter;
     }
     bool restored=true;
-    const NVSDK_NGX_Result result = InvokeCreate(create, command, FeatureOf(record.kind), parameters, output, &saved, &request,&keys,&restored);
+    const NVSDK_NGX_Result result = InvokeCreate(create, FeatureOf(record.kind), parameters, output, &saved, &request,&keys,&restored);
     if(!restored)Log(L"DLSS live creation parameter restoration failed; further recreation disabled until restart");
     if (confirmed) *confirmed = restored&&(!intercepted || request.Confirmed());
     return result;
@@ -492,13 +539,22 @@ void PrepareForDevice(ID3D12Device* device) noexcept
     if (installer(device)) gDrsHookReady.store(true, std::memory_order_release);
 }
 
-NVSDK_NGX_Result Create(size_t route, CreateFn original, ID3D12GraphicsCommandList* command,
-    NVSDK_NGX_Feature feature, const NVSDK_NGX_Parameter* parameters, NVSDK_NGX_Handle** output) noexcept
+void PrepareForVulkan() noexcept
 {
-    if (!original) return NVSDK_NGX_Result_FAIL_NotInitialized;
+    const auto installer = gInstaller.load(std::memory_order_acquire);
+    if (!installer || gDrsHookReady.load(std::memory_order_acquire)) return;
+    if (installer(nullptr)) gDrsHookReady.store(true, std::memory_order_release);
+}
+
+NVSDK_NGX_Result Create(size_t route, const CreateCall& original, NVSDK_NGX_Feature feature,
+    const NVSDK_NGX_Parameter* parameters, NVSDK_NGX_Handle** output) noexcept
+{
+    if (!Callable(original)) return NVSDK_NGX_Result_FAIL_NotInitialized;
     CreateRecord record{};
     record.route = route;
     record.kind = feature == NVSDK_NGX_Feature_SuperSampling ? Kind::eSuperResolution : Kind::eRayReconstruction;
+    record.api = original.api;
+    record.device = original.api == CreateApi::eVulkan1 ? reinterpret_cast<uintptr_t>(original.device) : 0;
     record.parameters = reinterpret_cast<uintptr_t>(parameters);
     record.preset = RequestedFor(record.kind);
     record.keys = ReadKeys(parameters);
@@ -506,13 +562,16 @@ NVSDK_NGX_Result Create(size_t route, CreateFn original, ID3D12GraphicsCommandLi
     record.gameHint = ReadGameHint(record.kind, parameters, record.keys.perfQuality);
     // Covers a later NGX initialization of this process.
     if (!gDrsHookReady.load(std::memory_order_acquire))
-        if (ID3D12Device* device = CommandDevice(command))
+    {
+        if (original.api != CreateApi::eD3D12) PrepareForVulkan();
+        else if (ID3D12Device* device = CommandDevice(static_cast<ID3D12GraphicsCommandList*>(original.command)))
         {
             PrepareForDevice(device);
             device->Release();
         }
+    }
     bool confirmed = false;
-    NVSDK_NGX_Result result = CreateWithSelection(original, command, parameters, output, record, &confirmed);
+    NVSDK_NGX_Result result = CreateWithSelection(original, parameters, output, record, &confirmed);
     if (result == NVSDK_NGX_Result_Success && !confirmed)
     {
         // Preserve the game's successful native handle, but never report that
@@ -527,7 +586,7 @@ NVSDK_NGX_Result Create(size_t route, CreateFn original, ID3D12GraphicsCommandLi
         LogCreate(record, result, L"Create refused with the selection; retried with the game's hints");
         gCreateRetries.fetch_add(1, std::memory_order_relaxed);
         record.preset = kGameOrDriver;
-        result = original(command, feature, parameters, output);
+        result = Invoke(original, feature, parameters, output);
     }
     record.handle = CreatedHandle(result, output);
     if (record.handle)
@@ -541,9 +600,8 @@ NVSDK_NGX_Result Create(size_t route, CreateFn original, ID3D12GraphicsCommandLi
     return result;
 }
 
-const NVSDK_NGX_Handle* Evaluate(size_t route, CreateFn create, ReleaseFn release,
-    ID3D12GraphicsCommandList* command, const NVSDK_NGX_Handle* handle,
-    const NVSDK_NGX_Parameter* parameters) noexcept
+const NVSDK_NGX_Handle* Evaluate(size_t route, const CreateCall& create, ReleaseFn release,
+    const NVSDK_NGX_Handle* handle, const NVSDK_NGX_Parameter* parameters) noexcept
 {
     if (!handle || !Active()) return handle;
     const uintptr_t game = reinterpret_cast<uintptr_t>(handle);
@@ -589,8 +647,9 @@ const NVSDK_NGX_Handle* Evaluate(size_t route, CreateFn create, ReleaseFn releas
     NVSDK_NGX_Handle* created = nullptr;
     NVSDK_NGX_Result result = NVSDK_NGX_Result_FAIL_NotInitialized;
     bool confirmed = false;
-    if (create && release && command && parameters)
-        result = CreateWithSelection(create, command, parameters, &created, evidence, &confirmed,&plan.creation);
+    const CreateCall recreate = RecreateCall(create, plan.creation);
+    if (Callable(recreate) && release && recreate.command && parameters)
+        result = CreateWithSelection(recreate, parameters, &created, evidence, &confirmed,&plan.creation);
     if (result == NVSDK_NGX_Result_Success && !confirmed)
     {
         ReleaseOurs(release, reinterpret_cast<uintptr_t>(created), L"cached override not confirmed");
@@ -740,6 +799,7 @@ void SetProviderCheck(ProviderCheck check) noexcept { gProviderCheck.store(check
 void Reset() noexcept
 {
     gReplayDenied.store(false,std::memory_order_release);
+    gDrsHookReady.store(false,std::memory_order_release);
     {
         std::lock_guard lock(gMutex);
         gTracker = {};

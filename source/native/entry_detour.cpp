@@ -31,6 +31,10 @@ constexpr size_t kForwardRelayBytes = 26;
 // five-byte hotpatch region. Five entry bytes are sufficient to detect later
 // replacement without reaching into an adjacent short function.
 constexpr size_t kVerificationBytes = 5;
+// ngxforward.1: the bytes after a relocated entry's patch. The trampoline resumes
+// inside them (a relocated prologue is at most 5 + 14 bytes), so a later hook that
+// changed none of them left the trampoline's continuation intact.
+constexpr size_t kTailBytes = 19;
 
 constexpr std::array<uint8_t, 6> kNgxCreateEntry{
     0x40, 0x53, 0x55, 0x56, 0x41, 0x56};
@@ -70,6 +74,8 @@ struct Slot
     std::atomic<bool> filterForwardArg2{false};
     std::atomic<uintptr_t> requiredForwardArg2{0};
     std::array<uint8_t, kVerificationBytes> relocatedBytes{};
+    std::array<uint8_t, kTailBytes> tailBytes{};
+    std::atomic<bool> tailRecorded{false};
 };
 
 std::array<Slot, kRegistryCapacity> gSlots{};
@@ -477,6 +483,41 @@ bool Current(const Slot& slot) noexcept
     return false;
 }
 
+// ngxforward.1: the bytes after the first five, before the entry is patched.
+void RecordTail(Slot& slot, const uint8_t* entry) noexcept
+{
+    const bool readable = QueryExecutableImage(const_cast<uint8_t*>(entry), kVerificationBytes + kTailBytes,
+        slot.owner.load(std::memory_order_acquire));
+    if (readable)
+        std::memcpy(slot.tailBytes.data(), entry + kVerificationBytes, slot.tailBytes.size());
+    slot.tailRecorded.store(readable, std::memory_order_release);
+}
+
+// ngxforward.1: an entry whose patch another hook replaced by its own jump (rel32
+// or short) within the first five bytes and nothing after them. That hook's
+// trampoline still runs our jump, and our trampoline resumes at or past entry + 5
+// (a relocated five-byte jump, or a hotpatch entry replaying the whole five-byte
+// first instruction), so it forwards exactly as when the entry is current. Our
+// own patch back in place after such a hook left also counts (its verification
+// failure is sticky).
+bool Overlaid(const Slot& slot) noexcept
+{
+    const Method method = static_cast<Method>(slot.method.load(std::memory_order_acquire));
+    const bool resumesPastEntry = method == Method::eRelocated ? slot.relocatedBytes[0] == 0xE9
+        : method == Method::eHotpatch
+            && ReplayBytes(static_cast<Kind>(slot.kind.load(std::memory_order_acquire))) >= kVerificationBytes;
+    if (!slot.installed.load(std::memory_order_acquire) || !resumesPastEntry
+        || !slot.tailRecorded.load(std::memory_order_acquire)
+        || !slot.original.load(std::memory_order_acquire))
+        return false;
+    const auto* entry = static_cast<const uint8_t*>(slot.target.load(std::memory_order_acquire));
+    if (!entry || !QueryExecutableImage(const_cast<uint8_t*>(entry), kVerificationBytes + kTailBytes,
+            slot.owner.load(std::memory_order_acquire)))
+        return false;
+    return (entry[0] == 0xE9 || entry[0] == 0xEB)
+        && std::memcmp(entry + kVerificationBytes, slot.tailBytes.data(), slot.tailBytes.size()) == 0;
+}
+
 // Declare this before the install lock so its destructor runs after unlocking.
 // FreeLibrary can run a final DLL detach under the loader lock; releasing an
 // unsuccessful attempt's reference while holding gInstallMutex would invert
@@ -629,6 +670,7 @@ bool TryInstallHotpatchLocked(Slot& slot) noexcept
         return false;
     }
 
+    RecordTail(slot, entry);
     slot.installed.store(true, std::memory_order_release);
     if (!RestoreProtection(patch, kHotpatchPrefixBytes + 2,
             originalProtection))
@@ -686,6 +728,7 @@ bool TryInstallRelocatedLocked(Slot& slot) noexcept
     }
     std::memcpy(slot.relocatedBytes.data(), target,
         slot.relocatedBytes.size());
+    RecordTail(slot, static_cast<const uint8_t*>(target));
     slot.method.store(static_cast<uint32_t>(Method::eRelocated),
         std::memory_order_release);
     slot.failure.store(static_cast<uint32_t>(Failure::eNone),
@@ -826,6 +869,10 @@ Snapshot SnapshotFor(size_t index, const Slot& slot) noexcept
         && snapshot.failure == Failure::eNone && Current(slot);
     snapshot.cachedPointersCovered = snapshot.current;
     snapshot.forwarding = snapshot.current && slot.forwardRelay.load(std::memory_order_acquire) != nullptr;
+    // Only an install that completed: verification failing later is the other hook.
+    snapshot.overlaid = !snapshot.current && snapshot.installed
+        && (snapshot.failure == Failure::eNone || snapshot.failure == Failure::ePostWriteVerificationFailed)
+        && Overlaid(slot);
     if (snapshot.owner && snapshot.target)
     {
         const uintptr_t base = reinterpret_cast<uintptr_t>(snapshot.owner);

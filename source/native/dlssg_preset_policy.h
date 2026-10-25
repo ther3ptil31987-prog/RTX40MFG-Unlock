@@ -84,4 +84,13 @@ inline bool OverrideRead(uint32_t id, int32_t result, Setting& setting, uint32_t
     setting.current.dword = preset;
     return true;
 }
+
+// V1.6.2 alpha.11: the provider whose preset reads the status reports. RTX 40/50:
+// the provider the active Create selected. The RTX 30/20 translated route
+// selects none there; its reader hook records reads against its own prepared
+// provider (`translated`), so that provider is the one to report.
+constexpr uintptr_t StatusProvider(uintptr_t selected, bool translatedRoute, uintptr_t translated) noexcept
+{
+    return translatedRoute && translated ? translated : selected;
+}
 }

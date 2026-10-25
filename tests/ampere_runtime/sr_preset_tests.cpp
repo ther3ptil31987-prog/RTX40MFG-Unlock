@@ -654,7 +654,8 @@ NVSDK_NGX_Result NVSDK_CONV ThrowCreate(ID3D12GraphicsCommandList*,NVSDK_NGX_Fea
 bool CatchCreateSeh(const NVSDK_NGX_Parameter* p,const SavedHints* saved,dlss_sr_override::Request* request,
     const SavedCreateKeys* keys=nullptr)
 {
-    __try{InvokeCreate(&ThrowCreate,nullptr,NVSDK_NGX_Feature_SuperSampling,p,nullptr,saved,request,keys);}
+    CreateCall call{};call.d3d12=&ThrowCreate;
+    __try{InvokeCreate(call,NVSDK_NGX_Feature_SuperSampling,p,nullptr,saved,request,keys);}
     __except(GetExceptionCode()==0xe0424242?EXCEPTION_EXECUTE_HANDLER:EXCEPTION_CONTINUE_SEARCH){return true;}
     return false;
 }
@@ -748,6 +749,141 @@ void SharedParameterCases()
     parameters.refuseKey=nullptr;
     BeforeRelease(0,&FakeRelease,game);AfterRelease(0,game,FakeRelease(game));
 }
+
+// vkpreset.1 (V1.6.2): the runtime's Vulkan entries. CreateFeature1 names the
+// game's VkDevice, CreateFeature does not; both record on a VkCommandBuffer.
+struct VulkanCall { unsigned creates = 0; void* device = nullptr; void* command = nullptr; };
+VulkanCall gVkCreate, gVkCreate1;
+NVSDK_NGX_Result NVSDK_CONV FakeVkCreate(void* command, NVSDK_NGX_Feature feature,
+    const NVSDK_NGX_Parameter* parameters, NVSDK_NGX_Handle** output)
+{
+    ++gVkCreate.creates; gVkCreate.command = command; gVkCreate.device = nullptr;
+    return FakeCreate(nullptr, feature, parameters, output);
+}
+NVSDK_NGX_Result NVSDK_CONV FakeVkCreate1(void* device, void* command, NVSDK_NGX_Feature feature,
+    const NVSDK_NGX_Parameter* parameters, NVSDK_NGX_Handle** output)
+{
+    ++gVkCreate1.creates; gVkCreate1.command = command; gVkCreate1.device = device;
+    return FakeCreate(nullptr, feature, parameters, output);
+}
+std::vector<ID3D12Device*> gInstallerDevices;
+bool TestInstaller(ID3D12Device* device) noexcept { gInstallerDevices.push_back(device); return true; }
+
+void* const kVkDevice = reinterpret_cast<void*>(0xD0D0);
+void* const kGameBuffer = reinterpret_cast<void*>(0xB001);
+void* const kEvaluateBuffer = reinterpret_cast<void*>(0xB002);
+
+// The game's Create through one Vulkan entry, and a later Evaluate's call with
+// both of the route's entries on another command buffer.
+CreateCall VulkanCreateOf(bool create1)
+{
+    CreateCall call{};
+    call.api = create1 ? CreateApi::eVulkan1 : CreateApi::eVulkan;
+    call.vulkan = &FakeVkCreate;
+    call.vulkan1 = &FakeVkCreate1;
+    call.device = create1 ? kVkDevice : nullptr;
+    call.command = kGameBuffer;
+    return call;
+}
+CreateCall VulkanEvaluateOf(bool withCreate1 = true)
+{
+    CreateCall call{};
+    call.api = CreateApi::eVulkan;
+    call.vulkan = &FakeVkCreate;
+    call.vulkan1 = withCreate1 ? &FakeVkCreate1 : nullptr;
+    call.command = kEvaluateBuffer;
+    return call;
+}
+
+void VulkanCases()
+{
+    Session(dlssg_preset::kSettingNotFound, dlssg_preset::kOk, kDrsLatest);
+    gVkCreate = {}; gVkCreate1 = {}; gInstallerDevices.clear();
+    SetDrsHookInstaller(&TestInstaller);
+    SetRequested(kPresetK);
+    FakeParameters parameters = GameParameters();
+    NVSDK_NGX_Handle* game = nullptr;
+    Check(Create(0, VulkanCreateOf(true), NVSDK_NGX_Feature_SuperSampling, &parameters, &game)
+        == NVSDK_NGX_Result_Success && game, "Vulkan CreateFeature1: SR Create succeeds");
+    Check(gVkCreate1.creates == 1 && gVkCreate.creates == 0 && gVkCreate1.device == kVkDevice
+        && gVkCreate1.command == kGameBuffer, "it enters CreateFeature1 with the game's VkDevice and command buffer");
+    Check(gInstallerDevices.size() == 1 && gInstallerDevices[0] == nullptr && gDrsHookReady.load(),
+        "the DRS hook is prepared for Vulkan (no D3D12 device) before the provider's first read");
+    Check(gProviderCreates.back().preset == kPresetK && Read().detected && Read().counters.liveSr == 1,
+        "Vulkan SR detected; the provider uses the K hint, not the NVIDIA app override");
+    Check(Evaluate(0, VulkanEvaluateOf(), &FakeRelease, game, &parameters) == game && Read().running,
+        "same selection: the game's handle");
+
+    SetRequested(kPresetM);
+    const auto* replacement = Evaluate(0, VulkanEvaluateOf(), &FakeRelease, game, &parameters);
+    Check(replacement != game && gProviderCreates.back().preset == kPresetM && gVkCreate1.creates == 2
+        && gVkCreate.creates == 0, "a live change re-creates M through CreateFeature1, as the game's Create");
+    Check(gVkCreate1.device == kVkDevice && gVkCreate1.command == kEvaluateBuffer,
+        "with the game's VkDevice, on the Evaluate's command buffer");
+    Check(Evaluate(0, VulkanEvaluateOf(), &FakeRelease, game, &parameters) == replacement,
+        "later Vulkan Evaluates reach the M feature");
+
+    // A D3D12 Evaluate cannot re-create a feature made through Vulkan.
+    SetRequested(kPresetL);
+    const size_t creates = gProviderCreates.size();
+    Check(Evaluate(0, &FakeCreate, &FakeRelease, kCommand, game, &parameters) == replacement
+        && gProviderCreates.size() == creates && Read().primary.unavailable == Unavailable::eCreateFailed,
+        "another API's Evaluate never re-creates a Vulkan feature");
+
+    // A route without CreateFeature1 cannot repeat the game's CreateFeature1.
+    SetRequested(kPresetJ);
+    Check(Evaluate(0, VulkanEvaluateOf(false), &FakeRelease, game, &parameters) == replacement
+        && gProviderCreates.size() == creates && gVkCreate.creates == 0,
+        "no CreateFeature1 on the route: no re-create through CreateFeature instead");
+
+    SetRequested(kGameOrDriver);
+    const auto* plain = Evaluate(0, VulkanEvaluateOf(), &FakeRelease, game, &parameters);
+    Check(plain != replacement && plain != game && gProviderCreates.back().hintSeen == kPresetJ
+        && gVkCreate1.creates == 3, "game/driver re-creates through CreateFeature1 with the game's own hint");
+    gNow += 300;
+    for (int i = 0; i != 5; ++i) Evaluate(0, VulkanEvaluateOf(), &FakeRelease, game, &parameters);
+    Check(gReleased.size() == 1 && gReleased[0] == reinterpret_cast<uintptr_t>(replacement),
+        "the replaced M feature is released through the Vulkan route's Release");
+    BeforeRelease(0, &FakeRelease, game);
+    AfterRelease(0, game, FakeRelease(game));
+    Check(gLiveHandles.empty() && gBadReleases == 0 && Read().counters.liveSr == 0,
+        "the game's Vulkan Release leaves no feature alive, none twice");
+
+    // RR through CreateFeature (no VkDevice), selected at start.
+    Session(dlssg_preset::kSettingNotFound, dlssg_preset::kOk, kDrsLatest, Kind::eRayReconstruction);
+    gVkCreate = {}; gVkCreate1 = {}; gInstallerDevices.clear();
+    SetDrsHookInstaller(&TestInstaller);
+    PrepareForVulkan();
+    PrepareForVulkan();
+    Check(gInstallerDevices.size() == 1 && gInstallerDevices[0] == nullptr,
+        "Vulkan NGX Init prepares the DRS hook once, without a device");
+    SetRequestedRr(kRrPresetE);
+    parameters = GameParameters(Kind::eRayReconstruction);
+    Check(Create(0, VulkanCreateOf(false), NVSDK_NGX_Feature_RayReconstruction, &parameters, &game)
+        == NVSDK_NGX_Result_Success && game && gVkCreate.creates == 1 && gVkCreate.command == kGameBuffer
+        && gProviderCreates.back().preset == kRrPresetE && Read().rrDetected,
+        "Vulkan CreateFeature: RR E detected");
+    SetRequestedRr(kRrPresetD);
+    replacement = Evaluate(0, VulkanEvaluateOf(), &FakeRelease, game, &parameters);
+    Check(replacement != game && gVkCreate.creates == 2 && gVkCreate1.creates == 0
+        && gVkCreate.command == kEvaluateBuffer && gProviderCreates.back().preset == kRrPresetD,
+        "RR re-creates D through CreateFeature on the Evaluate's command buffer");
+    Check(parameters.Has("RayReconstruction.Hint.Render.Preset.Quality", FakeParameters::Type::eSigned, 4),
+        "the game's RR hint is restored after the Vulkan re-create");
+    BeforeRelease(0, &FakeRelease, game);
+    AfterRelease(0, game, FakeRelease(game));
+    Check(gLiveHandles.empty() && gBadReleases == 0, "Vulkan RR: every feature released exactly once");
+
+    // A Create1 without a VkDevice is not callable.
+    Session(dlssg_preset::kSettingNotFound, dlssg_preset::kSettingNotFound, 0);
+    CreateCall noDevice = VulkanCreateOf(true);
+    noDevice.device = nullptr;
+    game = nullptr;
+    Check(Create(0, noDevice, NVSDK_NGX_Feature_SuperSampling, &parameters, &game)
+        == NVSDK_NGX_Result_FAIL_NotInitialized && !game && gProviderCreates.empty(),
+        "CreateFeature1 without its VkDevice is refused, never forwarded");
+    SetDrsHookInstaller(nullptr);
+}
 }
 
 int main()
@@ -762,6 +898,7 @@ int main()
     ConcurrencyCases();
     SehCases();
     SharedParameterCases();
+    VulkanCases();
     std::cout << checks - failures << '/' << checks << " checks passed\n";
     return failures ? 1 : 0;
 }

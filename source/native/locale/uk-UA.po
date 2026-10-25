@@ -17,6 +17,12 @@ msgstr "Авто (%s)"
 msgid "Menu language"
 msgstr "Мова меню"
 
+msgid "DLSS 5 Off"
+msgstr "DLSS 5 вимкнено"
+
+msgid "DLSS 5 On"
+msgstr "DLSS 5 увімкнено"
+
 msgid "Pin"
 msgstr "Закріпити"
 
@@ -32,6 +38,9 @@ msgstr "Закріплено  |  Натисніть %s, щоб повернут�
 
 msgid "Menu key: %s"
 msgstr "Клавіша меню: %s"
+
+msgid "Shared with OptiScaler's menu"
+msgstr "Спільна з меню OptiScaler"
 
 msgid "Press a key... Esc cancels"
 msgstr "Натисніть клавішу… Esc — скасувати"
@@ -248,6 +257,588 @@ msgstr "Перемикання DLSS Ray Reconstruction на новий прес�
 msgid "Switching DLSS Super Resolution to the new preset..."
 msgstr "Перемикання DLSS Super Resolution на новий пресет..."
 
+msgid "Same as Structure"
+msgstr "Як Структура"
+
+msgid "Not set"
+msgstr "Не призначено"
+
+msgid "Clear"
+msgstr "Очистити"
+
+msgid "Off"
+msgstr "Вимкнено"
+
+msgid "Provider not found"
+msgstr "Провайдер не знайдено"
+
+msgid "GPU or provider unsupported"
+msgstr "GPU або провайдер не підтримується"
+
+msgid "Driver update required"
+msgstr "Потрібне оновлення драйвера"
+
+msgid "Provider failed"
+msgstr "Помилка провайдера"
+
+msgid "Provider already in use"
+msgstr "Провайдер уже використовується"
+
+msgid "DLSS inputs unavailable"
+msgstr "Вхідні дані DLSS недоступні"
+
+msgid "Hook method unavailable"
+msgstr "Спосіб підключення недоступний"
+
+msgid "Waiting for DLSS"
+msgstr "Очікування DLSS"
+
+msgid "Neural Rendering"
+msgstr "Нейронний рендеринг"
+
+msgid "Before upscaling (faster)"
+msgstr "До масштабування (швидше)"
+
+msgid "After upscaling"
+msgstr "Після масштабування"
+
+msgid "Present"
+msgstr "Виведення"
+
+msgid "Auto: %s"
+msgstr "Авто: %s"
+
+msgid "Hook Method"
+msgstr "Спосіб підключення"
+
+msgid ""
+"Auto processes the DLSS output after reconstruction; Resolution Scale Auto keeps its cost in check.\n"
+"Before upscaling processes the DLSS input at render resolution, before DLSS SR, DLAA or Ray Reconstruction.\n"
+"After upscaling processes the DLSS output after reconstruction.\n"
+"Present processes the final image, game UI included, before presentation and frame generation."
+msgstr ""
+"Авто обробляє вихід DLSS після реконструкції; автоматичний масштаб роздільності стримує її вартість.\n"
+"До масштабування обробляє вхід DLSS у роздільній здатності рендерингу, до DLSS SR, DLAA або Ray Reconstruction.\n"
+"Після масштабування обробляє вихід DLSS після реконструкції.\n"
+"Виведення обробляє фінальне зображення разом з UI гри перед показом і генерацією кадрів."
+
+msgid "Subtle"
+msgstr "Легкий"
+
+msgid "Strong"
+msgstr "Сильний"
+
+msgid "Custom"
+msgstr "Власний"
+
+msgid "Look"
+msgstr "Вигляд"
+
+msgid ""
+"Sets Intensity, Model, Structure, Tone and Faces & skin together.\n"
+"Balanced is the provider's own default, Subtle halves its change and Strong goes further.\n"
+"Pass Count under Advanced strengthens any look further, at extra GPU cost."
+msgstr ""
+"Задає разом Інтенсивність, Модель, Структуру, Тон і Обличчя й шкіру.\n"
+"Збалансований — власне типове значення провайдера, Легкий удвічі зменшує його ефект, а Сильний іде далі.\n"
+"Кількість проходів у розділі «Додатково» ще більше посилює будь-який вигляд ціною додаткового навантаження на GPU."
+
+msgid "Intensity"
+msgstr "Інтенсивність"
+
+msgid "Strength of the whole neural rendering effect."
+msgstr "Сила всього ефекту нейронного рендерингу."
+
+msgid "Model A"
+msgstr "Модель A"
+
+msgid "Model B"
+msgstr "Модель B"
+
+msgid "Model C"
+msgstr "Модель C"
+
+msgid "Model"
+msgstr "Модель"
+
+msgid "Faces & skin"
+msgstr "Обличчя й шкіра"
+
+msgid "Off while Character Mask is off. Turn it on under Advanced."
+msgstr "Не діє, поки вимкнено маску персонажів. Увімкніть її в розділі «Додатково»."
+
+msgid ""
+"Structure enhancement on detected skin and faces.\n"
+"Same as Structure takes the Structure strength, the provider's own default."
+msgstr ""
+"Підсилення структури на виявленій шкірі й обличчях.\n"
+"«Як Структура» бере інтенсивність структури — власне типове значення провайдера."
+
+msgid "Resolution Scale"
+msgstr "Масштаб роздільності"
+
+msgid "Auto"
+msgstr "Авто"
+
+msgid "up to %.0f%%"
+msgstr "до %.0f%%"
+
+msgid ""
+"Share of the hook method's resolution that the network processes.\n"
+"100 is native, lower is faster, up to 200 supersamples. Values below 25 use 25.\n"
+"Auto lowers it when DLSS 5 takes more than about a third of each rendered frame, not below 75, and raises it again with headroom, never above the slider."
+msgstr ""
+"Частка роздільності способу підключення, яку обробляє мережа.\n"
+"100 — рідна, менше — швидше, до 200 — суперсемплінг. Значення нижче 25 вважаються 25.\n"
+"Авто знижує його, коли DLSS 5 займає більше приблизно третини кожного відрендереного кадру, але не нижче 75, і знову підвищує, коли є запас, але не вище повзунка."
+
+msgid "Half rate"
+msgstr "Половинна частота"
+
+msgid "Half rate is not available on Vulkan or with the Present hook method yet."
+msgstr "Половинна частота поки недоступна у Vulkan або зі способом підключення «Виведення»."
+
+msgid ""
+"Runs the network on every other frame. The frames between apply its last look to their own image, so moving and animated surfaces keep it without trails.\n"
+"About half the GPU cost. Fine detail follows the game's motion vectors where a surface only moved."
+msgstr ""
+"Запускає нейромережу через кадр. Проміжні кадри застосовують її останній вигляд до власного зображення, тож рухомі й анімовані поверхні зберігають його без шлейфів.\n"
+"Приблизно половина навантаження на GPU. Дрібні деталі слідують за векторами руху гри там, де поверхня лише змістилася."
+
+msgid "DLSS 5 settings could not be saved."
+msgstr "Не вдалося зберегти налаштування DLSS 5."
+
+msgid "Before upscaling and Present do not run on Vulkan yet. Choose Auto or After upscaling."
+msgstr "«До масштабування» і «Виведення» поки не працюють у Vulkan. Виберіть «Авто» або «Після масштабування»."
+
+msgid "This game's swapchain cannot use the Present hook method; the log names the reason. Before or after upscaling still work."
+msgstr "Swapchain цієї гри не підтримує спосіб підключення «Виведення»; причину вказано в журналі. До й після масштабування працюють."
+
+msgid "Debug view is on (Advanced, Inspect)."
+msgstr "Увімкнено режим налагодження (Додатково, Перевірка)."
+
+msgid "Compare"
+msgstr "Порівняння"
+
+msgid "Split view"
+msgstr "Розділений вигляд"
+
+msgid ""
+"Shows the original image left of the line and DLSS 5 to its right.\n"
+"Before upscaling draws no line, because the upscaler would treat it as part of the image."
+msgstr ""
+"Показує початкове зображення ліворуч від лінії, а DLSS 5 — праворуч.\n"
+"У режимі «До масштабування» лінія не малюється, бо масштабувальник сприйняв би її як частину зображення."
+
+msgid "Split position"
+msgstr "Положення розділення"
+
+msgid "Hold to show original"
+msgstr "Утримуйте для оригіналу"
+
+msgid ""
+"While this key is held, the game shows its original image, so DLSS 5 can be compared in motion.\n"
+"DLSS 5 keeps running, so its GPU cost is unchanged, and the key still reaches the game."
+msgstr ""
+"Поки цю клавішу утримано, гра показує початкове зображення, тож DLSS 5 можна порівняти в русі.\n"
+"DLSS 5 продовжує працювати, тому навантаження на GPU не змінюється, а клавіша й надалі доходить до гри."
+
+msgid "Status"
+msgstr "Стан"
+
+msgid "State"
+msgstr "Стан"
+
+msgid "%.1f ms"
+msgstr "%.1f мс"
+
+msgid "%.0f%% of each rendered frame"
+msgstr "%.0f%% кожного відрендереного кадру"
+
+msgid "GPU cost"
+msgstr "Навантаження на GPU"
+
+msgid "every other frame, when the network runs"
+msgstr "кожен другий кадр, коли працює нейромережа"
+
+msgid "%.1f of %.1f ms"
+msgstr "%.1f з %.1f мс"
+
+msgid "measuring"
+msgstr "вимірювання"
+
+msgid "Auto scale"
+msgstr "Авто-масштаб"
+
+msgid "%ux%u, network %ux%u, passes: %u"
+msgstr "%ux%u, мережа %ux%u, проходів: %u"
+
+msgid "Route"
+msgstr "Маршрут"
+
+msgid "Direct provider"
+msgstr "Прямий провайдер"
+
+msgid "Native NGX"
+msgstr "Нативний NGX"
+
+msgid "Waiting for DLSS 5 GPU work to complete before applying settings."
+msgstr "Очікування завершення роботи DLSS 5 на GPU перед застосуванням налаштувань."
+
+msgid "Auto Resolution Scale holds %.0f%%, its quality floor. DLSS 5 still costs more than its budget here, so the frame rate pays instead of detail."
+msgstr "Авто-масштаб роздільності тримає %.0f%% — свою межу якості. DLSS 5 тут усе ще коштує більше за свій бюджет, тож платить частота кадрів, а не деталізація."
+
+msgid "Auto Resolution Scale runs at %.0f%% of up to %.0f%% to keep DLSS 5 within its budget, and rises again with headroom."
+msgstr "Авто-масштаб роздільності працює на %.0f%% із максимальних %.0f%%, щоб утримати DLSS 5 у межах бюджету, і знову зростає, коли є запас."
+
+msgid "Restart with other DLSS 5 add-ons disabled to give MFGUnlocker ownership of the provider."
+msgstr "Перезапустіть гру, вимкнувши інші доповнення DLSS 5, щоб провайдером керував MFGUnlocker."
+
+msgid "The Present stage does not run with XeMFG standalone. Choose Auto or an upscaling stage."
+msgstr "Етап «Виведення» не працює з автономним XeMFG. Виберіть «Авто» або етап масштабування."
+
+msgid "Advanced"
+msgstr "Додатково"
+
+msgid "Structure Intensity"
+msgstr "Інтенсивність структури"
+
+msgid ""
+"Local detail and structure enhancement.\n"
+"Above 1 goes past the provider's usual range."
+msgstr ""
+"Локальне посилення деталей і структури.\n"
+"Понад 1 виходить за звичайний діапазон провайдера."
+
+msgid "Tone Intensity"
+msgstr "Інтенсивність тону"
+
+msgid ""
+"Local tone and contrast enhancement.\n"
+"Above 1 goes past the provider's usual range."
+msgstr ""
+"Локальне посилення тону й контрасту.\n"
+"Понад 1 виходить за звичайний діапазон провайдера."
+
+msgid "Character Mask"
+msgstr "Маска персонажів"
+
+msgid "Detects skin and faces so that Faces & skin applies to them."
+msgstr "Виявляє шкіру й обличчя, щоб до них застосовувався параметр «Обличчя й шкіра»."
+
+msgid "Passes"
+msgstr "Проходи"
+
+msgid "Pass Count"
+msgstr "Кількість проходів"
+
+msgid "Runs the network several times in a row. Every pass is a separate feature and costs GPU time and memory."
+msgstr "Запускає мережу кілька разів поспіль. Кожен прохід — окрема функція, що коштує часу GPU й пам'яті."
+
+msgid "Same as pass 1"
+msgstr "Як прохід 1"
+
+msgid "Later passes"
+msgstr "Наступні проходи"
+
+msgid ""
+"Passes 2 and later refine the previous pass's output. Custom gives them their own Model and strengths.\n"
+"Tone adds up from pass to pass, so later passes usually want less of it."
+msgstr ""
+"Проходи 2 і далі доопрацьовують вихід попереднього проходу. «Власний» дає їм окрему модель та інтенсивності.\n"
+"Тон накопичується від проходу до проходу, тож наступним проходам зазвичай потрібно менше тону."
+
+msgid "Later-pass settings apply when Pass Count is 2 or more."
+msgstr "Налаштування наступних проходів діють, коли проходів 2 або більше."
+
+msgid "Blend"
+msgstr "Змішування"
+
+msgid "Blend strength"
+msgstr "Сила змішування"
+
+msgid "Scales DLSS 5's change: 0 keeps the game's image, 1 is DLSS 5's result, above 1 exaggerates it."
+msgstr "Масштабує зміну DLSS 5: 0 залишає зображення гри, 1 — результат DLSS 5, понад 1 її підсилює."
+
+msgid "Color strength"
+msgstr "Сила кольору"
+
+msgid "0 keeps the game's colors and takes only DLSS 5's lighting and detail. 1 is DLSS 5's color; above 1 strengthens its color change."
+msgstr "0 залишає кольори гри й бере від DLSS 5 лише освітлення та деталі. 1 — колір DLSS 5; понад 1 посилює його зміну кольору."
+
+msgid "Highlight guard"
+msgstr "Захист світлих ділянок"
+
+msgid "Limits how far DLSS 5 may brighten a pixel, as a multiple of its original brightness, so lights do not turn into bright speckles."
+msgstr "Обмежує, наскільки DLSS 5 може освітлити піксель, у кратних його початкової яскравості, щоб вогні не перетворювались на яскраві цятки."
+
+msgid "Brightening limit"
+msgstr "Межа освітлення"
+
+msgid "Dark halo reduction"
+msgstr "Зменшення темних ореолів"
+
+msgid "Removes thin dark outlines DLSS 5 adds beside bright edges and keeps its broad lighting change. Can lighten real shadow edges."
+msgstr "Прибирає тонкі темні обводки, які DLSS 5 додає біля світлих країв, і зберігає загальну зміну освітлення. Може освітлити справжні краї тіней."
+
+msgid "Bright halo reduction"
+msgstr "Зменшення світлих ореолів"
+
+msgid "Removes thin bright outlines DLSS 5 adds beside dark edges."
+msgstr "Прибирає тонкі світлі обводки, які DLSS 5 додає біля темних країв."
+
+msgid "Halo radius"
+msgstr "Радіус ореолу"
+
+msgid "How far from each pixel to look for the edge, in network pixels."
+msgstr "Як далеко від кожного пікселя шукати край, у пікселях мережі."
+
+msgid "Scaling"
+msgstr "Масштабування"
+
+msgid "Signed PQ"
+msgstr "PQ зі знаком"
+
+msgid "Linear"
+msgstr "Лінійний"
+
+msgid "Scaling Domain"
+msgstr "Домен масштабування"
+
+msgid "Signal space used for downsampling and upsampling."
+msgstr "Простір сигналу для зменшення й збільшення."
+
+msgid "Area"
+msgstr "Площа"
+
+msgid "Bilinear"
+msgstr "Білінійний"
+
+msgid "Nearest"
+msgstr "Найближчий"
+
+msgid "Downsample Filter"
+msgstr "Фільтр зменшення"
+
+msgid "Bicubic"
+msgstr "Бікубічний"
+
+msgid "Edge-aware"
+msgstr "З урахуванням країв"
+
+msgid "Upsample Filter"
+msgstr "Фільтр збільшення"
+
+msgid "Resolution Scale below 100: how the network's change is enlarged. Edge-aware keeps it from bleeding across edges."
+msgstr "Масштаб роздільності нижче 100: як збільшується зміна мережі. «З урахуванням країв» не дає їй переходити через краї."
+
+msgid "Supersampling Filter"
+msgstr "Фільтр суперсемплінгу"
+
+msgid "Resolution Scale above 100: how the network's larger image comes back to the game's size. Area averages every pixel it covers, without aliasing."
+msgstr "Масштаб роздільності понад 100: як більше зображення мережі повертається до розміру гри. «Площа» усереднює кожен піксель, який охоплює, без аліасингу."
+
+msgid "RGB residual"
+msgstr "Залишок RGB"
+
+msgid "Processed image"
+msgstr "Оброблене зображення"
+
+msgid "Ratio"
+msgstr "Відношення"
+
+msgid "Scale Reconstruction"
+msgstr "Реконструкція масштабу"
+
+msgid ""
+"RGB residual adds the network's change to the full-resolution image.\n"
+"Processed image uses the upscaled network output directly.\n"
+"Ratio multiplies the full-resolution image by the network's change, so black stays black."
+msgstr ""
+"Залишок RGB додає зміну мережі до зображення повної роздільності.\n"
+"Оброблене зображення напряму використовує збільшений вихід мережі.\n"
+"Відношення множить зображення повної роздільності на зміну мережі, тож чорне лишається чорним."
+
+msgid "HDR and signal"
+msgstr "HDR і сигнал"
+
+msgid "Linear BT.709"
+msgstr "Лінійний BT.709"
+
+msgid "Encoding"
+msgstr "Кодування"
+
+msgid ""
+"Auto treats the DLSS input and output as linear BT.709 and follows the swapchain format and color space at Present.\n"
+"Other choices override the encoding of the processed image."
+msgstr ""
+"Авто вважає вхід і вихід DLSS лінійним BT.709, а у Виведенні бере формат і колірний простір swapchain.\n"
+"Інші варіанти перевизначають кодування обробленого зображення."
+
+msgid "PQ SDR"
+msgstr "PQ SDR"
+
+msgid "Linear SDR"
+msgstr "Лінійний SDR"
+
+msgid "NR Signal Encoding"
+msgstr "Кодування сигналу NR"
+
+msgid "Encoding supplied to the network after the HDR-to-SDR bridge."
+msgstr "Кодування, яке отримує мережа після мосту HDR-SDR."
+
+msgid "Diffuse White"
+msgstr "Дифузний білий"
+
+msgid "%.0f nits"
+msgstr "%.0f ніт"
+
+msgid "Reference white of the HDR-to-SDR bridge. Encoding Auto selects it; choose an explicit encoding to set it."
+msgstr "Опорний білий для мосту HDR-SDR. Кодування Авто вибирає його саме; виберіть конкретне кодування, щоб задати вручну."
+
+msgid "Highlight roll-off"
+msgstr "Стиснення світлих ділянок"
+
+msgid "HDR only: up to this share of diffuse white the network sees the image unchanged; brighter values are compressed into the rest. Lower gives highlights more room."
+msgstr "Лише HDR: до цієї частки дифузного білого мережа бачить зображення без змін; яскравіші значення стискаються в решту. Нижче — більше місця для світлих ділянок."
+
+msgid "Exposure"
+msgstr "Експозиція"
+
+msgid "Multiplies the exposure used for neural rendering, independent of the game's exposure."
+msgstr "Множить експозицію для нейронного рендерингу незалежно від експозиції гри."
+
+msgid "On"
+msgstr "Увімкнено"
+
+msgid "Inverse"
+msgstr "Обернена"
+
+msgid "Use Exposure Value"
+msgstr "Використати експозицію"
+
+msgid "On applies the game's DLSS exposure texture before neural rendering; Inverse divides by it."
+msgstr "Увімкнено застосовує текстуру експозиції DLSS гри перед нейронним рендерингом; Обернена ділить на неї."
+
+msgid "Adaptive exposure"
+msgstr "Адаптивна експозиція"
+
+msgid ""
+"Keeps the scene the network sees at a steady brightness in HDR games, so the same settings suit games with different exposure.\n"
+"The game's own brightness is unchanged. SDR color is left as it is."
+msgstr ""
+"Утримує стабільну яскравість сцени, яку бачить мережа, в HDR-іграх, тож ті самі налаштування підходять іграм з різною експозицією.\n"
+"Власна яскравість гри не змінюється. Колір SDR лишається як є."
+
+msgid "Adaptive target"
+msgstr "Адаптивна ціль"
+
+msgid "The average brightness Adaptive exposure gives the scene the network sees (0.18 is middle grey). Higher shows it a brighter scene."
+msgstr "Середня яскравість, яку адаптивна експозиція надає сцені, що її бачить мережа (0.18 — середній сірий). Вище — мережа бачить яскравішу сцену."
+
+msgid "Provider"
+msgstr "Провайдер"
+
+msgid "Default"
+msgstr "За замовчуванням"
+
+msgid "Preset A"
+msgstr "Пресет A"
+
+msgid "Preset B"
+msgstr "Пресет B"
+
+msgid "Preset"
+msgstr "Пресет"
+
+msgid "The provider's render preset hint."
+msgstr "Підказка пресету рендерингу для провайдера."
+
+msgid "UI Correction"
+msgstr "Корекція UI"
+
+msgid ""
+"Auto enables the provider's UI correction at Present, whose image contains the game's UI, and leaves it off for DLSS input and output.\n"
+"Off never uses it. On always does."
+msgstr ""
+"Авто вмикає корекцію UI провайдера у Виведенні, зображення якого містить UI гри, і залишає її вимкненою для входу й виходу DLSS.\n"
+"Вимкнено: ніколи не використовується. Увімкнено: завжди."
+
+msgid "Strict"
+msgstr "Суворий"
+
+msgid "Normal"
+msgstr "Звичайний"
+
+msgid "Loose"
+msgstr "Вільний"
+
+msgid "Motion tolerance"
+msgstr "Допуск руху"
+
+msgid ""
+"How much a surface may change between frames and still keep the carried fine detail.\n"
+"Strict carries it on fewer moving surfaces, which keep the rebuilt look; Loose carries more detail."
+msgstr ""
+"Наскільки поверхня може змінитися між кадрами й усе одно зберегти перенесені дрібні деталі.\n"
+"«Суворий» переносить їх на меншій кількості рухомих поверхонь, які зберігають відтворений вигляд; «Вільний» переносить більше деталей."
+
+msgid "Never"
+msgstr "Ніколи"
+
+msgid "Optional"
+msgstr "Необов'язково"
+
+msgid "Required"
+msgstr "Обов'язково"
+
+msgid "Use DLSS resources"
+msgstr "Ресурси DLSS"
+
+msgid ""
+"Present only. Optional reuses the DLSS motion vectors and depth when available, otherwise neutral inputs.\n"
+"Required skips Present processing without them. Never always uses neutral inputs."
+msgstr ""
+"Лише для виведення. Необов'язково: використовує вектори руху й глибину DLSS, якщо вони є, інакше нейтральні входи.\n"
+"Обов'язково: без них обробка під час виведення пропускається. Ніколи: завжди нейтральні входи."
+
+msgid "Block Hudless"
+msgstr "Блокувати кадр без HUD"
+
+msgid "Present only: keeps the game's HUD-less image from DLSS frame generation, so generated frames match processed ones."
+msgstr "Лише для виведення: не передає генерації кадрів DLSS зображення гри без HUD, щоб згенеровані кадри відповідали обробленим."
+
+msgid "Inspect"
+msgstr "Перевірка"
+
+msgid "Network input"
+msgstr "Вхід мережі"
+
+msgid "Network output"
+msgstr "Вихід мережі"
+
+msgid "Change (x8)"
+msgstr "Зміна (x8)"
+
+msgid "Debug view"
+msgstr "Режим налагодження"
+
+msgid ""
+"Shows what the network is given and returns, or where DLSS 5 changes the image (grey: unchanged; lighter or darker: changed).\n"
+"With Split view, on the DLSS 5 side only."
+msgstr ""
+"Показує, що мережа отримує й повертає, або де DLSS 5 змінює зображення (сірий: без змін; світліше чи темніше: змінено).\n"
+"З розділеним виглядом — лише на боці DLSS 5."
+
+msgid "Swap sides"
+msgstr "Поміняти сторони"
+
+msgid "Split view shows DLSS 5 on the left and the original on the right."
+msgstr "Розділений вигляд показує DLSS 5 ліворуч, а оригінал — праворуч."
+
+msgid "Reset to defaults"
+msgstr "Скинути до типових"
+
 msgid "Waiting for the game's Reflex plugin."
 msgstr "Очікування плагіна Reflex у грі."
 
@@ -293,9 +884,6 @@ msgstr "Очікування, поки гра прийме обмеження Re
 msgid "Game"
 msgstr "Як у грі"
 
-msgid "Off"
-msgstr "Вимкнено"
-
 msgid "V-Sync"
 msgstr "V-Sync"
 
@@ -308,6 +896,13 @@ msgstr ""
 
 msgid "Reflex FPS limit"
 msgstr "Обмеження FPS Reflex"
+
+msgid ""
+"Caps the frame rate XeMFG presents.\n"
+"XeLL paces the game's frames to it."
+msgstr ""
+"Обмежує частоту кадрів, яку виводить XeMFG.\n"
+"XeLL підлаштовує під неї кадри гри."
 
 msgid ""
 "Caps the game's frame rate through Reflex.\n"
@@ -352,11 +947,17 @@ msgstr "Застосування…"
 msgid "Reflex limit"
 msgstr "Обмеження Reflex"
 
-msgid "accepted"
-msgstr "прийнято"
+msgid "applied by XeLL to XeMFG's output"
+msgstr "застосовано XeLL до виводу XeMFG"
 
 msgid "%d FPS requested"
 msgstr "Запит: %d FPS"
+
+msgid "applies with XeMFG's next frame"
+msgstr "застосується з наступним кадром XeMFG"
+
+msgid "accepted"
+msgstr "прийнято"
 
 msgid "restoring the game's Reflex limit"
 msgstr "відновлення обмеження Reflex гри"
@@ -369,9 +970,6 @@ msgstr "Стан Reflex тимчасово недоступний."
 
 msgid "Path traced hair"
 msgstr "Волосся з трасуванням шляхів"
-
-msgid "State"
-msgstr "Стан"
 
 msgid "Unknown"
 msgstr "Невідомо"
@@ -442,6 +1040,9 @@ msgstr "Увімкніть генерацію кадрів у налаштува
 msgid "Turn on frame generation in the game's settings (XeSS)."
 msgstr "Увімкніть генерацію кадрів у налаштуваннях гри (XeSS)."
 
+msgid "Turn on DLSS or XeSS frame generation in the game's settings. If the game has none, turn on XeMFG standalone."
+msgstr "Увімкніть генерацію кадрів DLSS або XeSS у налаштуваннях гри. Якщо в грі її немає, увімкніть «Автономний XeMFG»."
+
 msgid "Turn on DLSS or XeSS frame generation in the game's settings."
 msgstr "Увімкніть генерацію кадрів DLSS або XeSS у налаштуваннях гри."
 
@@ -489,6 +1090,140 @@ msgstr "У цьому сеансі гра бачить NVIDIA GeForce RTX 4090."
 msgid "This GPU is not an RTX 30 card; the game sees its real name."
 msgstr "Цей GPU не належить до серії RTX 30; гра бачить його справжню назву."
 
+msgid "XeMFG standalone"
+msgstr "Автономний XeMFG"
+
+msgid ""
+"MFG Unlocker runs XeSS multi-frame generation itself, without OptiScaler, from the inputs of the game's DLSS frame generation or of its DLSS, XeSS or FSR 3.1 upscaling. It replaces the game's own frame generation.\n"
+"Switching it on or off applies after a restart."
+msgstr ""
+"MFG Unlocker сам виконує багатокадрову генерацію XeSS, без OptiScaler, використовуючи вхідні дані генерації кадрів DLSS у грі або її масштабування DLSS, XeSS чи FSR 3.1. Вона замінює власну генерацію кадрів гри.\n"
+"Увімкнення чи вимкнення діє після перезапуску."
+
+msgid "Dynamic"
+msgstr "Динамічний"
+
+msgid "MFG mode"
+msgstr "Режим MFG"
+
+msgid "Dynamic changes how many frames XeMFG generates every game frame, so its frame rate follows the target, up to the frames set. The target is not a limit."
+msgstr "«Динамічний» змінює кількість кадрів, які XeMFG генерує на кожен кадр гри, щоб його частота кадрів наближалася до цілі, але не більше заданої кількості. Ціль не є обмеженням."
+
+msgid "Up to"
+msgstr "До"
+
+msgid "Dynamic target"
+msgstr "Динамічна ціль"
+
+msgid "Display refresh rate"
+msgstr "Частота оновлення дисплея"
+
+msgid "The FPS limit when one is set, otherwise just under the display's refresh rate."
+msgstr "Обмеження FPS, якщо його задано, інакше трохи нижче за частоту оновлення дисплея."
+
+msgid "Target FPS"
+msgstr "Цільовий FPS"
+
+msgid "Closest"
+msgstr "Найближче"
+
+msgid "At least"
+msgstr "Щонайменше"
+
+msgid "At most"
+msgstr "Щонайбільше"
+
+msgid "Rounding"
+msgstr "Округлення"
+
+msgid "Closest: the frame rate closest to the target. At least: the fewest frames that reach it. At most: the most frames that stay under it."
+msgstr "Найближче: частота кадрів, найближча до цілі. Щонайменше: найменше кадрів, що її досягають. Щонайбільше: найбільше кадрів, що лишаються нижче неї."
+
+msgid "Allow 1X"
+msgstr "Дозволити 1X"
+
+msgid "Lets Dynamic turn frame generation off when the game's own frames come nearest the target."
+msgstr "Дозволяє «Динамічному» вимикати генерацію кадрів, коли власні кадри гри найближчі до цілі."
+
+msgid "Use target as cap"
+msgstr "Ціль як обмеження"
+
+msgid "Holds XeMFG's frame rate at the target with the FPS limit and uses the fewest frames that reach it, never 1X."
+msgstr "Утримує частоту кадрів XeMFG на цілі обмеженням FPS і використовує найменше кадрів, що її досягають, ніколи не 1X."
+
+msgid "The game's folder path is too long (260 characters or more) for XeMFG to search it."
+msgstr "Шлях до теки гри задовгий (260 символів або більше), щоб XeMFG міг у ній шукати."
+
+msgid "XeMFG needs libxess_fg.dll and libxell.dll in an RTXMFG-XeSS folder beside MFG Unlocker."
+msgstr "Для XeMFG потрібні libxess_fg.dll і libxell.dll у теці RTXMFG-XeSS поруч із MFG Unlocker."
+
+msgid "XeMFG needs libxess_fg.dll and libxell.dll together in %s (or beside the game's exe in %s). Restart the game after adding them."
+msgstr "Для XeMFG потрібні libxess_fg.dll і libxell.dll разом у %s (або поруч з exe гри в %s). Перезапустіть гру після того, як додасте їх."
+
+msgid "Only libxell.dll was found."
+msgstr "Знайдено лише libxell.dll."
+
+msgid "Only libxess_fg.dll was found."
+msgstr "Знайдено лише libxess_fg.dll."
+
+msgid "The two files are in different folders."
+msgstr "Ці два файли лежать у різних теках."
+
+msgid "Found %s, not %s: check the file's name and extension."
+msgstr "Знайдено %s, а не %s: перевірте назву та розширення файлу."
+
+msgid "The XeMFG setting could not be saved."
+msgstr "Не вдалося зберегти налаштування XeMFG."
+
+msgid "Restart the game to start XeMFG."
+msgstr "Перезапустіть гру, щоб запустити XeMFG."
+
+msgid "XeMFG could not start: %s"
+msgstr "Не вдалося запустити XeMFG: %s"
+
+msgid "Turn on DLSS frame generation in the game's settings. XeMFG replaces it."
+msgstr "Увімкніть генерацію кадрів DLSS у налаштуваннях гри. XeMFG замінює її."
+
+msgid "Turn off the game's FSR frame generation. XeMFG does not run on top of it."
+msgstr "Вимкніть генерацію кадрів FSR у грі. XeMFG не працює поверх неї."
+
+msgid "The game's motion vectors are at display resolution. XeMFG cannot use them yet."
+msgstr "Вектори руху гри мають роздільну здатність дисплея. XeMFG поки не може їх використовувати."
+
+msgid "Waiting for the game's DLSS, XeSS or FSR 3.1 upscaling, or its DLSS frame generation."
+msgstr "Очікування масштабування DLSS, XeSS чи FSR 3.1 у грі або її генерації кадрів DLSS."
+
+msgid "Dynamic, %ux"
+msgstr "Динамічний, %ux"
+
+msgid "held as cap"
+msgstr "утримується як обмеження"
+
+msgid "Restart needed"
+msgstr "Потрібен перезапуск"
+
+msgid "Waiting"
+msgstr "Очікування"
+
+msgid "Inputs"
+msgstr "Вхідні дані"
+
+msgid ""
+"Shows the real and XeMFG frame rates in the top-left corner\n"
+"while the menu is closed. Saved for the next launch."
+msgstr ""
+"Показує реальний FPS і FPS з XeMFG у лівому верхньому куті,\n"
+"коли меню закрите. Зберігається між запусками гри."
+
+msgid "%.1f real, %.1f XeMFG"
+msgstr "%.1f реальних, %.1f XeMFG"
+
+msgid "Measuring..."
+msgstr "Вимірювання…"
+
+msgid "XeMFG off"
+msgstr "XeMFG вимкнено"
+
 msgid "MFG Unlocker multi-frame port"
 msgstr "Багатокадровий порт MFG Unlocker"
 
@@ -501,11 +1236,20 @@ msgstr "Генерація кадрів"
 msgid "XeSS frame generation support is unavailable in this build."
 msgstr "Підтримка генерації кадрів XeSS недоступна в цій збірці."
 
-msgid "XeSS multi-frame generation needs OptiScaler, with XeFG as its frame generation output. Without it the game's XeSS frame generation runs at Intel's standard 2x."
-msgstr "Для багатокадрової генерації XeSS потрібен OptiScaler, у якому для генерації кадрів вибрано XeFG. Без нього генерація кадрів XeSS у грі працює в стандартному режимі Intel 2x."
+msgid "XeSS multi-frame generation runs as XeMFG standalone, or through OptiScaler with XeFG as its frame generation output. Without either, the game's XeSS frame generation runs at Intel's standard 2x."
+msgstr "Багатокадрова генерація XeSS працює як автономний XeMFG або через OptiScaler, у якому для генерації кадрів вибрано XeFG. Без жодного з них генерація кадрів XeSS у грі працює в стандартному режимі Intel 2x."
 
 msgid "XeSS multi-frame generation runs through OptiScaler. Set the frame generation ratio and the MFG model in OptiScaler's menu."
 msgstr "Багатокадрова генерація XeSS працює через OptiScaler. Задайте коефіцієнт генерації кадрів і модель MFG у меню OptiScaler."
+
+msgid "DLSS multi-frame generation needs an NVIDIA RTX GPU."
+msgstr "Для багатокадрової генерації DLSS потрібен GPU NVIDIA RTX."
+
+msgid "DLSS multi-frame generation is unavailable on this GPU."
+msgstr "Багатокадрова генерація DLSS недоступна на цьому GPU."
+
+msgid "Latency and display"
+msgstr "Затримка й відображення"
 
 msgid "Display"
 msgstr "Дисплей"
@@ -516,8 +1260,11 @@ msgstr "«Вимкнено» виводить кадри гри без V-Sync."
 msgid "The V-Sync setting could not be saved."
 msgstr "Не вдалося зберегти налаштування V-Sync."
 
-msgid "Status"
-msgstr "Стан"
+msgid "DLSS Ray Reconstruction"
+msgstr "DLSS Ray Reconstruction"
+
+msgid "DLSS Super Resolution"
+msgstr "DLSS Super Resolution"
 
 msgid "%u generated frames capacity"
 msgstr "максимум згенерованих кадрів: %u"
@@ -528,14 +1275,8 @@ msgstr "Застосовано"
 msgid "Not verified"
 msgstr "Не перевірено"
 
-msgid "Model"
-msgstr "Модель"
-
 msgid "Tensor cores"
 msgstr "Тензорні ядра"
-
-msgid "On"
-msgstr "Увімкнено"
 
 msgid "the ported model's int8 layers run as CUDA kernels"
 msgstr "шари int8 портованої моделі працюють через CUDA"
@@ -549,17 +1290,17 @@ msgstr "XeFGTensorCores = off в OptiScaler.ini"
 msgid "presentation override is not verified"
 msgstr "перевизначення відображення не перевірено"
 
-msgid "DLSS multi-frame generation needs an NVIDIA RTX GPU."
-msgstr "Для багатокадрової генерації DLSS потрібен GPU NVIDIA RTX."
-
-msgid "DLSS multi-frame generation is unavailable on this GPU."
-msgstr "Багатокадрова генерація DLSS недоступна на цьому GPU."
-
-msgid "Advanced"
-msgstr "Додатково"
-
 msgid "XeSS diagnostics"
 msgstr "Діагностика XeSS"
+
+msgid "DLSS presets"
+msgstr "Пресети DLSS"
+
+msgid "Frame generation is set in OptiScaler's menu. This menu offers the DLSS presets and DLSS 5."
+msgstr "Генерацію кадрів задайте в меню OptiScaler. Це меню містить пресети DLSS і DLSS 5."
+
+msgid "DLSS 5"
+msgstr "DLSS 5"
 
 msgid "Waiting for status"
 msgstr "Очікування стану"
@@ -597,6 +1338,9 @@ msgstr "Готово на момент створення функції"
 msgid "Waiting for frame generation"
 msgstr "Очікування генерації кадрів"
 
+msgid "Restart with the matching single-module build. The current status protocol is older than this UI expects."
+msgstr "Перезапустіть гру з відповідною однофайловою збіркою. Поточний протокол стану старіший, ніж очікує цей інтерфейс."
+
 msgid "5x MFG (experimental)"
 msgstr "5x MFG (експериментально)"
 
@@ -609,9 +1353,6 @@ msgstr "Як у грі"
 msgid "Mode"
 msgstr "Режим"
 
-msgid "MFG mode"
-msgstr "Режим MFG"
-
 msgid ""
 "Follow game uses the game's own frame generation setting.\n"
 "Dynamic adjusts frame generation toward a target frame rate; it does not set a hard FPS limit."
@@ -619,14 +1360,20 @@ msgstr ""
 "«Як у грі» використовує налаштування генерації кадрів самої гри.\n"
 "«Динамічний» підлаштовує генерацію кадрів під цільову частоту кадрів; це не жорстке обмеження FPS."
 
-msgid "Dynamic target"
-msgstr "Динамічна ціль"
+msgid "Frame generation stays under the game's control. This wrapper has no verified MFG override support."
+msgstr "Генерація кадрів залишається під керуванням гри. Ця обгортка не має перевіреної підтримки перевизначення MFG."
 
-msgid "Display refresh rate"
-msgstr "Частота оновлення дисплея"
+msgid "DLSS-G activity observed; waiting for the game's FG control calls."
+msgstr "Виявлено активність DLSS-G; очікування викликів керування FG від гри."
 
-msgid "Target FPS"
-msgstr "Цільовий FPS"
+msgid "Waiting for the game to request frame generation."
+msgstr "Очікування, поки гра запитає генерацію кадрів."
+
+msgid "Waiting for an active DLSS-G pipeline."
+msgstr "Очікування активного конвеєра DLSS-G."
+
+msgid "Toggle frame generation off then on, or restart the game, to recreate the pipeline with this selection."
+msgstr "Вимкніть і знову ввімкніть генерацію кадрів або перезапустіть гру, щоб перебудувати конвеєр із цим вибором."
 
 msgid "Dynamic MFG is unavailable with the current limit or runtime. Its full frame-generation range must fit the limit."
 msgstr "Динамічний MFG недоступний з поточною межею або середовищем виконання. Увесь його діапазон генерації кадрів має вкладатися в межу."
@@ -643,15 +1390,6 @@ msgstr "Запит прийнято, але конфігурацію не збе
 msgid "The selection could not be applied or saved."
 msgstr "Не вдалося застосувати або зберегти вибір."
 
-msgid "Latency and display"
-msgstr "Затримка й відображення"
-
-msgid "DLSS Ray Reconstruction"
-msgstr "DLSS Ray Reconstruction"
-
-msgid "DLSS Super Resolution"
-msgstr "DLSS Super Resolution"
-
 msgid "game intent: unknown"
 msgstr "налаштування гри: невідомо"
 
@@ -666,12 +1404,6 @@ msgstr "Стан FG"
 
 msgid "Requested"
 msgstr "Запитано"
-
-msgid "Dynamic"
-msgstr "Динамічний"
-
-msgid "Dynamic, %ux"
-msgstr "Динамічний, %ux"
 
 msgid "NVIDIA list unavailable"
 msgstr "список NVIDIA недоступний"
@@ -694,9 +1426,6 @@ msgstr "поточна обгортка не має перевіреного п�
 msgid "%dx (safe fallback)"
 msgstr "%dx (безпечний режим)"
 
-msgid "Waiting"
-msgstr "Очікування"
-
 msgid "for an active DLSS-G wrapper"
 msgstr "активної обгортки DLSS-G"
 
@@ -713,18 +1442,6 @@ msgstr ""
 "Найвищий режим, який підтримує поточне середовище виконання DLSS-G,\n"
 "і максимум, який список перевизначень NVIDIA дає цій грі."
 
-msgid "%.1f real, %.1f DLSS"
-msgstr "%.1f реальних, %.1f DLSS"
-
-msgid "%.1f real, DLSS unavailable"
-msgstr "%.1f реальних, DLSS недоступний"
-
-msgid "Measuring..."
-msgstr "Вимірювання…"
-
-msgid "DLSS FG off"
-msgstr "DLSS FG вимкнено"
-
 msgid "waiting for an accepted Dynamic request"
 msgstr "очікування застосування динамічного режиму"
 
@@ -734,23 +1451,14 @@ msgstr "застосовано: частота оновлення дисплея
 msgid "applied: %.2f FPS"
 msgstr "застосовано: %.2f FPS"
 
-msgid "Restart with the matching single-module build. The current status protocol is older than this UI expects."
-msgstr "Перезапустіть гру з відповідною однофайловою збіркою. Поточний протокол стану старіший, ніж очікує цей інтерфейс."
+msgid "%.1f real, %.1f DLSS"
+msgstr "%.1f реальних, %.1f DLSS"
 
-msgid "Frame generation stays under the game's control. This wrapper has no verified MFG override support."
-msgstr "Генерація кадрів залишається під керуванням гри. Ця обгортка не має перевіреної підтримки перевизначення MFG."
+msgid "%.1f real, DLSS unavailable"
+msgstr "%.1f реальних, DLSS недоступний"
 
-msgid "DLSS-G activity observed; waiting for the game's FG control calls."
-msgstr "Виявлено активність DLSS-G; очікування викликів керування FG від гри."
-
-msgid "Waiting for the game to request frame generation."
-msgstr "Очікування, поки гра запитає генерацію кадрів."
-
-msgid "Waiting for an active DLSS-G pipeline."
-msgstr "Очікування активного конвеєра DLSS-G."
-
-msgid "Toggle frame generation off then on, or restart the game, to recreate the pipeline with this selection."
-msgstr "Вимкніть і знову ввімкніть генерацію кадрів або перезапустіть гру, щоб перебудувати конвеєр із цим вибором."
+msgid "DLSS FG off"
+msgstr "DLSS FG вимкнено"
 
 msgid "Diagnostics"
 msgstr "Діагностика"
@@ -760,6 +1468,12 @@ msgstr "Стан тимчасово недоступний; елементи к�
 
 msgid "FPS status unavailable"
 msgstr "Дані FPS недоступні"
+
+msgid "Real -- | XeMFG --"
+msgstr "Реальні -- | XeMFG --"
+
+msgid "Real %.0f | XeMFG %.0f"
+msgstr "Реальні %.0f | XeMFG %.0f"
 
 msgid "Real -- | DLSS --"
 msgstr "Реальні -- | DLSS --"
@@ -775,3 +1489,163 @@ msgstr "Динамічний (недоступний)"
 
 msgid "Dynamic (checking...)"
 msgstr "Динамічний (перевірка…)"
+
+#~ msgid "DLSS 5 Neural Rendering"
+#~ msgstr "Нейронний рендеринг DLSS 5"
+
+#~ msgid "Faster"
+#~ msgstr "Швидше"
+
+#~ msgid "Full"
+#~ msgstr "Повна"
+
+#~ msgid ""
+#~ "Render processes the DLSS input at render resolution, before DLSS SR, DLAA or Ray Reconstruction.\n"
+#~ "Upscaled processes the DLSS output after reconstruction.\n"
+#~ "Present processes the swapchain image before presentation (not available yet)."
+#~ msgstr ""
+#~ "Рендер обробляє вхід DLSS у роздільній здатності рендерингу, до DLSS SR, DLAA або Ray Reconstruction.\n"
+#~ "Після масштабування обробляє вихід DLSS після реконструкції.\n"
+#~ "Виведення обробляє зображення swapchain перед показом (поки недоступно)."
+
+#~ msgid ""
+#~ "Auto treats the DLSS input and output as linear BT.709.\n"
+#~ "Other choices override the encoding of the processed image."
+#~ msgstr ""
+#~ "Авто вважає вхід і вихід DLSS лінійним BT.709.\n"
+#~ "Інші варіанти перевизначають кодування обробленого зображення."
+
+#~ msgid "Auto and Off leave the provider's UI correction off for DLSS input and output. On enables it."
+#~ msgstr "Авто й Вимкнено залишають корекцію UI провайдера вимкненою для входу й виходу DLSS. Увімкнено вмикає її."
+
+#~ msgid "Render"
+#~ msgstr "Рендер"
+
+#~ msgid "Upscaled"
+#~ msgstr "Після масштабування"
+
+#~ msgid ""
+#~ "Render processes the DLSS input at render resolution, before DLSS SR, DLAA or Ray Reconstruction.\n"
+#~ "Upscaled processes the DLSS output after reconstruction.\n"
+#~ "Present processes the swapchain image before presentation and frame generation."
+#~ msgstr ""
+#~ "Рендер обробляє вхід DLSS у роздільній здатності рендерингу, до DLSS SR, DLAA або Ray Reconstruction.\n"
+#~ "Після масштабування обробляє вихід DLSS після реконструкції.\n"
+#~ "Виведення обробляє зображення swapchain перед показом і генерацією кадрів."
+
+#~ msgid "Overall Intensity"
+#~ msgstr "Загальна інтенсивність"
+
+#~ msgid "Character Intensity"
+#~ msgstr "Інтенсивність персонажів"
+
+#~ msgid "This game's swapchain cannot use the Present hook method; the log names the reason. Render or Upscaled still work."
+#~ msgstr "Swapchain цієї гри не підтримує спосіб підключення «Виведення»; причину вказано в журналі. Рендер і Після масштабування працюють."
+
+#~ msgid "Detects skin and faces so that Character Intensity applies to them."
+#~ msgstr "Виявляє шкіру й обличчя, щоб до них застосовувалася інтенсивність персонажів."
+
+#~ msgid ""
+#~ "Before upscaling processes the DLSS input at render resolution, before DLSS SR, DLAA or Ray Reconstruction.\n"
+#~ "After upscaling processes the DLSS output after reconstruction.\n"
+#~ "Present processes the final image, game UI included, before presentation and frame generation."
+#~ msgstr ""
+#~ "До масштабування обробляє вхід DLSS у роздільній здатності рендерингу, до DLSS SR, DLAA або Ray Reconstruction.\n"
+#~ "Після масштабування обробляє вихід DLSS після реконструкції.\n"
+#~ "Виведення обробляє фінальне зображення разом з UI гри перед показом і генерацією кадрів."
+
+#~ msgid ""
+#~ "Share of the hook method's resolution that the network processes.\n"
+#~ "100 is native, lower is faster, up to 200 supersamples. Values below 25 use 25."
+#~ msgstr ""
+#~ "Частка роздільності способу підключення, яку обробляє мережа.\n"
+#~ "100 — рідна, менше — швидше, до 200 — суперсемплінг. Значення нижче 25 вважаються 25."
+
+#~ msgid "Active preset"
+#~ msgstr "Активний пресет"
+
+#~ msgid ""
+#~ "Runs the network on every other frame and carries its result along the game's motion vectors on the frames between.\n"
+#~ "About half the GPU cost. Edges of fast-moving objects can show the original image for one frame."
+#~ msgstr ""
+#~ "Запускає нейромережу через кадр і переносить її результат уздовж векторів руху гри на проміжні кадри.\n"
+#~ "Приблизно половина навантаження на GPU. Краї об'єктів, що швидко рухаються, можуть на один кадр показувати оригінальне зображення."
+
+#~ msgid "XeSS multi-frame generation needs OptiScaler, with XeFG as its frame generation output. Without it the game's XeSS frame generation runs at Intel's standard 2x."
+#~ msgstr "Для багатокадрової генерації XeSS потрібен OptiScaler, у якому для генерації кадрів вибрано XeFG. Без нього генерація кадрів XeSS у грі працює в стандартному режимі Intel 2x."
+
+#~ msgid "Local detail and structure enhancement."
+#~ msgstr "Підсилення локальних деталей і структури."
+
+#~ msgid "Local tone and contrast enhancement."
+#~ msgstr "Підсилення локального тону й контрасту."
+
+#~ msgid ""
+#~ "RGB residual adds the network's change to the full-resolution image.\n"
+#~ "Processed image uses the upscaled network output directly."
+#~ msgstr ""
+#~ "Залишок RGB додає зміну мережі до зображення в повній роздільності.\n"
+#~ "Оброблене зображення напряму використовує збільшений вихід мережі."
+
+#~ msgid "Boost"
+#~ msgstr "Прискорення"
+
+#~ msgid "Boost is not available on Vulkan or with the Present hook method yet."
+#~ msgstr "Прискорення поки недоступне у Vulkan або зі способом підключення «Виведення»."
+
+#~ msgid ""
+#~ "Runs the network on every other frame and carries its result along the game's motion vectors on the frames between.\n"
+#~ "About half the GPU cost. Animated surfaces such as water, and particles, keep the game's own image while Boost is on."
+#~ msgstr ""
+#~ "Запускає нейромережу через кадр і переносить її результат уздовж векторів руху гри на проміжні кадри.\n"
+#~ "Приблизно половина навантаження на GPU. Анімовані поверхні, як-от вода, і частинки зберігають власне зображення гри, поки Прискорення увімкнене."
+
+#~ msgid "Place a compatible nvngx_dlssnr.dll beside the game executable or MFGUnlocker."
+#~ msgstr "Розмістіть сумісний nvngx_dlssnr.dll поруч із виконуваним файлом гри або MFGUnlocker."
+
+#~ msgid ""
+#~ "Runs the network on every other frame and carries its result along the game's motion vectors on the frames between.\n"
+#~ "About half the GPU cost. Animated surfaces such as water, and particles, keep the game's own image while Half rate is on."
+#~ msgstr ""
+#~ "Запускає нейромережу через кадр і переносить її результат уздовж векторів руху гри на проміжні кадри.\n"
+#~ "Приблизно половина навантаження на GPU. Анімовані поверхні, як-от вода, і частинки зберігають власне зображення гри, поки половинна частота увімкнена."
+
+#~ msgid ""
+#~ "How much a surface may change between frames and still keep the carried result.\n"
+#~ "Strict shows the game's image on more moving surfaces (less smear); Loose carries more detail."
+#~ msgstr ""
+#~ "Наскільки поверхня може змінитися між кадрами й усе одно зберегти перенесений результат.\n"
+#~ "«Суворий» показує зображення гри на більшій кількості рухомих поверхонь (менше розмиття); «Вільний» переносить більше деталей."
+
+#~ msgid ""
+#~ "Share of the hook method's resolution that the network processes.\n"
+#~ "100 is native, lower is faster, up to 200 supersamples. Values below 25 use 25.\n"
+#~ "Auto lowers it when DLSS 5 takes more than about a third of each rendered frame, and raises it again with headroom, never above the slider."
+#~ msgstr ""
+#~ "Частка роздільності способу підключення, яку обробляє мережа.\n"
+#~ "100 — рідна, менше — швидше, до 200 — суперсемплінг. Значення нижче 25 вважаються 25.\n"
+#~ "Авто знижує його, коли DLSS 5 займає більше приблизно третини кожного відрендереного кадру, і знову підвищує, коли є запас, але не вище повзунка."
+
+#~ msgid ""
+#~ "Sets Intensity, Model, Structure, Tone and Faces & skin together.\n"
+#~ "Subtle halves the change, Balanced is the default and Strong is clearly visible.\n"
+#~ "Pass Count under Advanced strengthens any look further, at extra GPU cost."
+#~ msgstr ""
+#~ "Задає разом Інтенсивність, Модель, Структуру, Тон і Обличчя й шкіру.\n"
+#~ "Легкий удвічі зменшує ефект, Збалансований — типовий, а Сильний добре помітний.\n"
+#~ "Кількість проходів у розділі «Додатково» ще більше посилює будь-який вигляд ціною додаткового навантаження на GPU."
+
+#~ msgid "follows Structure"
+#~ msgstr "як Структура"
+
+#~ msgid "Follows Structure. Change it under Advanced."
+#~ msgstr "Як Структура. Змінюється в розділі «Додатково»."
+
+#~ msgid "Structure enhancement on detected skin and faces."
+#~ msgstr "Підсилення структури на виявленій шкірі й обличчях."
+
+#~ msgid "Faces & skin follows Structure"
+#~ msgstr "Обличчя й шкіра як Структура"
+
+#~ msgid "Faces & skin takes the Structure strength, the provider's own default."
+#~ msgstr "Обличчя й шкіра беруть інтенсивність структури — власне типове значення провайдера."

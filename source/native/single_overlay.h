@@ -15,5 +15,8 @@ FARPROC ResolveProc(HMODULE module, LPCSTR name, FARPROC original) noexcept;
 // swapchains get the menu; true when *output was replaced.
 bool OwnsInterface(void* object) noexcept;
 bool WrapUpgradedInterface(void** output) noexcept;
+// Logging only (diag171.1): what an slUpgradeInterface argument is and which
+// module implements it.
+void DescribeInterface(void* object, wchar_t* text, size_t count) noexcept;
 void ReadStatus(MfgSingleModuleStatus& status) noexcept;
 }

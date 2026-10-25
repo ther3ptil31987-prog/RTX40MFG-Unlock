@@ -77,6 +77,12 @@ target_include_directories(GpuNameStartupTests PRIVATE "${NATIVE_SOURCE}")
 target_compile_definitions(GpuNameStartupTests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_link_libraries(GpuNameStartupTests PRIVATE dxgi)
 set_target_properties(GpuNameStartupTests PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+# diag.1: beta session diagnostics (crash and exit records) from child processes of the harness.
+add_executable(SessionDiagnosticsTests session_diagnostics_tests.cpp)
+target_compile_features(SessionDiagnosticsTests PRIVATE cxx_std_20)
+target_include_directories(SessionDiagnosticsTests PRIVATE "${NATIVE_SOURCE}")
+target_compile_definitions(SessionDiagnosticsTests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+set_target_properties(SessionDiagnosticsTests PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 # OptiScaler stand-in (version-resource identity + NGX facade + plugin loader)
 # and a fakenvapi stand-in without that identity.
 add_library(OptiScalerHostFixture SHARED optiscaler_host_fixture.cpp optiscaler_host_fixture.rc)
@@ -92,6 +98,18 @@ target_include_directories(OptiScalerHostTests PRIVATE "${NATIVE_SOURCE}")
 target_compile_definitions(OptiScalerHostTests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 set_target_properties(OptiScalerHostTests PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 add_dependencies(OptiScalerHostTests OptiScalerHostFixture FakeNvapiFixture)
+# xefgmenu.1: with the XeSS SDK 3.0.2 headers the stand-in also builds OptiScaler's XeFG output swapchain
+# (the optiscaler-xefg-output* cases) and its DXGI factory hook.
+set(XESS_SDK_ROOT "" CACHE PATH "XeSS SDK 3.0.2 (inc/xess_fg) for the OptiScaler XeFG output cases")
+if(EXISTS "${XESS_SDK_ROOT}/inc/xess_fg/xefg_swapchain_d3d12.h")
+    target_sources(OptiScalerHostFixture PRIVATE
+        "${NATIVE_SOURCE}/third_party/minhook/src/hook.c" "${NATIVE_SOURCE}/third_party/minhook/src/buffer.c"
+        "${NATIVE_SOURCE}/third_party/minhook/src/trampoline.c" "${NATIVE_SOURCE}/third_party/minhook/src/hde/hde64.c")
+    target_compile_features(OptiScalerHostFixture PRIVATE cxx_std_20)
+    target_compile_definitions(OptiScalerHostFixture PRIVATE OPTISCALER_FIXTURE_XEFG=1)
+    target_include_directories(OptiScalerHostFixture PRIVATE "${XESS_SDK_ROOT}/inc" "${NATIVE_SOURCE}/third_party/minhook/include")
+    target_compile_definitions(OptiScalerHostTests PRIVATE OPTISCALER_FIXTURE_XEFG=1)
+endif()
 foreach(target VulkanMenuTests VulkanDynamicMenuTests VulkanStreamlineMenuTests VulkanMixedMenuTests)
     add_executable(${target} vulkan_menu_tests.cpp)
     target_compile_features(${target} PRIVATE cxx_std_20)

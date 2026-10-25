@@ -22,12 +22,23 @@ inline std::atomic<uint64_t> gRenderedFrames{0};
 inline std::atomic<bool> gDxgiHooked{false};
 inline std::atomic<bool> gVulkanHooked{false};
 inline thread_local bool gInsideOverlay = false;
+// interopmenu.2: set while the Vulkan overlay forwards a present to the next layer and no other InternalScope is open.
+// OptiScaler's XeFG-on-Vulkan interop presents XeFG's real frame from inside that call, on XeFG's D3D12 output chain.
+inline thread_local bool gForwardingVulkanPresent = false;
 
 struct InternalScope
 {
     bool previous = gInsideOverlay;
-    InternalScope() noexcept { gInsideOverlay = true; }
-    ~InternalScope() { gInsideOverlay = previous; }
+    bool previousForwarding = gForwardingVulkanPresent;
+    InternalScope() noexcept { gInsideOverlay = true; gForwardingVulkanPresent = false; }
+    ~InternalScope() { gInsideOverlay = previous; gForwardingVulkanPresent = previousForwarding; }
+};
+
+struct VulkanPresentForwardingScope
+{
+    bool previous = gForwardingVulkanPresent;
+    VulkanPresentForwardingScope() noexcept { gForwardingVulkanPresent = true; }
+    ~VulkanPresentForwardingScope() { gForwardingVulkanPresent = previous; }
 };
 
 struct ContextScope
@@ -50,6 +61,8 @@ struct PlatformState
     bool layoutPrepared = false;
     bool inputWasVisible = false;
     bool inputAttached = false;
+    // interopmenu.3: drawn on XeFG's output, after OptiScaler's menu and cursor went into the game's frame.
+    bool afterFrameGeneration = false;
     // Latin UI font, and per menu catalog the font that draws it (built on first
     // display; state 0 = not built, 1 = covers every glyph, 2 = unavailable).
     ImFont* baseFont = nullptr;

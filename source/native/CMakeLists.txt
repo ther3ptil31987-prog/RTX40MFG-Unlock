@@ -1,8 +1,11 @@
 cmake_minimum_required(VERSION 3.24)
-project(RTX40MFGNative VERSION 1.6.1.1021 LANGUAGES C CXX ASM_MASM)
+project(RTX40MFGNative VERSION 1.7.0.1081 LANGUAGES C CXX ASM_MASM)
 option(MFG_UNLOCK_OVERLAY_SKIP_GPU_WORK "Isolated comparison: keep proxies/input but skip UI GPU work" OFF)
 option(MFG_UNLOCK_NGX_CREATE_RESULT_DIAGNOSTICS "Bounded NGX runtime Create results without DRED or new hooks" OFF)
 option(MFG_UNLOCK_GPU_FAULT_CAPTURE "Isolated local DRED and NGX result diagnostics" OFF)
+option(MFG_UNLOCK_SESSION_DIAGNOSTICS "Beta builds: runtime-log stamps, state lines, crash and exit records, minidump" OFF)
+option(MFG_UNLOCK_XVK_CAPTURE "Diagnostic: the XeMFG Vulkan layer writes presented frames to XVK_CAPTURE=<dir>" OFF)
+option(MFG_UNLOCK_XEFG_VK_STANDALONE "Harness: XeMFG on Vulkan without OptiScaler (RTXMFG's own swap-chain takeover)" OFF)
 option(MFG_UNLOCK_DIAGNOSTIC_NO_SINGLE_OVERLAY "Isolated comparison without integrated overlay interception" OFF)
 if(MFG_UNLOCK_DIAGNOSTIC_NO_SINGLE_OVERLAY AND NOT MFG_UNLOCK_GPU_FAULT_CAPTURE)
     message(FATAL_ERROR "The overlay isolation requires the local GPU fault recorder")
@@ -65,6 +68,9 @@ set(MFG_UNLOCK_CORE_SOURCES
     dlssg_provider_policy.cpp
     dlssg_preset.cpp
     dlss_sr.cpp
+    dlss5.cpp
+    dlss5_provider.cpp
+    dlss5_vulkan.cpp
     reflex_control.cpp
     vsync_control.cpp
     entry_detour.cpp
@@ -109,6 +115,18 @@ if(MFG_UNLOCK_BUILD_SINGLE_MODULE)
         COMMAND_ERROR_IS_FATAL ANY)
     file(GLOB MFG_LOCALE_CATALOGS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/locale/*.po")
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS generate_locale.py ${MFG_LOCALE_CATALOGS})
+    # vkdlss5.1: the DLSS 5 Vulkan stage's passes, dlss5.cpp's own HLSL compiled to SPIR-V by the Vulkan SDK
+    # 1.4.363.0 dxc (the Windows SDK dxc has no SPIR-V code generation); the generator pins its version and outputs.
+    set(DLSS5_VK_DXC "" CACHE FILEPATH "Vulkan SDK 1.4.363.0 Bin/dxc.exe for the DLSS 5 Vulkan passes")
+    if(NOT EXISTS "${DLSS5_VK_DXC}")
+        message(FATAL_ERROR "Set DLSS5_VK_DXC to the pinned Vulkan SDK 1.4.363.0 dxc.exe")
+    endif()
+    get_filename_component(DLSS5_VK_BIN "${DLSS5_VK_DXC}" DIRECTORY)
+    execute_process(COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/generate_dlss5_vk_shaders.py"
+        --dxc "${DLSS5_VK_DXC}" --spirv-val "${DLSS5_VK_BIN}/spirv-val.exe"
+        --source "${CMAKE_CURRENT_SOURCE_DIR}" --output "${MFG_GENERATED}"
+        COMMAND_ERROR_IS_FATAL ANY)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS generate_dlss5_vk_shaders.py dlss5.cpp)
     include_directories("${MFG_GENERATED}")
     set(MFG_XESS_SOURCES)
     set(MFG_XESS_RESOURCES)
@@ -152,13 +170,41 @@ if(MFG_UNLOCK_BUILD_SINGLE_MODULE)
             COMMAND_ERROR_IS_FATAL ANY)
         set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
             xess/cuda/generate_cuda_layers.py xess/cuda/xefg_cuda_layers.cu xess/cuda/xefg_cuda_params.h)
-        # beta.8: XeSS MFG under OptiScaler only (no standalone route, Reflex bridge or Intel native control).
+        # beta.8: XeSS MFG under OptiScaler (no Reflex bridge or Intel native control); xemfgsa.1 (V1.7.0): XeMFG
+        # standalone, RTXMFG as the D3D12 XeFG host (xess/d3d12_host.cpp).
         set(MFG_XESS_SOURCES
             xess/xess_mod.cpp xess/universal_hooks.cpp xess/internal_api_guards.asm
             xess/sdk_pacing.cpp xess/game_profile.cpp xess/runtime_payload.cpp xess/xess_runtime.cpp
-            xess/host_unlock.cpp xess/intel_native.cpp xess/motion_fill.cpp xess/hudless_match.cpp xess/cuda/cuda_route.cpp)
+            xess/host_unlock.cpp xess/intel_native.cpp xess/motion_fill.cpp xess/hudless_match.cpp xess/cuda/cuda_route.cpp
+            xess/d3d12_host.cpp)
         set(MFG_XESS_RESOURCES "${MFG_GENERATED}/embedded_xess_programs.rc" "${MFG_GENERATED}/embedded_xess_shaders.rc"
             "${MFG_GENERATED}/embedded_xefg_cuda.rc")
+        # vkxefg.1 (V1.6.2): XeMFG on Vulkan games. The xvk D3D12-on-Vulkan layer, its embedded SPIR-V program
+        # set and the Vulkan host build as their own objects against the Vulkan 1.4 headers they need; the rest of
+        # the module keeps its pinned Vulkan 1.2 headers.
+        set(XVK_PROGRAMS_ROOT "" CACHE PATH "Directory with SHA256SUMS.txt and the xvk <dxil-sha256>.spv/.json program pairs")
+        set(XVK_VULKAN_INCLUDE_DIR "" CACHE PATH "Vulkan SDK 1.4.363.0 include directory for the xvk layer")
+        if(NOT EXISTS "${XVK_PROGRAMS_ROOT}/SHA256SUMS.txt")
+            message(FATAL_ERROR "Set XVK_PROGRAMS_ROOT to the pinned xvk SPIR-V program set")
+        endif()
+        if(NOT EXISTS "${XVK_VULKAN_INCLUDE_DIR}/vulkan/vulkan_core.h")
+            message(FATAL_ERROR "Set XVK_VULKAN_INCLUDE_DIR to the pinned Vulkan SDK 1.4.363.0 headers")
+        endif()
+        execute_process(COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/xess/vulkan/generate_xvk_programs.py"
+            --programs "${XVK_PROGRAMS_ROOT}" --output "${MFG_GENERATED}"
+            COMMAND_ERROR_IS_FATAL ANY)
+        execute_process(COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/xess/vulkan/generate_vk_input_shaders.py"
+            --glslang "${GLSLANG_VALIDATOR}" --source "${CMAKE_CURRENT_SOURCE_DIR}" --output "${MFG_GENERATED}"
+            COMMAND_ERROR_IS_FATAL ANY)
+        file(GLOB XVK_PROGRAM_INPUTS CONFIGURE_DEPENDS "${XVK_PROGRAMS_ROOT}/*")
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+            xess/vulkan/generate_xvk_programs.py xess/vulkan/generate_vk_input_shaders.py xess/vulkan/vk_input_copy.comp
+            ${XVK_PROGRAM_INPUTS})
+        set(MFG_XVK_SOURCES
+            xess/vulkan/xvk_device.cpp xess/vulkan/xvk_resource.cpp xess/vulkan/xvk_queue.cpp xess/vulkan/xvk_commandlist.cpp
+            xess/vulkan/xvk_pipeline.cpp xess/vulkan/xvk_programs.cpp xess/vulkan/xvk_dxgi.cpp xess/vulkan/xvk_util.cpp
+            xess/vulkan/vk_host.cpp xess/vulkan/vk_xefg_api.cpp)
+        list(APPEND MFG_XESS_RESOURCES "${MFG_GENERATED}/embedded_xvk_programs.rc")
     endif()
 
     add_library(MfgSingleMinHook STATIC
@@ -191,7 +237,7 @@ if(MFG_UNLOCK_BUILD_SINGLE_MODULE)
 
     set(MFG_SINGLE_CORE_SOURCES ${MFG_UNLOCK_CORE_SOURCES})
     add_library(MfgSingleObjects OBJECT ${MFG_SINGLE_CORE_SOURCES}
-        single_module.cpp single_overlay.cpp overlay_application_imports.cpp overlay_platform.cpp caller_scoped_import.cpp
+        single_module.cpp session_diagnostics.cpp single_overlay.cpp overlay_application_imports.cpp overlay_platform.cpp caller_scoped_import.cpp
         overlay_dx12.cpp overlay_dxgi_proxy.cpp overlay_adapter_parent.cpp gpu_name_override.cpp overlay_vulkan.cpp overlay_install.cpp reshade_frontend.cpp
         localization.cpp
         witcher_dots/geometry.cpp witcher_dots/shader_ir.cpp witcher_dots/shader_cache.cpp
@@ -206,6 +252,7 @@ if(MFG_UNLOCK_BUILD_SINGLE_MODULE)
         MFG_UNLOCK_OVERLAY_SKIP_GPU_WORK=$<BOOL:${MFG_UNLOCK_OVERLAY_SKIP_GPU_WORK}>
         MFG_UNLOCK_NGX_CREATE_RESULT_DIAGNOSTICS=$<BOOL:${MFG_UNLOCK_NGX_CREATE_RESULT_DIAGNOSTICS}>
         MFG_UNLOCK_GPU_FAULT_CAPTURE=$<BOOL:${MFG_UNLOCK_GPU_FAULT_CAPTURE}>
+        MFG_UNLOCK_SESSION_DIAGNOSTICS=$<BOOL:${MFG_UNLOCK_SESSION_DIAGNOSTICS}>
         MFG_UNLOCK_DIAGNOSTIC_NO_SINGLE_OVERLAY=$<BOOL:${MFG_UNLOCK_DIAGNOSTIC_NO_SINGLE_OVERLAY}>
         MFG_UNLOCK_BOUNDED_OVERLAY_REDESIGN=$<BOOL:${MFG_UNLOCK_BOUNDED_OVERLAY_REDESIGN}>
         MFG_UNLOCK_OVERLAY_MENU_DRAW=$<BOOL:${MFG_UNLOCK_OVERLAY_MENU_DRAW}>
@@ -226,13 +273,31 @@ if(MFG_UNLOCK_BUILD_SINGLE_MODULE)
     endif()
     set_target_properties(MfgSingleObjects PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-    add_library(RTXMFGUnified SHARED $<TARGET_OBJECTS:MfgSingleObjects>
+    set(MFG_XVK_OBJECTS)
+    if(MFG_UNLOCK_XESS)
+        add_library(MfgXvkObjects OBJECT ${MFG_XVK_SOURCES})
+        target_compile_features(MfgXvkObjects PRIVATE cxx_std_20)
+        target_compile_options(MfgXvkObjects PRIVATE /utf-8 /Zi)
+        target_compile_definitions(MfgXvkObjects PRIVATE
+            MFG_UNLOCK_XESS=1 UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN VK_USE_PLATFORM_WIN32_KHR=1 VK_NO_PROTOTYPES=1
+            MFG_UNLOCK_XVK_CAPTURE=$<BOOL:${MFG_UNLOCK_XVK_CAPTURE}>
+            MFG_UNLOCK_XEFG_VK_STANDALONE=$<BOOL:${MFG_UNLOCK_XEFG_VK_STANDALONE}>)
+        # The 1.4 headers come first: these objects never see the module's pinned Vulkan 1.2 headers.
+        target_include_directories(MfgXvkObjects PRIVATE
+            "${XVK_VULKAN_INCLUDE_DIR}" "${MFG_GENERATED}" "${CMAKE_CURRENT_SOURCE_DIR}"
+            "${STREAMLINE_ROOT}/include" "${STREAMLINE_ROOT}/external/ngx-sdk/include"
+            "${XESS_SDK_ROOT}/inc/xess_fg" "${XESS_SDK_ROOT}/inc/xell")
+        set_target_properties(MfgXvkObjects PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+        set(MFG_XVK_OBJECTS $<TARGET_OBJECTS:MfgXvkObjects>)
+    endif()
+
+    add_library(RTXMFGUnified SHARED $<TARGET_OBJECTS:MfgSingleObjects> ${MFG_XVK_OBJECTS}
         single_version.rc "${MFG_GENERATED}/proxy_generated/renamable.def" ${MFG_AMPERE_KERNEL_RESOURCE}
         ${MFG_XESS_RESOURCES})
     target_compile_definitions(RTXMFGUnified PRIVATE MFG_SINGLE_FILENAME="MFGUnlocker.dll")
     target_link_libraries(RTXMFGUnified PRIVATE MfgSingleImGui MfgSingleMinHook
-        bcrypt version wintrust crypt32 advapi32 delayimp d3dcompiler dxgi user32 gdi32 imm32 dwmapi psapi)
-    target_link_options(RTXMFGUnified PRIVATE /DELAYLOAD:version.dll /DELAYLOAD:d3dcompiler_47.dll /DELAYLOAD:dxgi.dll
+        bcrypt version wintrust crypt32 advapi32 delayimp d3dcompiler d3d12 dxgi user32 gdi32 imm32 dwmapi psapi)
+    target_link_options(RTXMFGUnified PRIVATE /DELAYLOAD:version.dll /DELAYLOAD:d3d12.dll /DELAYLOAD:d3dcompiler_47.dll /DELAYLOAD:dxgi.dll
         /DELAYLOAD:shell32.dll /DELAYLOAD:imm32.dll /DELAYLOAD:bcrypt.dll /DELAYLOAD:wintrust.dll /DELAYLOAD:crypt32.dll
         /DEBUG:FULL /OPT:REF /OPT:ICF /IGNORE:4222)
     target_include_directories(RTXMFGUnified PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")

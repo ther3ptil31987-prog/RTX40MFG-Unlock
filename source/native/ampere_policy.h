@@ -9,9 +9,32 @@ constexpr uint32_t kPresetSetting = 0x10E41DF1u;
 constexpr uint32_t kPresetB = 2;
 constexpr uint32_t kMaximumGeneratedFrames = ampere_mfg::kMaximumGeneratedFrames;
 
+// A wrapper layout's (and so the startup bootstrap's) capacity: legacy 2x or
+// the six-buffer MFG program.
 constexpr bool CapacityValid(uint32_t generated) noexcept
 {
     return generated == 1 || generated == kMaximumGeneratedFrames;
+}
+
+// ringcap.1: what a Create may certify. The wrapper's ring holds N+1 buffers
+// for the N its startup cached, so any N up to the program's five is proven.
+constexpr bool CertifiedCapacityValid(uint32_t generated) noexcept
+{
+    return generated >= 1 && generated <= kMaximumGeneratedFrames;
+}
+
+// An evaluation's generated-frame count fits the feature's certified ring.
+// Count validity itself is Batch::Accepts' (and ReadEvaluationInput's) check.
+constexpr bool EvaluationFitsCapacity(int count, uint32_t created) noexcept
+{
+    return CertifiedCapacityValid(created) && count <= static_cast<int>(created);
+}
+
+// The multiplier the certified ring carries (before NVIDIA's title ceiling):
+// N+1 on an MFG startup, 2x on a legacy startup or without a certified ring.
+constexpr uint32_t RingMaximumMultiplier(uint32_t startupMaximum, uint32_t certified) noexcept
+{
+    return startupMaximum == kMaximumGeneratedFrames && CertifiedCapacityValid(certified) ? certified + 1 : 2;
 }
 
 constexpr bool EvaluationCountValid(int count) noexcept
@@ -136,16 +159,33 @@ constexpr OptionsDecision DecideOptions(bool followGame, uint32_t controlMultipl
     return decision;
 }
 
+// admitoff.1: after startup admission failed (or the boundary turned fatal),
+// every FrameGeneration Create is refused before the provider, and Streamline
+// retries a refused Create on every frame. Off stops the retries; the frame
+// count is kept so the capacity checks read the same request.
+constexpr OptionsDecision HoldOffWithoutAdmission(OptionsDecision decision, bool admissionUnavailable) noexcept
+{
+    if (admissionUnavailable)
+    {
+        decision.mode = OptionsMode::eOff;
+        decision.gameDynamicTarget = false;
+    }
+    return decision;
+}
+
 // The DLSS-G maximum the game sees (numFramesToGenerateMax). A full-capacity
 // wrapper offers its five generated frames only up to NVIDIA's per-title
 // multiplier ceiling, so a 4X title is not offered 5x/6x that the options
 // path would then clamp. A legacy 2x wrapper always reports one frame.
+// Once a Create has certified a smaller ring (ringMaximum, 0 = none yet), the
+// game is offered no more than that ring holds (ringcap.1).
 constexpr uint32_t AdvertisedGeneratedFrames(uint32_t startupMaximum,
-    uint32_t policyMaximumMultiplier) noexcept
+    uint32_t policyMaximumMultiplier, uint32_t ringMaximum = 0) noexcept
 {
     if (startupMaximum != kMaximumGeneratedFrames) return 1;
     const uint32_t limit = policyMaximumMultiplier > 2 ? policyMaximumMultiplier - 1 : 1;
-    return limit < kMaximumGeneratedFrames ? limit : kMaximumGeneratedFrames;
+    const uint32_t offered = limit < kMaximumGeneratedFrames ? limit : kMaximumGeneratedFrames;
+    return CertifiedCapacityValid(ringMaximum) && ringMaximum < offered ? ringMaximum : offered;
 }
 
 // Public NGX handles are opaque. No EndpointCore offsets, inferred allocation

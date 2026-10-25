@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Windows.h>
+#include <array>
 #include <cstdint>
 
 namespace reflex_control
@@ -56,6 +57,11 @@ struct Snapshot
     uint32_t moduleVersionPatch = 0;
     uint32_t moduleVersionBuild = 0;
     uint64_t moduleGeneration = 0;
+    // The last refused Reflex plug-in (reflexgate.1); refusedVersionRead is
+    // false when it had no readable version resource.
+    bool refusedModule = false;
+    bool refusedVersionRead = false;
+    std::array<uint32_t, 4> refusedVersion{};
     uint64_t acceptedOptionCalls = 0;
     uint64_t rejectedOptionCalls = 0;
     uint64_t replayCalls = 0;
@@ -75,13 +81,23 @@ using RuntimeValidator = bool (*)() noexcept;
 // the callback must be bounded and must not call NVIDIA APIs.
 void SetRuntimeValidator(RuntimeValidator validator) noexcept;
 
+enum class Observation : uint32_t
+{
+    eNone = 0,        // Not Reflex, already routed, or already refused/reported.
+    eRouted,          // A new route was published and its entries installed.
+    eRefusedVersion,  // Reflex entries resolved; the version is unsupported or unreadable.
+    eHookUnavailable, // slReflexSetOptions resolved, another Reflex entry did not.
+};
+
 // Call outside DllMain/loader lock at normal discovery boundaries. Only an
-// owned Reflex plugin with loaded version 2.14.0 or 2.14.1 is eligible.
+// owned Reflex plugin with loaded version 2.7-2.14 (any patch) is eligible.
 // Filenames are not feature identity; OTA and renamed plugins use the same
 // module-owned resolver/entry checks as a game-local sl.reflex.dll.
 // The resolver and installed code entries are pinned for process lifetime.
-void ObserveModule(HMODULE module, const wchar_t* path,
-    uint64_t generation) noexcept;
+// A refusal is reported once per module generation; version receives the
+// plug-in's file version when one was read (zeros otherwise).
+Observation ObserveModule(HMODULE module, const wchar_t* path,
+    uint64_t generation, std::array<uint32_t, 4>* version = nullptr) noexcept;
 
 // Applied reports an accepted options call, not measured FPS or presentation.
 Snapshot ReadSnapshot() noexcept;

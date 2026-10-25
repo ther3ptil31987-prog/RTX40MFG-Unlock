@@ -227,6 +227,11 @@ FARPROC ResolveProc(HMODULE module,LPCSTR name,FARPROC original) noexcept {
 bool OwnsInterface(void* object) noexcept {
     return object&&!gInsideOverlay&&proxy::Owned(static_cast<IUnknown*>(object));
 }
+void DescribeInterface(void* object,wchar_t* text,size_t count) noexcept {
+    if (!text||!count) return;
+    if (gInsideOverlay) { swprintf_s(text,count,L"%p (overlay call)",object); return; }
+    proxy::Describe(static_cast<IUnknown*>(object),text,count);
+}
 bool WrapUpgradedInterface(void** output) noexcept {
     if (gInsideOverlay||!single_module::OverlayAllowed()) return false;
 #if MFG_UNLOCK_DIAGNOSTIC_NO_SINGLE_OVERLAY

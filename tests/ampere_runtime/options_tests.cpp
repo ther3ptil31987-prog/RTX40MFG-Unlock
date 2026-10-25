@@ -92,6 +92,74 @@ int main()
         matches = matches && offered >= 1 && offered <= 5 && follow.generatedFrames == offered;
     }
     Check(matches, "every offered maximum is submitted unclamped once the route is certified");
+    // ringcap.1: the certified ring caps the modes at N+1.
+    using ampere_policy::RingMaximumMultiplier;
+    bool ringMultiplier = true;
+    for (uint32_t n = 1; n <= 5; ++n) ringMultiplier = ringMultiplier && RingMaximumMultiplier(5, n) == n + 1;
+    Check(ringMultiplier, "a certified ring of N generated frames carries (N+1)x on an MFG startup");
+    Check(RingMaximumMultiplier(5, 0) == 2 && RingMaximumMultiplier(5, 6) == 2,
+        "no certified ring, or an impossible one, stays at the 2x safe maximum");
+    Check(RingMaximumMultiplier(1, 1) == 2 && RingMaximumMultiplier(1, 3) == 2 && RingMaximumMultiplier(0, 3) == 2,
+        "a legacy or missing startup never rises above 2x");
+    // FF7 Rebirth, RTX 2070 SUPER: startup 5, ring 3 (4 buffers), NVIDIA 4X.
+    const uint32_t ff7Safe = std::min(RingMaximumMultiplier(5, 3), 4u);
+    d = DecideOptions(true, 2, false, Mode::eOn, 5, ff7Safe, false);
+    Check(ff7Safe == 4 && d.mode == Mode::eOn && d.generatedFrames == 3, "FF7 Rebirth: game 6x submits the ring's 4x");
+    d = DecideOptions(true, 2, false, Mode::eOn, 3, ff7Safe, false);
+    Check(d.generatedFrames == 3, "FF7 Rebirth: the game's 4x is submitted unclamped");
+    d = DecideOptions(true, 2, false, Mode::eOn, 1, ff7Safe, false);
+    Check(d.generatedFrames == 1, "FF7 Rebirth: the game's 2x stays 2x");
+    d = DecideOptions(false, 6, false, Mode::eOn, 3, ff7Safe, false);
+    Check(d.generatedFrames == 3, "FF7 Rebirth: a fixed 6x choice submits 4x");
+    d = DecideOptions(false, 6, true, Mode::eOn, 3, ff7Safe, ff7Safe == 6);
+    Check(d.mode == Mode::eOn && d.generatedFrames == 3, "a partial ring keeps menu Dynamic off (it needs the full six-buffer proof)");
+    Check(AdvertisedGeneratedFrames(5, 4, 3) == 3, "FF7 Rebirth is offered 4x before and after its ring is certified");
+    Check(AdvertisedGeneratedFrames(5, 6, 3) == 3, "a 6X title with a four-buffer ring is offered 4x once the ring is certified");
+    Check(AdvertisedGeneratedFrames(5, 6, 0) == 5 && AdvertisedGeneratedFrames(5, 6, 5) == 5
+        && AdvertisedGeneratedFrames(5, 6, 6) == 5, "no ring yet, a full ring or an impossible ring leave the startup offer");
+    Check(AdvertisedGeneratedFrames(5, 4, 5) == 3 && AdvertisedGeneratedFrames(1, 6, 3) == 1,
+        "the NVIDIA ceiling and a legacy wrapper still bound the offer");
+    bool ringBounded = true, ringOffered = true;
+    for (uint32_t ring = 1; ring <= 5; ++ring)
+        for (uint32_t policy = 2; policy <= 6; ++policy)
+        {
+            const uint32_t safe = std::min(RingMaximumMultiplier(5, ring), policy);
+            const uint32_t offered = AdvertisedGeneratedFrames(5, policy, ring);
+            ringOffered = ringOffered && offered <= ring && offered == std::max(safe, 2u) - 1u;
+            for (uint32_t frames = 0; frames <= 7; ++frames)
+                for (uint32_t multiplier = 0; multiplier <= 7; ++multiplier)
+                    for (bool follow : {true, false})
+                    {
+                        const auto decision = DecideOptions(follow, multiplier, false, Mode::eOn, frames, safe, false);
+                        ringBounded = ringBounded && decision.generatedFrames >= 1 && decision.generatedFrames <= ring
+                            && ampere_policy::EvaluationFitsCapacity(static_cast<int>(decision.generatedFrames), ring);
+                    }
+        }
+    Check(ringBounded, "no Follow game or fixed submission exceeds the certified ring on any title");
+    Check(ringOffered, "the game is offered exactly what the ring and the title allow");
+    // admitoff.1: after a failed startup admission every Create is refused, so
+    // every request is held at Off instead of retried by Streamline each frame.
+    using ampere_policy::HoldOffWithoutAdmission;
+    bool held = true, untouched = true;
+    for (bool follow : {true, false})
+        for (uint32_t multiplier = 1; multiplier <= 6; ++multiplier)
+            for (int dynamic = 0; dynamic < 2; ++dynamic)
+                for (Mode game : {Mode::eOff, Mode::eOn, Mode::eDynamic})
+                {
+                    const auto decided = DecideOptions(follow, multiplier, dynamic, game, 3, 6, true);
+                    const auto off = HoldOffWithoutAdmission(decided, true);
+                    const auto kept = HoldOffWithoutAdmission(decided, false);
+                    held = held && off.mode == Mode::eOff && !off.gameDynamicTarget
+                        && off.generatedFrames == decided.generatedFrames;
+                    untouched = untouched && kept.mode == decided.mode
+                        && kept.gameDynamicTarget == decided.gameDynamicTarget
+                        && kept.generatedFrames == decided.generatedFrames;
+                }
+    Check(held, "without admission every Follow game, fixed or Dynamic request is Off and keeps its frame count");
+    Check(untouched, "with admission, or before it is known, the decision is unchanged");
+    d = HoldOffWithoutAdmission(DecideOptions(true, 2, false, Mode::eOn, 1, 2, false), true);
+    Check(d.mode == Mode::eOff && d.generatedFrames == 1,
+        "Doom TDA, RTX 3080 Ti: the game's 2x request after a failed startup reaches Streamline as Off");
     std::cout << checks << " checks, " << failures << " failures\n";
     return failures ? 1 : 0;
 }

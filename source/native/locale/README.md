@@ -7,7 +7,8 @@ Weblate or any text editor can open it. Every catalog is compiled into
 
 Shipped: `zh-CN.po` (Simplified Chinese, Microsoft YaHei UI), `uk-UA.po`
 (Ukrainian, Segoe UI), `it-IT.po` (Italian, Segoe UI), `sv-SE.po` (Swedish,
-Segoe UI), `tr-TR.po` (Turkish, Segoe UI) and `vi-VN.po` (Vietnamese, Segoe UI).
+Segoe UI), `tr-TR.po` (Turkish, Segoe UI), `vi-VN.po` (Vietnamese, Segoe UI) and
+`fr-FR.po` (French, Segoe UI).
 
 English is the source text, not a catalog. Anything left untranslated in a
 catalog shows in English. Diagnostics, logs, status files and ini keys stay in

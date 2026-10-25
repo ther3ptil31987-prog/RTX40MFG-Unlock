@@ -32,7 +32,22 @@ before plug-ins, as OptiScaler does. The exact DLL then loads under a proxy name
 or as the plug-in. Its detour of that entry must be live within 150 ms of the
 load. V1.6.0 needed about 380 ms, so OptiScaler's early first creation stayed
 stock 2x. A host creation on a WARP device must then reach the host route, with
-the unlock applied. Without this argument, both cases are skipped.
+the unlock applied.
+
+The same argument adds the `optiscaler-xefg-output*` cases (configure with
+`XESS_SDK_ROOT` at the XeSS SDK 3.0.2 so the stand-in can build OptiScaler's
+XeFG output). Through the plug-in route, before the executable makes any factory
+call, the stand-in creates a XeFG context, initializes it from a swapchain
+description with DXGI's own factory and takes the XeFG swapchain, as OptiScaler's
+FGOutput XeFG does. RTXMFG's menu must register on XeFG's native output chain
+(device, queue and LUID matched), see the 120 Presents of a test window on the
+default adapter, draw there in the "rtxmfg" UI mode (the startup hint), draw
+nothing in the shared mode while no DLSS feature runs, attach nothing in the
+"optiscaler" mode, and retire with the XeFG context. `optiscaler-xefg-output-factory`
+lets the stand-in's hook on DXGI's CreateSwapChainForHwnd answer the executable's
+own creation through RTXMFG's factory proxy: the factory route then registers
+its single renderer and the output chain gets none. Without this argument, all
+of these cases are skipped.
 
 The runner creates a separate directory per case, copies the exact DLL and
 required fixtures, captures exit codes and hashes, and stops on failure.
@@ -53,8 +68,8 @@ HDR interface forwarding, locked status files and process identity, renderer DLL
 imports and late loading, 64 KiB/128 KiB resolver threads, and log/status reuse
 across launches. The first-launch case reuses its settings directory in a second process to
 verify that the automatic menu does not reopen. `first-launch-zh`, `first-launch-uk`,
-`first-launch-it`, `first-launch-sv`, `first-launch-tr` and `first-launch-vi` repeat the first launch with
-`Language=zh-CN` / `uk-UA` / `it-IT` / `sv-SE` / `tr-TR` / `vi-VN` saved and require the runtime log to
+`first-launch-it`, `first-launch-sv`, `first-launch-tr`, `first-launch-vi` and `first-launch-fr` repeat the first
+launch with `Language=zh-CN` / `uk-UA` / `it-IT` / `sv-SE` / `tr-TR` / `vi-VN` / `fr-FR` saved and require the runtime log to
 report that language's font ready.
 
 `factory-revision-menu` loads the exact DLL and reproduces Witcher 3's base

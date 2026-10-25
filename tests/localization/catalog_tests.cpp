@@ -130,7 +130,7 @@ int main()
             "简体中文", L"msyh.ttc", 1, "诊断", true},
         {"uk-UA", {L"uk-UA", L"uk"}, {L"ru-RU", L"be-BY", L"pl-PL"}, {L"ru-RU", L"uk-UA"}, "Українська", nullptr, 0,
             "Діагностика", false},
-        {"it-IT", {L"it-IT", L"it-CH", L"it"}, {L"es-ES", L"fr-FR", L"pt-BR", L"ro-RO"}, {}, "Italiano", nullptr, 0,
+        {"it-IT", {L"it-IT", L"it-CH", L"it"}, {L"es-ES", L"ca-ES", L"pt-BR", L"ro-RO"}, {}, "Italiano", nullptr, 0,
             "Diagnostica", true},
         {"sv-SE", {L"sv-SE", L"sv-FI", L"sv"}, {L"nb-NO", L"nn-NO", L"da-DK", L"fi-FI"}, {L"fi-FI", L"sv-FI"}, "Svenska",
             nullptr, 0, "Diagnostik", false},
@@ -138,6 +138,8 @@ int main()
             nullptr, 0, "Tanılama", true},
         {"vi-VN", {L"vi-VN", L"vi"}, {L"th-TH", L"km-KH", L"lo-LA", L"id-ID"}, {L"th-TH", L"vi-VN"}, "Tiếng Việt",
             nullptr, 0, "Chẩn đoán", true},
+        {"fr-FR", {L"fr-FR", L"fr-CA", L"fr-BE", L"fr-CH", L"fr"}, {L"es-ES", L"ca-ES", L"pt-BR", L"br-FR"},
+            {L"es-ES", L"fr-CA"}, "Français", nullptr, 0, "Diagnostic", true},
     };
     for (const auto& row : expected)
     {

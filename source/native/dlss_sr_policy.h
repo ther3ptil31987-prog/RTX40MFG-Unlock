@@ -8,8 +8,9 @@
 #include <cstring>
 
 // DLSS Super Resolution and Ray Reconstruction detection and live preset
-// switching (V1.6.0, standalone). The NGX runtime D3D12 route sees every
-// SuperSampling and RayReconstruction Create, Evaluate and Release. A selected
+// switching (V1.6.0, standalone). The NGX runtime route (D3D12, and Vulkan since
+// V1.6.2 vkpreset.1) sees every SuperSampling and RayReconstruction Create,
+// Evaluate and Release. A selected
 // preset reaches the provider through the six *.Hint.Render.Preset.* keys of its
 // feature on the game's parameter object at each Create (restored after the call).
 //
@@ -151,7 +152,8 @@ enum class Unavailable : uint32_t
     eCreateFailed = 2,
     // Too many replaced handles are still waiting for release.
     eCapacity = 3,
-    // Only D3D12 SR/RR on the NGX runtime route switches live.
+    // The NGX runtime route of this graphics API is not covered (D3D12 and,
+    // since V1.6.2 vkpreset.1, Vulkan are).
     eGraphicsApi = 4,
     // The provider cached an NVIDIA app preset override at its initialization.
     eDriverOverride = 5,
@@ -164,12 +166,20 @@ inline constexpr uint64_t kRetireMs = 250;
 // A feature counts as running while the game evaluated it this recently.
 inline constexpr uint64_t kRunningMs = 1000;
 
+// The NGX runtime entry of a Create (V1.6.2 vkpreset.1): a live re-create
+// enters the same one as the game's Create.
+enum class CreateApi : uint8_t { eD3D12, eVulkan, eVulkan1 };
+
 struct CreateRecord
 {
     size_t route = 0;
     uintptr_t handle = 0;
     uintptr_t parameters = 0;
     Kind kind = Kind::eSuperResolution;
+    CreateApi api = CreateApi::eD3D12;
+    // Vulkan CreateFeature1 only: the VkDevice the game named (identity; the
+    // game keeps it alive while its feature lives).
+    uintptr_t device = 0;
     CreateKeys keys{};
     std::array<uint32_t, kHintNames.size()> hints{};
     uint32_t hintsPresent = 0, hintsSigned = 0;

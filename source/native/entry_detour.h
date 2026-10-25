@@ -141,6 +141,10 @@ struct Snapshot
     bool current = false;
     bool cachedPointersCovered = false;
     bool forwarding = false;
+    // ngxforward.1: not current, but the entry starts with a jump (another hook's
+    // over our relocated five-byte jump, or ours back after one) and the bytes
+    // after it are unchanged; `original` still forwards to the target.
+    bool overlaid = false;
     Failure failure = Failure::eNone;
     Method method = Method::eUnavailable;
     Kind kind = Kind::eCount;

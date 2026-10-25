@@ -18,6 +18,12 @@ msgstr "自动（%s）"
 msgid "Menu language"
 msgstr "菜单语言"
 
+msgid "DLSS 5 Off"
+msgstr "DLSS 5 关闭"
+
+msgid "DLSS 5 On"
+msgstr "DLSS 5 开启"
+
 msgid "Pin"
 msgstr "固定"
 
@@ -33,6 +39,9 @@ msgstr "已固定  |  按 %s 重新打开菜单"
 
 msgid "Menu key: %s"
 msgstr "菜单键：%s"
+
+msgid "Shared with OptiScaler's menu"
+msgstr "与 OptiScaler 菜单共用"
 
 msgid "Press a key... Esc cancels"
 msgstr "请按任意键…（Esc 取消）"
@@ -249,6 +258,588 @@ msgstr "正在将 DLSS 光线重建切换到新预设…"
 msgid "Switching DLSS Super Resolution to the new preset..."
 msgstr "正在将 DLSS 超分辨率切换到新预设…"
 
+msgid "Same as Structure"
+msgstr "与结构相同"
+
+msgid "Not set"
+msgstr "未设置"
+
+msgid "Clear"
+msgstr "清除"
+
+msgid "Off"
+msgstr "关闭"
+
+msgid "Provider not found"
+msgstr "未找到提供程序"
+
+msgid "GPU or provider unsupported"
+msgstr "不支持此 GPU 或提供程序"
+
+msgid "Driver update required"
+msgstr "需要更新驱动程序"
+
+msgid "Provider failed"
+msgstr "提供程序出错"
+
+msgid "Provider already in use"
+msgstr "提供程序已被占用"
+
+msgid "DLSS inputs unavailable"
+msgstr "DLSS 输入不可用"
+
+msgid "Hook method unavailable"
+msgstr "挂接方式不可用"
+
+msgid "Waiting for DLSS"
+msgstr "等待 DLSS"
+
+msgid "Neural Rendering"
+msgstr "神经渲染"
+
+msgid "Before upscaling (faster)"
+msgstr "放大前（更快）"
+
+msgid "After upscaling"
+msgstr "放大后"
+
+msgid "Present"
+msgstr "呈现"
+
+msgid "Auto: %s"
+msgstr "自动：%s"
+
+msgid "Hook Method"
+msgstr "挂接方式"
+
+msgid ""
+"Auto processes the DLSS output after reconstruction; Resolution Scale Auto keeps its cost in check.\n"
+"Before upscaling processes the DLSS input at render resolution, before DLSS SR, DLAA or Ray Reconstruction.\n"
+"After upscaling processes the DLSS output after reconstruction.\n"
+"Present processes the final image, game UI included, before presentation and frame generation."
+msgstr ""
+"自动：在重建之后处理 DLSS 输出；分辨率比例的自动模式会控制其开销。\n"
+"放大前：在 DLSS SR、DLAA 或光线重建之前，以渲染分辨率处理 DLSS 输入。\n"
+"放大后：在重建之后处理 DLSS 输出。\n"
+"呈现：在显示和帧生成之前处理包含游戏 UI 的最终图像。"
+
+msgid "Subtle"
+msgstr "柔和"
+
+msgid "Strong"
+msgstr "强烈"
+
+msgid "Custom"
+msgstr "自定义"
+
+msgid "Look"
+msgstr "外观"
+
+msgid ""
+"Sets Intensity, Model, Structure, Tone and Faces & skin together.\n"
+"Balanced is the provider's own default, Subtle halves its change and Strong goes further.\n"
+"Pass Count under Advanced strengthens any look further, at extra GPU cost."
+msgstr ""
+"同时设置强度、模型、结构、色调和面部与皮肤。\n"
+"平衡为提供程序自身的默认设置，柔和将其效果减半，强烈则更进一步。\n"
+"高级中的处理次数可进一步增强任何外观，但会额外消耗 GPU。"
+
+msgid "Intensity"
+msgstr "强度"
+
+msgid "Strength of the whole neural rendering effect."
+msgstr "整个神经渲染效果的强度。"
+
+msgid "Model A"
+msgstr "模型 A"
+
+msgid "Model B"
+msgstr "模型 B"
+
+msgid "Model C"
+msgstr "模型 C"
+
+msgid "Model"
+msgstr "模型"
+
+msgid "Faces & skin"
+msgstr "面部与皮肤"
+
+msgid "Off while Character Mask is off. Turn it on under Advanced."
+msgstr "角色遮罩关闭时不可用。请在“高级”中开启。"
+
+msgid ""
+"Structure enhancement on detected skin and faces.\n"
+"Same as Structure takes the Structure strength, the provider's own default."
+msgstr ""
+"对检测到的皮肤和面部进行结构增强。\n"
+"“与结构相同”使用结构强度，即提供程序自身的默认设置。"
+
+msgid "Resolution Scale"
+msgstr "分辨率比例"
+
+msgid "Auto"
+msgstr "自动"
+
+msgid "up to %.0f%%"
+msgstr "最高 %.0f%%"
+
+msgid ""
+"Share of the hook method's resolution that the network processes.\n"
+"100 is native, lower is faster, up to 200 supersamples. Values below 25 use 25.\n"
+"Auto lowers it when DLSS 5 takes more than about a third of each rendered frame, not below 75, and raises it again with headroom, never above the slider."
+msgstr ""
+"网络所处理的挂接方式分辨率比例。\n"
+"100 为原生，越低越快，最高 200 为超采样。低于 25 时按 25 处理。\n"
+"自动模式会在 DLSS 5 占用每个渲染帧约三分之一以上的时间时降低比例（不低于 75），有余量时再提高，但不会超过滑块数值。"
+
+msgid "Half rate"
+msgstr "半速率"
+
+msgid "Half rate is not available on Vulkan or with the Present hook method yet."
+msgstr "半速率暂不支持 Vulkan 或“呈现”挂接方式。"
+
+msgid ""
+"Runs the network on every other frame. The frames between apply its last look to their own image, so moving and animated surfaces keep it without trails.\n"
+"About half the GPU cost. Fine detail follows the game's motion vectors where a surface only moved."
+msgstr ""
+"每隔一帧运行一次网络。中间帧会将其最近的效果应用到自身画面上，因此移动和动态表面也能保留效果，且不会拖影。\n"
+"约为一半的 GPU 开销。在表面仅发生移动的地方，细节会沿游戏的运动矢量延续。"
+
+msgid "DLSS 5 settings could not be saved."
+msgstr "无法保存 DLSS 5 设置。"
+
+msgid "Before upscaling and Present do not run on Vulkan yet. Choose Auto or After upscaling."
+msgstr "“放大前”和“呈现”暂不支持 Vulkan。请选择“自动”或“放大后”。"
+
+msgid "This game's swapchain cannot use the Present hook method; the log names the reason. Before or after upscaling still work."
+msgstr "此游戏的交换链无法使用“呈现”挂接方式，原因见日志。放大前或放大后仍可使用。"
+
+msgid "Debug view is on (Advanced, Inspect)."
+msgstr "调试视图已开启（高级，检查）。"
+
+msgid "Compare"
+msgstr "对比"
+
+msgid "Split view"
+msgstr "分屏对比"
+
+msgid ""
+"Shows the original image left of the line and DLSS 5 to its right.\n"
+"Before upscaling draws no line, because the upscaler would treat it as part of the image."
+msgstr ""
+"线左侧显示原始画面，右侧显示 DLSS 5。\n"
+"放大前模式不绘制分隔线，因为放大器会把它当作画面的一部分。"
+
+msgid "Split position"
+msgstr "分隔位置"
+
+msgid "Hold to show original"
+msgstr "按住显示原始画面"
+
+msgid ""
+"While this key is held, the game shows its original image, so DLSS 5 can be compared in motion.\n"
+"DLSS 5 keeps running, so its GPU cost is unchanged, and the key still reaches the game."
+msgstr ""
+"按住此键时，游戏显示原始画面，便于在运动中对比 DLSS 5。\n"
+"DLSS 5 仍在运行，因此 GPU 开销不变，按键也仍会传给游戏。"
+
+msgid "Status"
+msgstr "状态"
+
+msgid "State"
+msgstr "状态"
+
+msgid "%.1f ms"
+msgstr "%.1f 毫秒"
+
+msgid "%.0f%% of each rendered frame"
+msgstr "占每个渲染帧的 %.0f%%"
+
+msgid "GPU cost"
+msgstr "GPU 开销"
+
+msgid "every other frame, when the network runs"
+msgstr "每隔一帧，网络运行时"
+
+msgid "%.1f of %.1f ms"
+msgstr "%.1f / %.1f 毫秒"
+
+msgid "measuring"
+msgstr "测量中"
+
+msgid "Auto scale"
+msgstr "自动比例"
+
+msgid "%ux%u, network %ux%u, passes: %u"
+msgstr "%ux%u，网络 %ux%u，处理次数：%u"
+
+msgid "Route"
+msgstr "路径"
+
+msgid "Direct provider"
+msgstr "直接提供程序"
+
+msgid "Native NGX"
+msgstr "原生 NGX"
+
+msgid "Waiting for DLSS 5 GPU work to complete before applying settings."
+msgstr "正在等待 DLSS 5 GPU 工作完成，然后应用设置。"
+
+msgid "Auto Resolution Scale holds %.0f%%, its quality floor. DLSS 5 still costs more than its budget here, so the frame rate pays instead of detail."
+msgstr "自动分辨率比例保持在 %.0f%%，即其画质下限。此处 DLSS 5 的开销仍超出预算，因此牺牲的是帧率而非细节。"
+
+msgid "Auto Resolution Scale runs at %.0f%% of up to %.0f%% to keep DLSS 5 within its budget, and rises again with headroom."
+msgstr "自动分辨率比例当前为 %.0f%%（最高 %.0f%%），以将 DLSS 5 控制在预算内；有余量时会再提高。"
+
+msgid "Restart with other DLSS 5 add-ons disabled to give MFGUnlocker ownership of the provider."
+msgstr "禁用其他 DLSS 5 附加组件后重启游戏，以便由 MFGUnlocker 管理提供程序。"
+
+msgid "The Present stage does not run with XeMFG standalone. Choose Auto or an upscaling stage."
+msgstr "独立 XeMFG 下“呈现”阶段不会运行。请选择“自动”或某个放大阶段。"
+
+msgid "Advanced"
+msgstr "高级"
+
+msgid "Structure Intensity"
+msgstr "结构强度"
+
+msgid ""
+"Local detail and structure enhancement.\n"
+"Above 1 goes past the provider's usual range."
+msgstr ""
+"局部细节与结构增强。\n"
+"高于 1 时超出提供程序的常规范围。"
+
+msgid "Tone Intensity"
+msgstr "色调强度"
+
+msgid ""
+"Local tone and contrast enhancement.\n"
+"Above 1 goes past the provider's usual range."
+msgstr ""
+"局部色调与对比度增强。\n"
+"高于 1 时超出提供程序的常规范围。"
+
+msgid "Character Mask"
+msgstr "角色遮罩"
+
+msgid "Detects skin and faces so that Faces & skin applies to them."
+msgstr "检测皮肤和面部，使“面部与皮肤”作用于它们。"
+
+msgid "Passes"
+msgstr "多次处理"
+
+msgid "Pass Count"
+msgstr "处理次数"
+
+msgid "Runs the network several times in a row. Every pass is a separate feature and costs GPU time and memory."
+msgstr "连续多次运行网络。每次处理都是独立的功能实例，会占用 GPU 时间和显存。"
+
+msgid "Same as pass 1"
+msgstr "与第 1 次相同"
+
+msgid "Later passes"
+msgstr "后续处理"
+
+msgid ""
+"Passes 2 and later refine the previous pass's output. Custom gives them their own Model and strengths.\n"
+"Tone adds up from pass to pass, so later passes usually want less of it."
+msgstr ""
+"第 2 次及之后的处理会细化上一次处理的输出。自定义可为它们设置单独的模型和强度。\n"
+"色调会逐次叠加，因此后续处理通常需要更低的色调强度。"
+
+msgid "Later-pass settings apply when Pass Count is 2 or more."
+msgstr "处理次数为 2 或以上时，后续处理设置才会生效。"
+
+msgid "Blend"
+msgstr "混合"
+
+msgid "Blend strength"
+msgstr "混合强度"
+
+msgid "Scales DLSS 5's change: 0 keeps the game's image, 1 is DLSS 5's result, above 1 exaggerates it."
+msgstr "缩放 DLSS 5 的改动。设为 0 保留游戏画面，设为 1 为 DLSS 5 的结果，高于 1 会放大改动。"
+
+msgid "Color strength"
+msgstr "色彩强度"
+
+msgid "0 keeps the game's colors and takes only DLSS 5's lighting and detail. 1 is DLSS 5's color; above 1 strengthens its color change."
+msgstr "设为 0 保留游戏的色彩，只采用 DLSS 5 的光照和细节。设为 1 为 DLSS 5 的色彩；高于 1 会加强其色彩变化。"
+
+msgid "Highlight guard"
+msgstr "高光保护"
+
+msgid "Limits how far DLSS 5 may brighten a pixel, as a multiple of its original brightness, so lights do not turn into bright speckles."
+msgstr "限制 DLSS 5 能将像素提亮多少（以原始亮度的倍数计），避免灯光变成亮斑。"
+
+msgid "Brightening limit"
+msgstr "提亮上限"
+
+msgid "Dark halo reduction"
+msgstr "暗光晕抑制"
+
+msgid "Removes thin dark outlines DLSS 5 adds beside bright edges and keeps its broad lighting change. Can lighten real shadow edges."
+msgstr "去除 DLSS 5 在亮边缘旁添加的细暗边，保留其整体光照变化。可能会提亮真实的阴影边缘。"
+
+msgid "Bright halo reduction"
+msgstr "亮光晕抑制"
+
+msgid "Removes thin bright outlines DLSS 5 adds beside dark edges."
+msgstr "去除 DLSS 5 在暗边缘旁添加的细亮边。"
+
+msgid "Halo radius"
+msgstr "光晕半径"
+
+msgid "How far from each pixel to look for the edge, in network pixels."
+msgstr "在每个像素周围多远处寻找边缘，单位为网络像素。"
+
+msgid "Scaling"
+msgstr "缩放"
+
+msgid "Signed PQ"
+msgstr "有符号 PQ"
+
+msgid "Linear"
+msgstr "线性"
+
+msgid "Scaling Domain"
+msgstr "缩放域"
+
+msgid "Signal space used for downsampling and upsampling."
+msgstr "降采样和升采样所用的信号空间。"
+
+msgid "Area"
+msgstr "区域"
+
+msgid "Bilinear"
+msgstr "双线性"
+
+msgid "Nearest"
+msgstr "最近邻"
+
+msgid "Downsample Filter"
+msgstr "降采样滤波"
+
+msgid "Bicubic"
+msgstr "双三次"
+
+msgid "Edge-aware"
+msgstr "边缘感知"
+
+msgid "Upsample Filter"
+msgstr "升采样滤波"
+
+msgid "Resolution Scale below 100: how the network's change is enlarged. Edge-aware keeps it from bleeding across edges."
+msgstr "分辨率比例低于 100 时：网络改动的放大方式。边缘感知可防止改动越过边缘扩散。"
+
+msgid "Supersampling Filter"
+msgstr "超采样滤波"
+
+msgid "Resolution Scale above 100: how the network's larger image comes back to the game's size. Area averages every pixel it covers, without aliasing."
+msgstr "分辨率比例高于 100 时：网络的较大画面如何缩回游戏尺寸。区域会平均其覆盖的每个像素，不产生锯齿。"
+
+msgid "RGB residual"
+msgstr "RGB 残差"
+
+msgid "Processed image"
+msgstr "处理后图像"
+
+msgid "Ratio"
+msgstr "比值"
+
+msgid "Scale Reconstruction"
+msgstr "缩放重建"
+
+msgid ""
+"RGB residual adds the network's change to the full-resolution image.\n"
+"Processed image uses the upscaled network output directly.\n"
+"Ratio multiplies the full-resolution image by the network's change, so black stays black."
+msgstr ""
+"RGB 残差将网络的改动加到全分辨率图像上。\n"
+"处理后图像直接使用放大后的网络输出。\n"
+"比值将全分辨率图像乘以网络的改动，因此黑色保持黑色。"
+
+msgid "HDR and signal"
+msgstr "HDR 与信号"
+
+msgid "Linear BT.709"
+msgstr "线性 BT.709"
+
+msgid "Encoding"
+msgstr "编码"
+
+msgid ""
+"Auto treats the DLSS input and output as linear BT.709 and follows the swapchain format and color space at Present.\n"
+"Other choices override the encoding of the processed image."
+msgstr ""
+"自动：将 DLSS 输入和输出视为线性 BT.709；在呈现阶段则跟随交换链的格式和色彩空间。\n"
+"其他选项会覆盖所处理图像的编码。"
+
+msgid "PQ SDR"
+msgstr "PQ SDR"
+
+msgid "Linear SDR"
+msgstr "线性 SDR"
+
+msgid "NR Signal Encoding"
+msgstr "NR 信号编码"
+
+msgid "Encoding supplied to the network after the HDR-to-SDR bridge."
+msgstr "HDR 转 SDR 桥接之后提供给网络的编码。"
+
+msgid "Diffuse White"
+msgstr "漫反射白"
+
+msgid "%.0f nits"
+msgstr "%.0f 尼特"
+
+msgid "Reference white of the HDR-to-SDR bridge. Encoding Auto selects it; choose an explicit encoding to set it."
+msgstr "HDR 转 SDR 桥接的参考白。编码为自动时自动选择；选择明确的编码后可手动设置。"
+
+msgid "Highlight roll-off"
+msgstr "高光压缩"
+
+msgid "HDR only: up to this share of diffuse white the network sees the image unchanged; brighter values are compressed into the rest. Lower gives highlights more room."
+msgstr "仅限 HDR：在漫反射白的这一比例以内，网络看到的画面不变；更亮的值被压缩到剩余范围内。数值越低，高光空间越大。"
+
+msgid "Exposure"
+msgstr "曝光"
+
+msgid "Multiplies the exposure used for neural rendering, independent of the game's exposure."
+msgstr "倍增神经渲染所用的曝光，与游戏自身的曝光无关。"
+
+msgid "On"
+msgstr "开启"
+
+msgid "Inverse"
+msgstr "反向"
+
+msgid "Use Exposure Value"
+msgstr "使用曝光值"
+
+msgid "On applies the game's DLSS exposure texture before neural rendering; Inverse divides by it."
+msgstr "开启：在神经渲染前应用游戏的 DLSS 曝光纹理；反向：除以该值。"
+
+msgid "Adaptive exposure"
+msgstr "自适应曝光"
+
+msgid ""
+"Keeps the scene the network sees at a steady brightness in HDR games, so the same settings suit games with different exposure.\n"
+"The game's own brightness is unchanged. SDR color is left as it is."
+msgstr ""
+"在 HDR 游戏中让网络看到的画面保持稳定亮度，使同一套设置适用于曝光不同的游戏。\n"
+"游戏本身的亮度不会改变。SDR 颜色保持原样。"
+
+msgid "Adaptive target"
+msgstr "自适应目标"
+
+msgid "The average brightness Adaptive exposure gives the scene the network sees (0.18 is middle grey). Higher shows it a brighter scene."
+msgstr "自适应曝光为网络所见场景设定的平均亮度（中灰为 0.18）。数值越高，网络看到的场景越亮。"
+
+msgid "Provider"
+msgstr "提供程序"
+
+msgid "Default"
+msgstr "默认"
+
+msgid "Preset A"
+msgstr "预设 A"
+
+msgid "Preset B"
+msgstr "预设 B"
+
+msgid "Preset"
+msgstr "预设"
+
+msgid "The provider's render preset hint."
+msgstr "提供程序的渲染预设提示。"
+
+msgid "UI Correction"
+msgstr "UI 校正"
+
+msgid ""
+"Auto enables the provider's UI correction at Present, whose image contains the game's UI, and leaves it off for DLSS input and output.\n"
+"Off never uses it. On always does."
+msgstr ""
+"自动：在呈现阶段（其图像包含游戏 UI）启用提供程序的 UI 校正，对 DLSS 输入和输出则保持关闭。\n"
+"关闭：从不使用。开启：始终使用。"
+
+msgid "Strict"
+msgstr "严格"
+
+msgid "Normal"
+msgstr "正常"
+
+msgid "Loose"
+msgstr "宽松"
+
+msgid "Motion tolerance"
+msgstr "运动容差"
+
+msgid ""
+"How much a surface may change between frames and still keep the carried fine detail.\n"
+"Strict carries it on fewer moving surfaces, which keep the rebuilt look; Loose carries more detail."
+msgstr ""
+"表面在帧间可以变化多少仍保留沿用的细节。\n"
+"严格会在更少的运动表面上沿用细节，这些表面保留重建的效果；宽松会沿用更多细节。"
+
+msgid "Never"
+msgstr "从不"
+
+msgid "Optional"
+msgstr "可选"
+
+msgid "Required"
+msgstr "必需"
+
+msgid "Use DLSS resources"
+msgstr "使用 DLSS 资源"
+
+msgid ""
+"Present only. Optional reuses the DLSS motion vectors and depth when available, otherwise neutral inputs.\n"
+"Required skips Present processing without them. Never always uses neutral inputs."
+msgstr ""
+"仅用于呈现。可选：有 DLSS 运动矢量和深度时复用它们，否则使用中性输入。\n"
+"必需：没有它们时跳过呈现处理。从不：始终使用中性输入。"
+
+msgid "Block Hudless"
+msgstr "阻止无 HUD 图像"
+
+msgid "Present only: keeps the game's HUD-less image from DLSS frame generation, so generated frames match processed ones."
+msgstr "仅用于呈现：不让 DLSS 帧生成使用游戏的无 HUD 图像，使生成帧与处理后的帧一致。"
+
+msgid "Inspect"
+msgstr "检查"
+
+msgid "Network input"
+msgstr "网络输入"
+
+msgid "Network output"
+msgstr "网络输出"
+
+msgid "Change (x8)"
+msgstr "改动 (x8)"
+
+msgid "Debug view"
+msgstr "调试视图"
+
+msgid ""
+"Shows what the network is given and returns, or where DLSS 5 changes the image (grey: unchanged; lighter or darker: changed).\n"
+"With Split view, on the DLSS 5 side only."
+msgstr ""
+"显示网络接收和返回的内容，或 DLSS 5 改动画面的位置（灰色：未改动；更亮或更暗：已改动）。\n"
+"分屏对比时，仅在 DLSS 5 一侧显示。"
+
+msgid "Swap sides"
+msgstr "交换两侧"
+
+msgid "Split view shows DLSS 5 on the left and the original on the right."
+msgstr "分屏对比时左侧显示 DLSS 5，右侧显示原始画面。"
+
+msgid "Reset to defaults"
+msgstr "恢复默认值"
+
 msgid "Waiting for the game's Reflex plugin."
 msgstr "正在等待游戏的 Reflex 插件。"
 
@@ -294,9 +885,6 @@ msgstr "正在等待游戏接受 Reflex 帧率限制。"
 msgid "Game"
 msgstr "游戏"
 
-msgid "Off"
-msgstr "关闭"
-
 msgid "V-Sync"
 msgstr "垂直同步"
 
@@ -309,6 +897,13 @@ msgstr ""
 
 msgid "Reflex FPS limit"
 msgstr "Reflex 帧率限制"
+
+msgid ""
+"Caps the frame rate XeMFG presents.\n"
+"XeLL paces the game's frames to it."
+msgstr ""
+"限制 XeMFG 输出的帧率。\n"
+"XeLL 会据此调节游戏帧的节奏。"
 
 msgid ""
 "Caps the game's frame rate through Reflex.\n"
@@ -353,11 +948,17 @@ msgstr "正在应用…"
 msgid "Reflex limit"
 msgstr "Reflex 限制"
 
-msgid "accepted"
-msgstr "已接受"
+msgid "applied by XeLL to XeMFG's output"
+msgstr "由 XeLL 应用于 XeMFG 的输出"
 
 msgid "%d FPS requested"
 msgstr "已请求 %d FPS"
+
+msgid "applies with XeMFG's next frame"
+msgstr "将在 XeMFG 的下一帧生效"
+
+msgid "accepted"
+msgstr "已接受"
 
 msgid "restoring the game's Reflex limit"
 msgstr "正在恢复游戏的 Reflex 帧率限制"
@@ -370,9 +971,6 @@ msgstr "Reflex 状态暂时不可用。"
 
 msgid "Path traced hair"
 msgstr "路径追踪毛发"
-
-msgid "State"
-msgstr "状态"
 
 msgid "Unknown"
 msgstr "未知"
@@ -443,6 +1041,9 @@ msgstr "请在游戏设置中开启帧生成（DLSS）。"
 msgid "Turn on frame generation in the game's settings (XeSS)."
 msgstr "请在游戏设置中开启帧生成（XeSS）。"
 
+msgid "Turn on DLSS or XeSS frame generation in the game's settings. If the game has none, turn on XeMFG standalone."
+msgstr "请在游戏设置中开启 DLSS 或 XeSS 帧生成。如果游戏没有该选项，请开启“独立 XeMFG”。"
+
 msgid "Turn on DLSS or XeSS frame generation in the game's settings."
 msgstr "请在游戏设置中开启 DLSS 或 XeSS 帧生成。"
 
@@ -490,6 +1091,140 @@ msgstr "本次运行中，游戏识别到的显卡为 NVIDIA GeForce RTX 4090。
 msgid "This GPU is not an RTX 30 card; the game sees its real name."
 msgstr "此 GPU 不是 RTX 30 显卡；游戏识别到的是其真实型号。"
 
+msgid "XeMFG standalone"
+msgstr "独立 XeMFG"
+
+msgid ""
+"MFG Unlocker runs XeSS multi-frame generation itself, without OptiScaler, from the inputs of the game's DLSS frame generation or of its DLSS, XeSS or FSR 3.1 upscaling. It replaces the game's own frame generation.\n"
+"Switching it on or off applies after a restart."
+msgstr ""
+"MFG Unlocker 自行运行 XeSS 多帧生成，无需 OptiScaler，输入来自游戏的 DLSS 帧生成，或其 DLSS、XeSS 或 FSR 3.1 超分辨率。它会取代游戏自身的帧生成。\n"
+"开启或关闭在重启后生效。"
+
+msgid "Dynamic"
+msgstr "动态"
+
+msgid "MFG mode"
+msgstr "MFG 模式"
+
+msgid "Dynamic changes how many frames XeMFG generates every game frame, so its frame rate follows the target, up to the frames set. The target is not a limit."
+msgstr "“动态”会在每个游戏帧调整 XeMFG 生成的帧数，使其帧率接近目标，最多不超过所设帧数。目标不是帧率上限。"
+
+msgid "Up to"
+msgstr "上限"
+
+msgid "Dynamic target"
+msgstr "动态目标"
+
+msgid "Display refresh rate"
+msgstr "显示器刷新率"
+
+msgid "The FPS limit when one is set, otherwise just under the display's refresh rate."
+msgstr "已设置帧率限制时为该限制，否则略低于显示器刷新率。"
+
+msgid "Target FPS"
+msgstr "目标帧率"
+
+msgid "Closest"
+msgstr "最接近"
+
+msgid "At least"
+msgstr "至少"
+
+msgid "At most"
+msgstr "至多"
+
+msgid "Rounding"
+msgstr "取整方式"
+
+msgid "Closest: the frame rate closest to the target. At least: the fewest frames that reach it. At most: the most frames that stay under it."
+msgstr "最接近：帧率最接近目标。至少：达到目标所需的最少帧数。至多：不超过目标的最多帧数。"
+
+msgid "Allow 1X"
+msgstr "允许 1X"
+
+msgid "Lets Dynamic turn frame generation off when the game's own frames come nearest the target."
+msgstr "当游戏自身帧率最接近目标时，允许“动态”关闭帧生成。"
+
+msgid "Use target as cap"
+msgstr "将目标作为上限"
+
+msgid "Holds XeMFG's frame rate at the target with the FPS limit and uses the fewest frames that reach it, never 1X."
+msgstr "用帧率限制将 XeMFG 的帧率保持在目标，并使用达到目标的最少帧数，从不使用 1X。"
+
+msgid "The game's folder path is too long (260 characters or more) for XeMFG to search it."
+msgstr "游戏文件夹路径过长（不少于 260 个字符），XeMFG 无法在其中查找。"
+
+msgid "XeMFG needs libxess_fg.dll and libxell.dll in an RTXMFG-XeSS folder beside MFG Unlocker."
+msgstr "XeMFG 需要将 libxess_fg.dll 和 libxell.dll 放在 MFG Unlocker 旁边的 RTXMFG-XeSS 文件夹中。"
+
+msgid "XeMFG needs libxess_fg.dll and libxell.dll together in %s (or beside the game's exe in %s). Restart the game after adding them."
+msgstr "XeMFG 需要将 libxess_fg.dll 和 libxell.dll 一起放在 %s 中（或游戏 exe 旁边的 %s 中）。添加后请重启游戏。"
+
+msgid "Only libxell.dll was found."
+msgstr "只找到了 libxell.dll。"
+
+msgid "Only libxess_fg.dll was found."
+msgstr "只找到了 libxess_fg.dll。"
+
+msgid "The two files are in different folders."
+msgstr "这两个文件位于不同的文件夹中。"
+
+msgid "Found %s, not %s: check the file's name and extension."
+msgstr "找到的是 %s，而不是 %s：请检查文件名和扩展名。"
+
+msgid "The XeMFG setting could not be saved."
+msgstr "无法保存 XeMFG 设置。"
+
+msgid "Restart the game to start XeMFG."
+msgstr "请重启游戏以启动 XeMFG。"
+
+msgid "XeMFG could not start: %s"
+msgstr "XeMFG 无法启动：%s"
+
+msgid "Turn on DLSS frame generation in the game's settings. XeMFG replaces it."
+msgstr "请在游戏设置中开启 DLSS 帧生成，XeMFG 会取代它。"
+
+msgid "Turn off the game's FSR frame generation. XeMFG does not run on top of it."
+msgstr "请关闭游戏的 FSR 帧生成，XeMFG 不会叠加在其上运行。"
+
+msgid "The game's motion vectors are at display resolution. XeMFG cannot use them yet."
+msgstr "游戏的运动矢量为显示分辨率，XeMFG 暂时无法使用。"
+
+msgid "Waiting for the game's DLSS, XeSS or FSR 3.1 upscaling, or its DLSS frame generation."
+msgstr "正在等待游戏的 DLSS、XeSS 或 FSR 3.1 超分辨率，或其 DLSS 帧生成。"
+
+msgid "Dynamic, %ux"
+msgstr "动态，%ux"
+
+msgid "held as cap"
+msgstr "作为上限保持"
+
+msgid "Restart needed"
+msgstr "需要重启"
+
+msgid "Waiting"
+msgstr "等待中"
+
+msgid "Inputs"
+msgstr "输入"
+
+msgid ""
+"Shows the real and XeMFG frame rates in the top-left corner\n"
+"while the menu is closed. Saved for the next launch."
+msgstr ""
+"菜单关闭时在左上角显示真实帧率和 XeMFG 帧率。\n"
+"下次启动时保留此设置。"
+
+msgid "%.1f real, %.1f XeMFG"
+msgstr "真实 %.1f，XeMFG %.1f"
+
+msgid "Measuring..."
+msgstr "正在测量…"
+
+msgid "XeMFG off"
+msgstr "XeMFG 已关闭"
+
 msgid "MFG Unlocker multi-frame port"
 msgstr "MFG Unlocker 多帧移植模型"
 
@@ -502,11 +1237,20 @@ msgstr "帧生成"
 msgid "XeSS frame generation support is unavailable in this build."
 msgstr "此版本不支持 XeSS 帧生成。"
 
-msgid "XeSS multi-frame generation needs OptiScaler, with XeFG as its frame generation output. Without it the game's XeSS frame generation runs at Intel's standard 2x."
-msgstr "XeSS 多帧生成需要 OptiScaler，并需将其帧生成输出设为 XeFG。否则，游戏的 XeSS 帧生成只会以 Intel 标准的 2x 运行。"
+msgid "XeSS multi-frame generation runs as XeMFG standalone, or through OptiScaler with XeFG as its frame generation output. Without either, the game's XeSS frame generation runs at Intel's standard 2x."
+msgstr "XeSS 多帧生成以独立 XeMFG 运行，或通过将帧生成输出设为 XeFG 的 OptiScaler 运行。两者都没有时，游戏的 XeSS 帧生成只会以 Intel 标准的 2x 运行。"
 
 msgid "XeSS multi-frame generation runs through OptiScaler. Set the frame generation ratio and the MFG model in OptiScaler's menu."
 msgstr "XeSS 多帧生成通过 OptiScaler 运行。请在 OptiScaler 菜单中设置帧生成倍率和 MFG 模型。"
+
+msgid "DLSS multi-frame generation needs an NVIDIA RTX GPU."
+msgstr "DLSS 多帧生成需要 NVIDIA RTX GPU。"
+
+msgid "DLSS multi-frame generation is unavailable on this GPU."
+msgstr "此 GPU 不支持 DLSS 多帧生成。"
+
+msgid "Latency and display"
+msgstr "延迟与显示"
 
 msgid "Display"
 msgstr "显示"
@@ -517,8 +1261,11 @@ msgstr "“关闭”会在不开启垂直同步的情况下输出游戏画面。
 msgid "The V-Sync setting could not be saved."
 msgstr "无法保存垂直同步设置。"
 
-msgid "Status"
-msgstr "状态"
+msgid "DLSS Ray Reconstruction"
+msgstr "DLSS 光线重建"
+
+msgid "DLSS Super Resolution"
+msgstr "DLSS 超分辨率"
 
 msgid "%u generated frames capacity"
 msgstr "可容纳 %u 个生成帧"
@@ -529,14 +1276,8 @@ msgstr "已应用"
 msgid "Not verified"
 msgstr "未验证"
 
-msgid "Model"
-msgstr "模型"
-
 msgid "Tensor cores"
 msgstr "Tensor Core"
-
-msgid "On"
-msgstr "开启"
 
 msgid "the ported model's int8 layers run as CUDA kernels"
 msgstr "移植模型的 int8 层以 CUDA 内核运行"
@@ -550,17 +1291,17 @@ msgstr "OptiScaler.ini 中 XeFGTensorCores = off"
 msgid "presentation override is not verified"
 msgstr "尚未确认覆盖已生效"
 
-msgid "DLSS multi-frame generation needs an NVIDIA RTX GPU."
-msgstr "DLSS 多帧生成需要 NVIDIA RTX GPU。"
-
-msgid "DLSS multi-frame generation is unavailable on this GPU."
-msgstr "此 GPU 不支持 DLSS 多帧生成。"
-
-msgid "Advanced"
-msgstr "高级"
-
 msgid "XeSS diagnostics"
 msgstr "XeSS 诊断"
+
+msgid "DLSS presets"
+msgstr "DLSS 预设"
+
+msgid "Frame generation is set in OptiScaler's menu. This menu offers the DLSS presets and DLSS 5."
+msgstr "帧生成请在 OptiScaler 菜单中设置。此菜单提供 DLSS 预设和 DLSS 5。"
+
+msgid "DLSS 5"
+msgstr "DLSS 5"
 
 msgid "Waiting for status"
 msgstr "正在等待状态"
@@ -598,6 +1339,9 @@ msgstr "帧生成初始化时已就绪"
 msgid "Waiting for frame generation"
 msgstr "正在等待帧生成"
 
+msgid "Restart with the matching single-module build. The current status protocol is older than this UI expects."
+msgstr "请使用匹配的单模块版本重启游戏。当前状态协议版本低于此界面的要求。"
+
 msgid "5x MFG (experimental)"
 msgstr "5x MFG（实验性）"
 
@@ -610,9 +1354,6 @@ msgstr "跟随游戏"
 msgid "Mode"
 msgstr "模式"
 
-msgid "MFG mode"
-msgstr "MFG 模式"
-
 msgid ""
 "Follow game uses the game's own frame generation setting.\n"
 "Dynamic adjusts frame generation toward a target frame rate; it does not set a hard FPS limit."
@@ -620,14 +1361,20 @@ msgstr ""
 "“跟随游戏”使用游戏自身的帧生成设置。\n"
 "“动态”会自动调整帧生成倍率，使帧率接近目标帧率；不会硬性限制帧率。"
 
-msgid "Dynamic target"
-msgstr "动态目标"
+msgid "Frame generation stays under the game's control. This wrapper has no verified MFG override support."
+msgstr "帧生成仍由游戏控制。此封装器没有经过验证的 MFG 覆盖支持。"
 
-msgid "Display refresh rate"
-msgstr "显示器刷新率"
+msgid "DLSS-G activity observed; waiting for the game's FG control calls."
+msgstr "已检测到 DLSS-G 活动；正在等待游戏的帧生成控制调用。"
 
-msgid "Target FPS"
-msgstr "目标帧率"
+msgid "Waiting for the game to request frame generation."
+msgstr "正在等待游戏请求帧生成。"
+
+msgid "Waiting for an active DLSS-G pipeline."
+msgstr "正在等待活动的 DLSS-G 管线。"
+
+msgid "Toggle frame generation off then on, or restart the game, to recreate the pipeline with this selection."
+msgstr "请关闭再开启帧生成，或重启游戏，以使用此选项重建管线。"
 
 msgid "Dynamic MFG is unavailable with the current limit or runtime. Its full frame-generation range must fit the limit."
 msgstr "动态 MFG 在当前上限或运行时下不可用。其完整的帧生成倍率范围必须在上限之内。"
@@ -644,15 +1391,6 @@ msgstr "请求已接受，但未能保存到配置文件。"
 msgid "The selection could not be applied or saved."
 msgstr "无法应用或保存所选项。"
 
-msgid "Latency and display"
-msgstr "延迟与显示"
-
-msgid "DLSS Ray Reconstruction"
-msgstr "DLSS 光线重建"
-
-msgid "DLSS Super Resolution"
-msgstr "DLSS 超分辨率"
-
 msgid "game intent: unknown"
 msgstr "游戏设置：未知"
 
@@ -667,12 +1405,6 @@ msgstr "帧生成状态"
 
 msgid "Requested"
 msgstr "已请求"
-
-msgid "Dynamic"
-msgstr "动态"
-
-msgid "Dynamic, %ux"
-msgstr "动态，%ux"
 
 msgid "NVIDIA list unavailable"
 msgstr "NVIDIA 列表不可用"
@@ -695,9 +1427,6 @@ msgstr "当前封装器没有经过验证的 MFG 覆盖"
 msgid "%dx (safe fallback)"
 msgstr "%dx（安全回退）"
 
-msgid "Waiting"
-msgstr "等待中"
-
 msgid "for an active DLSS-G wrapper"
 msgstr "尚未检测到正在使用的 DLSS-G 封装器"
 
@@ -714,18 +1443,6 @@ msgstr ""
 "当前 DLSS-G 运行时支持的最高模式，\n"
 "以及 NVIDIA 的 DLSS 优设列表为此游戏设定的上限。"
 
-msgid "%.1f real, %.1f DLSS"
-msgstr "真实 %.1f，DLSS %.1f"
-
-msgid "%.1f real, DLSS unavailable"
-msgstr "真实 %.1f，DLSS 不可用"
-
-msgid "Measuring..."
-msgstr "正在测量…"
-
-msgid "DLSS FG off"
-msgstr "DLSS 帧生成已关闭"
-
 msgid "waiting for an accepted Dynamic request"
 msgstr "正在等待动态请求被接受"
 
@@ -735,23 +1452,14 @@ msgstr "已应用：显示器刷新率"
 msgid "applied: %.2f FPS"
 msgstr "已应用：%.2f FPS"
 
-msgid "Restart with the matching single-module build. The current status protocol is older than this UI expects."
-msgstr "请使用匹配的单模块版本重启游戏。当前状态协议版本低于此界面的要求。"
+msgid "%.1f real, %.1f DLSS"
+msgstr "真实 %.1f，DLSS %.1f"
 
-msgid "Frame generation stays under the game's control. This wrapper has no verified MFG override support."
-msgstr "帧生成仍由游戏控制。此封装器没有经过验证的 MFG 覆盖支持。"
+msgid "%.1f real, DLSS unavailable"
+msgstr "真实 %.1f，DLSS 不可用"
 
-msgid "DLSS-G activity observed; waiting for the game's FG control calls."
-msgstr "已检测到 DLSS-G 活动；正在等待游戏的帧生成控制调用。"
-
-msgid "Waiting for the game to request frame generation."
-msgstr "正在等待游戏请求帧生成。"
-
-msgid "Waiting for an active DLSS-G pipeline."
-msgstr "正在等待活动的 DLSS-G 管线。"
-
-msgid "Toggle frame generation off then on, or restart the game, to recreate the pipeline with this selection."
-msgstr "请关闭再开启帧生成，或重启游戏，以使用此选项重建管线。"
+msgid "DLSS FG off"
+msgstr "DLSS 帧生成已关闭"
 
 msgid "Diagnostics"
 msgstr "诊断"
@@ -761,6 +1469,12 @@ msgstr "状态暂不可用；选项已暂时锁定。"
 
 msgid "FPS status unavailable"
 msgstr "FPS 状态不可用"
+
+msgid "Real -- | XeMFG --"
+msgstr "真实 -- | XeMFG --"
+
+msgid "Real %.0f | XeMFG %.0f"
+msgstr "真实 %.0f | XeMFG %.0f"
 
 msgid "Real -- | DLSS --"
 msgstr "真实 -- | DLSS --"
@@ -776,3 +1490,163 @@ msgstr "动态（不可用）"
 
 msgid "Dynamic (checking...)"
 msgstr "动态（检查中…）"
+
+#~ msgid "DLSS 5 Neural Rendering"
+#~ msgstr "DLSS 5 神经渲染"
+
+#~ msgid "Faster"
+#~ msgstr "更快"
+
+#~ msgid "Full"
+#~ msgstr "完整"
+
+#~ msgid ""
+#~ "Render processes the DLSS input at render resolution, before DLSS SR, DLAA or Ray Reconstruction.\n"
+#~ "Upscaled processes the DLSS output after reconstruction.\n"
+#~ "Present processes the swapchain image before presentation (not available yet)."
+#~ msgstr ""
+#~ "渲染：在 DLSS SR、DLAA 或光线重建之前，以渲染分辨率处理 DLSS 输入。\n"
+#~ "放大后：在重建之后处理 DLSS 输出。\n"
+#~ "呈现：在显示之前处理交换链图像（暂不可用）。"
+
+#~ msgid ""
+#~ "Auto treats the DLSS input and output as linear BT.709.\n"
+#~ "Other choices override the encoding of the processed image."
+#~ msgstr ""
+#~ "自动：将 DLSS 输入和输出视为线性 BT.709。\n"
+#~ "其他选项会覆盖所处理图像的编码。"
+
+#~ msgid "Auto and Off leave the provider's UI correction off for DLSS input and output. On enables it."
+#~ msgstr "自动和关闭：对 DLSS 输入和输出不启用提供程序的 UI 校正。开启：启用它。"
+
+#~ msgid "Render"
+#~ msgstr "渲染"
+
+#~ msgid "Upscaled"
+#~ msgstr "放大后"
+
+#~ msgid ""
+#~ "Render processes the DLSS input at render resolution, before DLSS SR, DLAA or Ray Reconstruction.\n"
+#~ "Upscaled processes the DLSS output after reconstruction.\n"
+#~ "Present processes the swapchain image before presentation and frame generation."
+#~ msgstr ""
+#~ "渲染：在 DLSS SR、DLAA 或光线重建之前，以渲染分辨率处理 DLSS 输入。\n"
+#~ "放大后：在重建之后处理 DLSS 输出。\n"
+#~ "呈现：在显示和帧生成之前处理交换链图像。"
+
+#~ msgid "Overall Intensity"
+#~ msgstr "总强度"
+
+#~ msgid "Character Intensity"
+#~ msgstr "角色强度"
+
+#~ msgid "This game's swapchain cannot use the Present hook method; the log names the reason. Render or Upscaled still work."
+#~ msgstr "此游戏的交换链无法使用“呈现”挂接方式，原因见日志。渲染或放大后仍可使用。"
+
+#~ msgid "Detects skin and faces so that Character Intensity applies to them."
+#~ msgstr "检测皮肤和面部，使角色强度作用于它们。"
+
+#~ msgid ""
+#~ "Before upscaling processes the DLSS input at render resolution, before DLSS SR, DLAA or Ray Reconstruction.\n"
+#~ "After upscaling processes the DLSS output after reconstruction.\n"
+#~ "Present processes the final image, game UI included, before presentation and frame generation."
+#~ msgstr ""
+#~ "放大前：在 DLSS SR、DLAA 或光线重建之前，以渲染分辨率处理 DLSS 输入。\n"
+#~ "放大后：在重建之后处理 DLSS 输出。\n"
+#~ "呈现：在显示和帧生成之前处理包含游戏 UI 的最终图像。"
+
+#~ msgid ""
+#~ "Share of the hook method's resolution that the network processes.\n"
+#~ "100 is native, lower is faster, up to 200 supersamples. Values below 25 use 25."
+#~ msgstr ""
+#~ "网络所处理的挂接方式分辨率比例。\n"
+#~ "100 为原生，越低越快，最高 200 为超采样。低于 25 时按 25 处理。"
+
+#~ msgid "Active preset"
+#~ msgstr "当前预设"
+
+#~ msgid ""
+#~ "Runs the network on every other frame and carries its result along the game's motion vectors on the frames between.\n"
+#~ "About half the GPU cost. Edges of fast-moving objects can show the original image for one frame."
+#~ msgstr ""
+#~ "每隔一帧运行一次网络，并在中间帧沿游戏的运动矢量延续其结果。\n"
+#~ "约为一半的 GPU 开销。快速移动物体的边缘可能会有一帧显示原始画面。"
+
+#~ msgid "XeSS multi-frame generation needs OptiScaler, with XeFG as its frame generation output. Without it the game's XeSS frame generation runs at Intel's standard 2x."
+#~ msgstr "XeSS 多帧生成需要 OptiScaler，并需将其帧生成输出设为 XeFG。否则，游戏的 XeSS 帧生成只会以 Intel 标准的 2x 运行。"
+
+#~ msgid "Local detail and structure enhancement."
+#~ msgstr "局部细节与结构增强。"
+
+#~ msgid "Local tone and contrast enhancement."
+#~ msgstr "局部色调与对比度增强。"
+
+#~ msgid ""
+#~ "RGB residual adds the network's change to the full-resolution image.\n"
+#~ "Processed image uses the upscaled network output directly."
+#~ msgstr ""
+#~ "RGB 残差：将网络的改变叠加到全分辨率图像上。\n"
+#~ "处理后图像：直接使用放大后的网络输出。"
+
+#~ msgid "Boost"
+#~ msgstr "加速"
+
+#~ msgid "Boost is not available on Vulkan or with the Present hook method yet."
+#~ msgstr "加速暂不支持 Vulkan 或“呈现”挂接方式。"
+
+#~ msgid ""
+#~ "Runs the network on every other frame and carries its result along the game's motion vectors on the frames between.\n"
+#~ "About half the GPU cost. Animated surfaces such as water, and particles, keep the game's own image while Boost is on."
+#~ msgstr ""
+#~ "每隔一帧运行一次网络，并在中间帧沿游戏的运动矢量延续其结果。\n"
+#~ "约为一半的 GPU 开销。开启加速时，水面等动态表面和粒子保持游戏原本的画面。"
+
+#~ msgid "Place a compatible nvngx_dlssnr.dll beside the game executable or MFGUnlocker."
+#~ msgstr "将兼容的 nvngx_dlssnr.dll 放在游戏可执行文件或 MFGUnlocker 旁。"
+
+#~ msgid ""
+#~ "Runs the network on every other frame and carries its result along the game's motion vectors on the frames between.\n"
+#~ "About half the GPU cost. Animated surfaces such as water, and particles, keep the game's own image while Half rate is on."
+#~ msgstr ""
+#~ "每隔一帧运行一次网络，并在中间帧沿游戏的运动矢量延续其结果。\n"
+#~ "约为一半的 GPU 开销。开启半速率时，水面等动态表面和粒子保持游戏原本的画面。"
+
+#~ msgid ""
+#~ "How much a surface may change between frames and still keep the carried result.\n"
+#~ "Strict shows the game's image on more moving surfaces (less smear); Loose carries more detail."
+#~ msgstr ""
+#~ "表面在帧间可以变化多少仍保留沿用的结果。\n"
+#~ "严格会在更多运动表面上显示游戏画面（拖影更少）；宽松会沿用更多细节。"
+
+#~ msgid ""
+#~ "Share of the hook method's resolution that the network processes.\n"
+#~ "100 is native, lower is faster, up to 200 supersamples. Values below 25 use 25.\n"
+#~ "Auto lowers it when DLSS 5 takes more than about a third of each rendered frame, and raises it again with headroom, never above the slider."
+#~ msgstr ""
+#~ "网络所处理的挂接方式分辨率比例。\n"
+#~ "100 为原生，越低越快，最高 200 为超采样。低于 25 时按 25 处理。\n"
+#~ "自动模式会在 DLSS 5 占用每个渲染帧约三分之一以上的时间时降低比例，有余量时再提高，但不会超过滑块数值。"
+
+#~ msgid ""
+#~ "Sets Intensity, Model, Structure, Tone and Faces & skin together.\n"
+#~ "Subtle halves the change, Balanced is the default and Strong is clearly visible.\n"
+#~ "Pass Count under Advanced strengthens any look further, at extra GPU cost."
+#~ msgstr ""
+#~ "同时设置强度、模型、结构、色调和面部与皮肤。\n"
+#~ "柔和将效果减半，平衡为默认值，强烈效果明显。\n"
+#~ "高级中的处理次数可进一步增强任何外观，但会额外消耗 GPU。"
+
+#~ msgid "follows Structure"
+#~ msgstr "跟随结构"
+
+#~ msgid "Follows Structure. Change it under Advanced."
+#~ msgstr "跟随结构。可在高级中更改。"
+
+#~ msgid "Structure enhancement on detected skin and faces."
+#~ msgstr "对检测到的皮肤和面部进行结构增强。"
+
+#~ msgid "Faces & skin follows Structure"
+#~ msgstr "面部与皮肤跟随结构"
+
+#~ msgid "Faces & skin takes the Structure strength, the provider's own default."
+#~ msgstr "面部与皮肤使用结构强度，即提供程序自身的默认设置。"

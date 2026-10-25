@@ -1,0 +1,24 @@
+#version 450
+// vkxefg.1: copies one of the game's DLSS inputs (depth or motion vectors, sampled in the layout DLSS reads them in)
+// into the Vulkan host's own image, which XeFG reads later on its own queues. Variants: MFG_TARGET 0 r32f (depth),
+// 1 rg16f and 2 rg32f (motion vectors). XeFG needs depth and motion vectors at one size: output-size motion vectors
+// are point-sampled at the render pixel centers (sourceSize > size; the host rescales their values).
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D source;
+#if MFG_TARGET == 0
+layout(binding = 1, r32f) uniform writeonly image2D target;
+#elif MFG_TARGET == 1
+layout(binding = 1, rg16f) uniform writeonly image2D target;
+#else
+layout(binding = 1, rg32f) uniform writeonly image2D target;
+#endif
+layout(push_constant) uniform Area { uvec2 size; uvec2 sourceSize; } area;
+
+void main()
+{
+    const uvec2 position = gl_GlobalInvocationID.xy;
+    if (any(greaterThanEqual(position, area.size))) return;
+    // Integer nearest texel of the pixel center: (2p + 1) * source / (2 * size); the identity when the sizes match.
+    const uvec2 texel = ((position * 2u + 1u) * area.sourceSize) / (area.size * 2u);
+    imageStore(target, ivec2(position), texelFetch(source, ivec2(texel), 0));
+}

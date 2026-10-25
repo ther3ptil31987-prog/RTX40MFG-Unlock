@@ -5,6 +5,7 @@
 #include "single_overlay.h"
 #include "overlay_dxgi_proxy.h"
 #include "optiscaler_host.h"
+#include "session_diagnostics.h"
 #include "proxy_generated/proxy_export_names.h"
 #include "proxy_generated/renamable_names.h"
 #if MFG_UNLOCK_XESS
@@ -181,6 +182,45 @@ bool HasLegacyConflict(HMODULE instance, const wchar_t* modulePath) noexcept
         && _wcsnicmp(executablePath, modulePath, executableLeaf - executablePath) == 0)
         return false;
     return LegacyInstallConflict(executablePath);
+}
+
+// A game never runs from the Windows folder. An executable there is a Windows
+// program that loaded this DLL itself (rundll32, regsvr32, a scanner's
+// sandbox; GitHub issue 111: logs, status file and write probes landed in
+// System32). Such a host gets proxy forwarding only. Unknown paths count as
+// Windows-hosted.
+bool HostedFromWindowsDirectory() noexcept
+{
+    wchar_t windows[MAX_PATH + 1]{};
+    size_t windowsLength = GetSystemWindowsDirectoryW(windows, static_cast<UINT>(std::size(windows)));
+    if (!windowsLength || windowsLength >= std::size(windows)) return true;
+    while (windowsLength && windows[windowsLength - 1] == L'\\') --windowsLength;
+    LongPath scratch;
+    if (!scratch) return true;
+    const DWORD length = GetModuleFileNameW(nullptr, scratch.get(), static_cast<DWORD>(kLongPathCapacity));
+    if (!length || length >= kLongPathCapacity) return true;
+    const wchar_t* executable = scratch.get();
+    if (wcsncmp(executable, L"\\\\?\\", 4) == 0) executable += 4;
+    return wcslen(executable) > windowsLength && executable[windowsLength] == L'\\'
+        && _wcsnicmp(executable, windows, windowsLength) == 0;
+}
+
+// A crash reporter started from the game folder loads the same proxy (GitHub
+// issue 116: UnityCrashHandler64.exe ran the backend, gave itself the GPU name
+// override and overwrote the game's status file). It gets proxy forwarding only.
+bool HostedByCrashReporter() noexcept
+{
+    static constexpr const wchar_t* kReporters[]{L"UnityCrashHandler64.exe", L"UnityCrashHandler32.exe",
+        L"CrashReportClient.exe", L"crashpad_handler.exe", L"REDEngineErrorReporter.exe"};
+    LongPath scratch;
+    if (!scratch) return false;
+    const DWORD length = GetModuleFileNameW(nullptr, scratch.get(), static_cast<DWORD>(kLongPathCapacity));
+    if (!length || length >= kLongPathCapacity) return false;
+    const wchar_t* leaf = wcsrchr(scratch.get(), L'\\');
+    leaf = leaf ? leaf + 1 : scratch.get();
+    for (const wchar_t* reporter : kReporters)
+        if (_wcsicmp(leaf, reporter) == 0) return true;
+    return false;
 }
 
 bool SelectProxyExports(HMODULE module, uint32_t family) noexcept
@@ -394,7 +434,7 @@ bool OwnsBackend() noexcept { return gOwnsBackend; }
 // OptiScaler mode hides every RTXMFG surface: OptiScaler's own menu owns the
 // controls. Already-wrapped objects stay in the chain but stop drawing and
 // capturing input.
-bool OverlayAllowed() noexcept { return gOwnsBackend && !optiscaler_host::UiDelegated(); }
+bool OverlayAllowed() noexcept { return gOwnsBackend && !optiscaler_host::UiHidden(); }
 
 HMODULE LoadSystemModule(const wchar_t* basename) noexcept
 {
@@ -479,7 +519,13 @@ void DrainLog(void (*sink)(const wchar_t*)) noexcept
         {
             if (dropped)
             {
+#if MFG_UNLOCK_SESSION_DIAGNOSTICS
+                wchar_t stamp[session_diagnostics::kStampChars];
+                session_diagnostics::Stamp(stamp);
+                swprintf_s(line, L"%s%u log lines dropped (log queue full)", stamp, dropped);
+#else
                 swprintf_s(line, L"%u log lines dropped (log queue full)", dropped);
+#endif
                 sink(line);
             }
             return;
@@ -487,13 +533,44 @@ void DrainLog(void (*sink)(const wchar_t*)) noexcept
         sink(line);
     }
 }
+// diag.1: the crash and exit records flush the queue without waiting; a lock held by a stopped or crashed thread
+// leaves the rest queued.
+bool TryDrainLog(void (*sink)(const wchar_t*)) noexcept
+{
+    for (size_t taken = 0; taken < std::size(gUiLog); ++taken)
+    {
+        wchar_t line[kUiLogChars];
+        if (!TryAcquireSRWLockExclusive(&gUiLogLock)) return false;
+        const bool have = gUiLogCount != 0;
+        if (have)
+        {
+            wcscpy_s(line, gUiLog[gUiLogHead].text);
+            gUiLogHead = (gUiLogHead + 1) % std::size(gUiLog);
+            --gUiLogCount;
+        }
+        ReleaseSRWLockExclusive(&gUiLogLock);
+        if (!have) return true;
+        sink(line);
+    }
+    return true;
+}
 void Log(const wchar_t* text) noexcept
 {
+#if MFG_UNLOCK_SESSION_DIAGNOSTICS
+    // Stamped when queued: the worker writes the queue up to 100 ms later.
+    wchar_t stamp[session_diagnostics::kStampChars];
+    session_diagnostics::Stamp(stamp);
+#endif
     AcquireSRWLockExclusive(&gUiLogLock);
     if (gUiLogCount < std::size(gUiLog))
     {
         const auto index = (gUiLogHead + gUiLogCount) % std::size(gUiLog);
+#if MFG_UNLOCK_SESSION_DIAGNOSTICS
+        swprintf_s(gUiLog[index].text, L"%s%.*s", stamp, static_cast<int>(kUiLogChars - session_diagnostics::kStampChars),
+            text ? text : L"(null)");
+#else
         wcsncpy_s(gUiLog[index].text, text ? text : L"(null)", _TRUNCATE);
+#endif
         ++gUiLogCount;
     }
     else
@@ -594,6 +671,11 @@ MfgUnlockSingleModuleQuery(MfgSingleModuleStatus* status)
 
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved)
 {
+#if MFG_UNLOCK_SESSION_DIAGNOSTICS
+    // diag.1: the module is pinned, so this is the process exit (reserved is non-null) recorded as the session end.
+    if (reason == DLL_PROCESS_DETACH && gOwnsBackend)
+        session_diagnostics::OnProcessDetach(reserved != nullptr);
+#endif
     if (reason != DLL_PROCESS_ATTACH)
         return TRUE;
     gSelf = instance;
@@ -613,6 +695,8 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved)
         }
     if (!SelectProxyExports(instance, gSelectedProxyFamily)) return FALSE;
     DisableThreadLibraryCalls(instance);
+    // hostgate.1, crashhost.1: no claim, hooks, worker, log, status file or write probe.
+    if (HostedFromWindowsDirectory() || HostedByCrashReporter()) return TRUE;
 
     wchar_t claim[96]{};
     swprintf_s(claim, L"Local\\RTX40MFG-SingleModule-%lu", GetCurrentProcessId());
@@ -644,7 +728,11 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved)
     // (not necessarily initialized: only its resources are read).
     optiscaler_host::ObserveProcessStart(instance);
     if (optiscaler_host::Detected())
-        single_module::Log(L"OptiScaler detected at startup; its menu owns the frame-generation controls unless optiScalerUi is \"rtxmfg\".");
+    {
+        single_module::Log(L"OptiScaler detected at startup; its menu owns the frame-generation controls unless optiScalerUi is \"rtxmfg\" (RTXMFG's menu offers the DLSS presets and DLSS 5 while one runs unless it is \"optiscaler\").");
+        if (optiscaler_host::DefaultUiMode() == optiscaler_host::UiMode::Hidden)
+            single_module::Log(L"ForzaTech executable: RTXMFG's menu stays hidden beside OptiScaler (no factory, swapchain or input wrapping) unless optiScalerUi is \"shared\".");
+    }
     if (!MfgUnlockCoreEntry(instance, reason, reserved))
     {
         gOwnsBackend = false;

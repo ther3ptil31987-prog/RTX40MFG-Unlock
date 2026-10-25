@@ -50,20 +50,50 @@ inline bool CorrectSpoofedIds(DXGI_ADAPTER_DESC1& description) noexcept
     return true;
 }
 
-// PCI vendor of the device's adapter, or 0 when DXGI cannot identify it.
-inline UINT VendorOf(ID3D12Device* device) noexcept
+// PCI vendor and device ID of the device's adapter (the kernel's where DXGI's are spoofed); false when DXGI cannot
+// identify it.
+inline bool PciIdsOf(ID3D12Device* device, UINT& vendor, UINT& id) noexcept
 {
     using Microsoft::WRL::ComPtr;
-    if (!device) return 0;
+    vendor = 0; id = 0;
+    if (!device) return false;
     ComPtr<IDXGIFactory4> factory;
     ComPtr<IDXGIAdapter1> adapter;
     DXGI_ADAPTER_DESC1 description{};
     if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))
         || FAILED(factory->EnumAdapterByLuid(device->GetAdapterLuid(), IID_PPV_ARGS(&adapter)))
-        || FAILED(adapter->GetDesc1(&description))) return 0;
+        || FAILED(adapter->GetDesc1(&description))) return false;
     CorrectSpoofedIds(description);
-    return description.VendorId;
+    vendor = description.VendorId;
+    id = description.DeviceId;
+    return true;
 }
+
+// PCI vendor of the device's adapter, or 0 when DXGI cannot identify it.
+inline UINT VendorOf(ID3D12Device* device) noexcept
+{
+    UINT vendor{}, id{};
+    PciIdsOf(device, vendor, id);
+    return vendor;
+}
+
+// V1.6.2-alpha.22 amdqueue.2: an AMD RDNA 3 or later GPU (RX 7000/9000 and their APUs) by PCI device ID. The set is the
+// one AMD's Adrenalin 26.10.1 installs its RX 7000/9000 driver branch for (u0205306.inf: Navi 31/32/33 0x7448-0x7499,
+// Navi 48/44 0x7550/0x7551/0x7590, APUs 0x1114/0x150E/0x1586/0x15BF/0x15C8/0x1900-0x1902) and not its RX 6000 branch
+// (u0205305.inf: RDNA 2 and older, discrete up to Navi 24's 0x743F). Discrete IDs from Navi 31's block (0x7440) on count,
+// so later RX 9000 parts do too; the older parts numbered up there (R500/R600) have no D3D12 driver.
+constexpr bool AmdRdna3OrNewer(UINT id) noexcept
+{
+    switch (id)
+    {
+    case 0x1114: case 0x150E: case 0x1586: case 0x15BF: case 0x15C8: case 0x1900: case 0x1901: case 0x1902: return true;
+    default: return id >= 0x7440 && id <= 0x7FFF;
+    }
+}
+static_assert(AmdRdna3OrNewer(0x744C) && AmdRdna3OrNewer(0x747E) && AmdRdna3OrNewer(0x7480) && AmdRdna3OrNewer(0x7550)
+    && AmdRdna3OrNewer(0x7590) && AmdRdna3OrNewer(0x15BF), "RX 7000, RX 9000 and RDNA 3 APUs");
+static_assert(!AmdRdna3OrNewer(0x73BF) && !AmdRdna3OrNewer(0x73DF) && !AmdRdna3OrNewer(0x743F) && !AmdRdna3OrNewer(0x731F)
+    && !AmdRdna3OrNewer(0x1681) && !AmdRdna3OrNewer(0x164E) && !AmdRdna3OrNewer(0x163F), "RX 6000/5000 and RDNA 2 APUs");
 
 // Query the authoritative device, not the first enumerated/display adapter.
 // The template also lets the regression harness exercise this exact boundary.

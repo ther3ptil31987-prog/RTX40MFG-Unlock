@@ -29,6 +29,11 @@ namespace sdk_pacing::cadence
 // is taken within three batches) but is left out of the mean. A gap of up to three
 // frames without generated outputs (an XeFG reset, a scene cut, a Dynamic MFG change)
 // keeps the history instead of starting over.
+// V1.7.0 bimodal.1 (a tester, Witcher 3, Linux, queue off, OptiScaler's XeLL fps limit: long
+// deltas ~2x the median left out in 13 of 31 windows, estimate 14.7 against a plain mean of 16.1
+// ms): a limiter or latency sleep can make the cadence bimodal, and its long deltas are cadence,
+// not hitches. With more than kRecurringOutliers of them in the window and an ordinary delta after
+// one of them (interleaved, not a slowdown's newest run) the plain mean is used.
 // V1.6.0 latency.1: XeFG's batch start is a GPU completion time (output 0's present fence),
 // while a deadline is the time its Present is called. XeFG's own deadline (0x224B30)
 // subtracts its smoothed present-call -> GPU-completion latency (record+0x14, 0x21F230);
@@ -42,6 +47,8 @@ public:
     static constexpr int64_t kMaximumDelta = 250000000;
     // hitch.1: a delta above kOutlierNumerator/kOutlierDenominator of the window median is not averaged.
     static constexpr int64_t kOutlierNumerator = 3, kOutlierDenominator = 2;
+    // bimodal.1: more interleaved outliers than this in the window are cadence (the plain mean is used).
+    static constexpr uint32_t kRecurringOutliers = 1;
     // hitch.1: frames without generated outputs that may lie between two observed batches.
     static constexpr uint32_t kBridgeFrames = 3;
     struct Decision { int64_t deadline{}, interval{}; uint32_t samples{}; bool capped{}; int64_t lead{}; };
@@ -143,6 +150,15 @@ private:
         mean_ = sum / int64_t(count_);
         typical_ = kept / int64_t(used); // the lower half is always within bounds of its own median
         excluded_ = count_ - used;
+        if (excluded_ <= kRecurringOutliers) return;
+        bool outlier{}, interleaved{};
+        for (uint32_t i = 0; i < count_; ++i) // oldest first
+        {
+            const int64_t delta = deltas_[count_ < kSamples ? i : (cursor_ + i) % kSamples];
+            if (delta*kOutlierDenominator > median_*kOutlierNumerator) outlier = true;
+            else if (outlier) interleaved = true;
+        }
+        if (interleaved) { typical_ = mean_; excluded_ = 0; }
     }
     // While fewer than kSamples are held they fill [0, count_).
     std::array<int64_t, kSamples> deltas_{};

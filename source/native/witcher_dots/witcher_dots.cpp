@@ -7,6 +7,7 @@
 #include "../overlay_native.h"
 #include "../single_module.h"
 #include "../diagnostic_paths.h"
+#include "../dlss5.h"
 #include <MinHook.h>
 #include <dxgi1_4.h>
 #include <intrin.h>
@@ -310,6 +311,29 @@ void Preferences() {
     // troubleshooting off switch.
     state.snapshot.requested=true;
     state.snapshot.crashReportRequested=GetPrivateProfileIntW(L"WitcherDOTS",L"CrashReport",0,state.control.c_str())==1;
+    // Issue 70 A/B switch: RoundHitDistance=0 keeps the ribbon hit distance.
+    // Read once: the hair shaders are translated at preparation.
+    SetRoundHitDistance(GetPrivateProfileIntW(L"WitcherDOTS",L"RoundHitDistance",1,state.control.c_str())!=0);
+    // Hair translucency, 0-100 % (default 65, issue 70 stopgap; 0 = the game's own look).
+    {
+        const int percent=static_cast<int>(GetPrivateProfileIntW(L"WitcherDOTS",L"HairTranslucency",65,state.control.c_str()));
+        SetHairTranslucency(static_cast<uint32_t>(percent<0?0:percent>100?100:percent));
+        // Colour-aware (default): pale hair gets the full value, dark hair less.
+        const int white=static_cast<int>(GetPrivateProfileIntW(L"WitcherDOTS",L"HairTranslucencyWhitePoint",35,state.control.c_str()));
+        SetHairTranslucencyColour(GetPrivateProfileIntW(L"WitcherDOTS",L"HairTranslucencyByColour",1,state.control.c_str())!=0,
+            static_cast<uint32_t>(white<5?5:white>100?100:white));
+        // HairBounces: the path tracer's path length for hair pixels (the game's 4).
+        const int bounces=static_cast<int>(GetPrivateProfileIntW(L"WitcherDOTS",L"HairBounces",4,state.control.c_str()));
+        SetHairBounces(static_cast<uint32_t>(bounces<1?1:bounces>32?32:bounces));
+        // HairAlbedoLinear: treat HairAlbedoBuffer as linear colour (default 1, issue 70 stopgap; 0 = the game's gamma decode).
+        SetHairAlbedoLinear(GetPrivateProfileIntW(L"WitcherDOTS",L"HairAlbedoLinear",1,state.control.c_str())!=0);
+        // HairIgnoreReflectionMask: hair pixels read the RT-reflection mask as 0 (default 0: the game's).
+        SetHairIgnoreReflectionMask(GetPrivateProfileIntW(L"WitcherDOTS",L"HairIgnoreReflectionMask",0,state.control.c_str())!=0);
+        // HairDebugLighting (diagnostic, 0-5): isolates the hair lighting terms.
+        SetHairDebugLighting(GetPrivateProfileIntW(L"WitcherDOTS",L"HairDebugLighting",0,state.control.c_str()));
+        // HairStencilCharacter: the path tracer sees stencil bit 2 on hair pixels (default 0: the game's).
+        SetHairStencilCharacter(GetPrivateProfileIntW(L"WitcherDOTS",L"HairStencilCharacter",0,state.control.c_str())!=0);
+    }
     wchar_t env[8]{};const DWORD count=GetEnvironmentVariableW(L"RTXMFG_WITCHER_DOTS",env,_countof(env));
     if(count==1&&env[0]==L'0') {state.snapshot.environmentOverride=true;state.snapshot.requested=false;}
     state.snapshot.stage=state.snapshot.requested?Stage::WaitingForDevice:Stage::Disabled;
@@ -735,6 +759,8 @@ void ObserveDevice(IUnknown* object,const void* caller) noexcept {
         }
         if(!state.shaders.Prepare(state.game,Game().shaders,state.directory,error)) {Reason(Stage::Failed,error);return;}
         {std::lock_guard lock(state.lock);state.snapshot.shaderReady=true;}
+        // Before any queue table hook: DLSS 5 hooks the runtime method behind it.
+        dlss5::SetQueueForward(&QueueExecuteForward);
         if(!InitializeGpu(state.device.Get(),&state.shaders,error)||!InstallGameHooks(error)) {AbortPreparation();Reason(Stage::Failed,error);return;}
         // All shader translations, hooks, converter state and budgets are ready
         // before the first game gate is published. The logical getter is last.
@@ -745,6 +771,40 @@ void ObserveDevice(IUnknown* object,const void* caller) noexcept {
             GetCurrentProcessId(),Game().label,Game().exeHash,adapter.Description,adapter.VendorId,adapter.DeviceId,major,minor,
             static_cast<uint32_t>(state.device->GetAdapterLuid().HighPart),state.device->GetAdapterLuid().LowPart,driver);
         single_module::Log(line);
+        single_module::Log(state.shaders.RoundHitApplied()
+            ?L"WITCHER_DOTS hair hit distance: round strand 1.12x (RoundHitDistance=1; set 0 in RTXMFG.WitcherDOTS.ini for the ribbon distance)"
+            :RoundHitDistance()?L"WITCHER_DOTS hair hit distance: ribbon (round strand not available for this game build)"
+            :L"WITCHER_DOTS hair hit distance: ribbon (RoundHitDistance=0)");
+        single_module::Log(state.shaders.AlbedoApplied()
+            ?L"WITCHER_DOTS hair albedo: linear (HairAlbedoLinear=1 in RTXMFG.WitcherDOTS.ini; prepass and hit shader gamma-encode HairAlbedoBuffer before the game's pow 2.2 decode)"
+            :HairAlbedoLinear()?L"WITCHER_DOTS hair albedo: game's gamma 2.2 decode (linear albedo not available for this game build)"
+            :L"WITCHER_DOTS hair albedo: game's gamma 2.2 decode (HairAlbedoLinear=0)");
+        single_module::Log(HairIgnoreReflectionMask()
+            ?L"WITCHER_DOTS hair reflection mask: ignored on hair pixels (HairIgnoreReflectionMask=1 in RTXMFG.WitcherDOTS.ini; the path tracer reads 0 for hair)"
+            :L"WITCHER_DOTS hair reflection mask: game's (hair pixels inherit the RT-reflection mask behind them; HairIgnoreReflectionMask=0)");
+        single_module::Log(HairStencilCharacter()
+            ?L"WITCHER_DOTS hair stencil: bit 2 set on hair pixels (HairStencilCharacter=1 in RTXMFG.WitcherDOTS.ini; the path tracer's bit-2 test sees hair as character)"
+            :L"WITCHER_DOTS hair stencil: game's (hair pixels inherit the stencil bits behind them; HairStencilCharacter=0)");
+        {
+            static constexpr const wchar_t* kDebugModes[]={L"off",L"prepass local-light term off",L"prepass sun term off",
+                L"path tracer output zeroed on hair pixels",L"prepass all-lights loop forced",L"prepass one random light forced"};
+            wchar_t debugLine[220]{};
+            swprintf_s(debugLine,L"WITCHER_DOTS hair debug lighting: %u = %s (HairDebugLighting in RTXMFG.WitcherDOTS.ini, diagnostic)",
+                HairDebugLighting(),kDebugModes[HairDebugLighting()]);
+            single_module::Log(debugLine);
+        }
+        {
+            wchar_t translucency[640]{};
+            wchar_t mode[96]{};
+            if(HairTranslucencyByColour())swprintf_s(mode,L"colour-aware by hair albedo, white point %u%%; shadow passes colour-blind",HairTranslucencyWhitePoint());
+            else wcscpy_s(mode,L"colour-blind (HairTranslucencyByColour=0)");
+            swprintf_s(translucency,L"WITCHER_DOTS hair translucency: %u%% (%s; HairTranslucency in RTXMFG.WitcherDOTS.ini; prepass rays %s; %S)",
+                HairTranslucency(),mode,state.shaders.TranslucencyApplied()?L"rewritten":L"unchanged",state.shaders.PathTracerState().c_str());
+            single_module::Log(translucency);
+            wchar_t bounceLine[200]{};
+            swprintf_s(bounceLine,L"WITCHER_DOTS hair bounces: %u (HairBounces in RTXMFG.WitcherDOTS.ini; the game uses 4)",HairBounces());
+            single_module::Log(bounceLine);
+        }
         single_module::Log(L"WITCHER_DOTS stage=prepared; waiting for game hair (game Path Traced Hair setting)");
         {std::lock_guard lock(state.lock);state.snapshot.stage=Stage::Active;}
     } catch(const std::exception& e) {AbortPreparation();Reason(Stage::Failed,e.what());}

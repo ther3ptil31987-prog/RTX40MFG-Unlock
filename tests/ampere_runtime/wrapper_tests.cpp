@@ -8,6 +8,13 @@ void Check(bool ok, const char* text)
 { ++checks; failures += !ok; std::cout << (ok ? "PASS " : "FAIL ") << text << '\n'; }
 template<class T> void Put(uintptr_t base, size_t offset, T value)
 { std::memcpy(reinterpret_cast<void*>(base + offset), &value, sizeof(value)); }
+// diag171.1: the step ReadFailure() names for the 171 log line.
+bool Stage(const ampere_wrapper::Layout& layout, const char* expected)
+{
+    const char* actual = ampere_wrapper::ReadFailure(layout);
+    if (std::strcmp(actual, expected)) std::cout << "  ReadFailure: " << actual << " (expected " << expected << ")\n";
+    return !std::strcmp(actual, expected);
+}
 int wmain(int argc, wchar_t** argv)
 {
     if (argc != 3) return 2;
@@ -47,11 +54,13 @@ int wmain(int argc, wchar_t** argv)
     ampere_wrapper::Capacity early{};
     Put(layout.contextSlot, 0, uintptr_t{0});
     Check(!ampere_wrapper::BeforeSwapchain(layout), "missing context cannot bootstrap a recognized wrapper");
+    Check(Stage(layout, "context-null"), "171 diagnostics name a missing wrapper context");
     Put(layout.contextSlot, 0, context);
     if (legacy)
     {
         Check(ampere_wrapper::BeforeSwapchain(layout), "legacy capabilities bootstrap before plugin startup allocates its pacer");
         Check(!ampere_wrapper::Read(layout, early), "early capabilities do not admit Create without a pacer and allocated resources");
+        Check(Stage(layout, "ring-null"), "171 diagnostics name a missing pacer");
         Put(context, swapchain, uintptr_t{0x1000});
         Check(!ampere_wrapper::BeforeSwapchain(layout), "an allocated swapchain forbids bootstrap even without a pacer");
         const auto observation = ampere_wrapper::InspectFailure(layout);
@@ -63,6 +72,7 @@ int wmain(int argc, wchar_t** argv)
     }
     if (legacy) Put(context, 0x18, ring);
     Check(ampere_wrapper::BeforeSwapchain(layout), "early bootstrap requires an unallocated current context");
+    Check(Stage(layout, "count-out-of-range"), "171 diagnostics name an empty ring (no swap chain set up) count-out-of-range");
     Put(ring, buffers, storage); Put(ring, buffers + 8, storage + sizeof(uintptr_t));
     Check(!ampere_wrapper::BeforeSwapchain(layout), "allocated presentation resources close the bootstrap window");
     Put(ring, buffers, uintptr_t{0}); Put(ring, buffers + 8, uintptr_t{0});
@@ -78,6 +88,12 @@ int wmain(int argc, wchar_t** argv)
         ampere_wrapper::Capacity capacity{};
         Check(ampere_wrapper::Read(layout, capacity) && capacity.bufferCount == n
             && capacity.maximumGeneratedFrames == layout.maximumGeneratedFrames, "actual ring count certifies only its selected fixed generated capacity");
+        Check(Stage(layout, "readable"), "171 diagnostics call a certifiable allocation readable");
+        Put(context, swapchain, uintptr_t{0});
+        ampere_wrapper::Capacity noSwapchain{};
+        Check(!ampere_wrapper::Read(layout, noSwapchain) && Stage(layout, "swapchain-null"),
+            "a filled ring without its swap chain is refused and named swapchain-null");
+        Put(context, swapchain, uintptr_t{0x1000});
         Check(ampere_wrapper::Matches(layout, capacity), "unchanged exact allocation survives frame-path revalidation");
         Check(ampere_wrapper::RefreshedBuffers(capacity, capacity) == 0, "an unchanged allocation is not a buffer refresh");
         // A swap-chain resize re-acquires every buffer object into the same vector.
@@ -114,24 +130,75 @@ int wmain(int argc, wchar_t** argv)
         Check(!ampere_wrapper::Matches(layout, capacity), "replacing one presentation resource invalidates the feature snapshot");
         Put(storage, 0, uintptr_t{0});
         Check(!ampere_wrapper::Read(layout, capacity), "null presentation resource cannot certify capacity");
+        Check(Stage(layout, "entry-null"), "171 diagnostics name a null presentation resource");
         Put(storage, 0, uintptr_t{0x2100});
         Check(!ampere_wrapper::Read(layout, capacity), "aliased presentation resources cannot certify capacity");
+        Check(Stage(layout, "entry-duplicate"), "171 diagnostics name aliased presentation resources");
         Put(storage, 0, uintptr_t{0x2000});
         Put(ring, buffers + 16, storage + (n - 1) * sizeof(uintptr_t));
         Check(!ampere_wrapper::Read(layout, capacity), "allocation end beyond reserved capacity is rejected");
+        Check(Stage(layout, "vector-capacity"), "171 diagnostics name an end beyond the reserved capacity");
+        Put(ring, buffers + 16, storage + n * sizeof(uintptr_t));
+        Put(ring, buffers + 8, storage + (n - 1) * sizeof(uintptr_t));
+        Check(!ampere_wrapper::Read(layout, capacity) && Stage(layout, "vector-end-mismatch"),
+            "a vector end that disagrees with the ring count is refused and named vector-end-mismatch");
     }
     ampere_wrapper::Capacity capacity{};
     Put(ring, count, 1u);
     Check(!ampere_wrapper::Read(layout, capacity), "insufficient ring capacity cannot admit even 2x");
+    Check(Stage(layout, "count-out-of-range"), "171 diagnostics name a one-entry ring");
     Put(ring, count, 7u);
     Check(!ampere_wrapper::Read(layout, capacity), "unbounded ring counts remain rejected");
+    Check(Stage(layout, "count-out-of-range"), "171 diagnostics name an oversized ring");
     Put(ring, count, 6u); Put(ring, buffers + 8, storage + 48); Put(ring, buffers + 16, storage + 48);
-    Put(context, maximum, legacy || direct ? 5u : 1u);
-    Check(!ampere_wrapper::Read(layout, capacity), "mismatched generated maximum never establishes capacity");
+    // ringcap.1: a legacy layout holds exactly one generated frame; an MFG
+    // layout holds the N (1-5) its startup cached, with exactly N+1 buffers.
+    Put(context, maximum, legacy || direct ? 5u : 6u);
+    Check(!ampere_wrapper::Read(layout, capacity) && Stage(layout, "maximum-out-of-range"),
+        "a generated maximum the layout cannot hold never establishes capacity");
+    Put(context, maximum, 0u);
+    Check(!ampere_wrapper::Read(layout, capacity) && Stage(layout, "maximum-out-of-range"),
+        "a zero generated maximum never establishes capacity");
+    if (!legacy && !direct)
+    {
+        Put(context, maximum, 1u);
+        Check(!ampere_wrapper::Read(layout, capacity) && Stage(layout, "count-not-maximum-plus-one"),
+            "a ring with more buffers than the cached maximum needs is refused");
+        bool ringCertified = true, ringExact = true;
+        for (uint32_t n = 1; n <= 5; ++n)
+        {
+            Put(context, maximum, n);
+            Put(ring, count, n + 1); Put(ring, buffers + 8, storage + (n + 1) * sizeof(uintptr_t));
+            Put(ring, buffers + 16, storage + (n + 1) * sizeof(uintptr_t));
+            ampere_wrapper::Capacity partial{};
+            const bool read = ampere_wrapper::Read(layout, partial);
+            ringCertified = ringCertified && read && partial.maximumGeneratedFrames == n && partial.bufferCount == n + 1
+                && ampere_wrapper::Matches(layout, partial) && Stage(layout, "readable");
+            if (n < 5)
+            {
+                Put(ring, count, n + 2); Put(ring, buffers + 8, storage + (n + 2) * sizeof(uintptr_t));
+                Put(ring, buffers + 16, storage + (n + 2) * sizeof(uintptr_t));
+                ringExact = ringExact && !ampere_wrapper::Read(layout, partial) && !ampere_wrapper::Matches(layout, partial)
+                    && Stage(layout, "count-not-maximum-plus-one");
+            }
+        }
+        Check(ringCertified, "a ring of N+1 distinct buffers certifies the N (1-5) its wrapper cached and revalidates on the frame path");
+        Check(ringExact, "a ring with N+2 buffers for a cached N is refused");
+        // The FF7 Rebirth ring (diag171.1 tester log): maximum 3, four buffers.
+        Put(context, maximum, 3u);
+        Put(ring, count, 4u); Put(ring, buffers + 8, storage + 32); Put(ring, buffers + 16, storage + 32);
+        ampere_wrapper::Capacity ff7{};
+        Check(ampere_wrapper::Read(layout, ff7) && ff7.maximumGeneratedFrames == 3 && ff7.bufferCount == 4,
+            "FF7 Rebirth's ring (maximum 3, four buffers) certifies three generated frames");
+        Put(context, maximum, layout.maximumGeneratedFrames);
+        Check(!ampere_wrapper::Read(layout, capacity) && Stage(layout, "count-not-maximum-plus-one"),
+            "a short MFG ring is refused and named count-not-maximum-plus-one");
+    }
     if (legacy)
     {
         Put(context, maximum, 1u); Put(context, 0x18, uintptr_t{0});
         Check(!ampere_wrapper::Read(layout, capacity), "missing pacer owner remains blocked");
+        Check(Stage(layout, "ring-null"), "171 diagnostics name a missing pacer owner");
     }
     Put(layout.contextSlot, 0, original);
     // The same real image must stop matching when its audited Create window

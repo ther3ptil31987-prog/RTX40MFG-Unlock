@@ -77,7 +77,13 @@ add_executable(DlssgPresetHookInstallTests preset_hook_install_tests.cpp "${NATI
 target_link_libraries(DlssgPresetHookInstallTests PRIVATE version)
 add_executable(DlssSrOverrideAudit sr_override_audit.cpp "${NATIVE_SOURCE}/entry_detour.cpp"
     "${CMAKE_CURRENT_BINARY_DIR}/preset_entry_detour.asm" ${MINHOOK_SOURCES})
-foreach(target AmpereBatchTests AmpereStartupRequirementsTests AmpereOptionsTests AmpereFlipMeteringTests AmpereFlipObserverTests AmpereStatusFieldsTests StreamlineOtaTests AmpereArchitectureTests AmpereWrapperTests DlssgSelectionTests NvapiResolveTests GpuNameOverrideTests OptiScalerPrivateStartupTests DlssgPresetSwitchTests ${MFG_DLSS_SR_TESTS} AmpereVulkanRouteTests DlssgPresetHookInstallTests DlssSrOverrideAudit)
+# ngxforward.1: entry_detour's overlaid state (another hook over our entry) on real detours in a fixture DLL.
+add_executable(EntryOverlayTests entry_overlay_tests.cpp "${NATIVE_SOURCE}/entry_detour.cpp"
+    "${CMAKE_CURRENT_BINARY_DIR}/preset_entry_detour.asm" ${MINHOOK_SOURCES})
+add_library(EntryOverlayFixture SHARED entry_overlay_fixture.cpp entry_overlay_fixture.asm entry_overlay_fixture.def)
+set_target_properties(EntryOverlayFixture PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+add_dependencies(EntryOverlayTests EntryOverlayFixture)
+foreach(target AmpereBatchTests AmpereStartupRequirementsTests AmpereOptionsTests AmpereFlipMeteringTests AmpereFlipObserverTests AmpereStatusFieldsTests StreamlineOtaTests AmpereArchitectureTests AmpereWrapperTests DlssgSelectionTests NvapiResolveTests GpuNameOverrideTests OptiScalerPrivateStartupTests DlssgPresetSwitchTests ${MFG_DLSS_SR_TESTS} AmpereVulkanRouteTests DlssgPresetHookInstallTests DlssSrOverrideAudit EntryOverlayTests)
     target_compile_features(${target} PRIVATE cxx_std_20)
     target_include_directories(${target} PRIVATE "${NATIVE_SOURCE}" "${MINHOOK}/include")
     target_compile_definitions(${target} PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
@@ -95,7 +101,7 @@ target_compile_definitions(SelectionSibling PRIVATE FIXTURE_MINOR=9 FIXTURE_BUIL
 # No inputs: run with every build. The flip-metering, wrapper, selection and architecture tests take real
 # Streamline wrappers and DLSS-G providers as arguments (see BUILD.md).
 enable_testing()
-foreach(target AmpereBatchTests AmpereStartupRequirementsTests AmpereOptionsTests AmpereFlipObserverTests AmpereStatusFieldsTests StreamlineOtaTests OptiScalerPrivateStartupTests DlssgPresetSwitchTests ${MFG_DLSS_SR_TESTS} AmpereVulkanRouteTests)
+foreach(target AmpereBatchTests AmpereStartupRequirementsTests AmpereOptionsTests AmpereFlipObserverTests AmpereStatusFieldsTests StreamlineOtaTests OptiScalerPrivateStartupTests DlssgPresetSwitchTests ${MFG_DLSS_SR_TESTS} AmpereVulkanRouteTests EntryOverlayTests)
     add_test(NAME ${target} COMMAND ${target})
 endforeach()
 # Exit code 2 is a setup failure (no NVIDIA driver or no split nvapi64_impl.dll), never a pass.

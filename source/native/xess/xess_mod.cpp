@@ -139,7 +139,10 @@ struct State
     std::unique_ptr<ModelPort> model;
     // dev.40: contexts OptiScaler's own code created (untracked; fgMutex / llMutex). dev.41:
     // each XeFG one keeps its device and generation for its plain pacing owner (HostInitFg).
-    struct HostContext { ComPtr<ID3D12Device> device; uint64_t generation{}; bool paced{}; bool nativeUnlocked{}; };
+    // xefgmenu.1: output = our proxy on XeFG's native output chain (the menu), retired after the context's destruction.
+    // alpha.15 (B4-05): outputReason = why the last initialization's menu attach did not keep a chain (a literal).
+    struct HostContext { ComPtr<ID3D12Device> device; uint64_t generation{}; bool paced{}; bool nativeUnlocked{};
+        ComPtr<IDXGISwapChain> output; const char* outputReason{}; };
     std::map<xefg_swapchain_handle_t, HostContext> hostFg;
     std::set<xell_context_handle_t> hostLl;
     std::once_flag hostUnlockOnce;
@@ -152,6 +155,10 @@ struct State
     HMODULE unlockFg{};
     // #490 scene.1: XeFG's scene-change decision redirected with the unlock (detector off), process lifetime.
     std::unique_ptr<xess_host_unlock::SceneDetour> scene;
+    // V1.6.1 pacing.1: XeFG's output ring at depth 2, applied with the unlock, process lifetime.
+    std::unique_ptr<xess_host_unlock::OutputRing> ring;
+    // V1.6.2-alpha.20 hdrpq.1: XeFG's HDR10 flag kept off, applied with the unlock, process lifetime.
+    std::unique_ptr<xess_host_unlock::Hdr10Flag> hdr10;
     bool hostUnlocked{}, trackedUnlocked{};
     // dev.46: the ported model failed to publish; the 2x model serves the rest of the process.
     bool portRejected{};
@@ -475,6 +482,68 @@ void ApplySceneDetector(State& state, HMODULE fg) noexcept
     catch (...) {}
 }
 
+// V1.6.1 pacing.1: under fgMutex, with the frame-count unlock's first application, before any XeFG context on the
+// image is initialized (Init sizes the chain's ring). Never throws: on any failure XeFG keeps its single entry and the
+// unlock stands. OptiScaler.ini [XeFG] XeFGOutputRing = 1 keeps XeFG's own depth.
+void ApplyOutputRing(State& state, HMODULE fg) noexcept
+{
+    try
+    {
+        std::wstring setting;
+        const uint8_t depth = optiscaler_host::ReadXefgOutputRing(setting);
+        const auto fields = ",\"setting\":\""+escape(utf8(setting))+"\",\"family\":\""+xess_layout::Get(fg).family+"\"";
+        if (depth < 2)
+        {
+            WriteLog("output_ring_patch", "\"applied\":false,\"depth\":1,\"reason\":\"setting\""+fields);
+            return;
+        }
+        try
+        {
+            state.ring = std::make_unique<xess_host_unlock::OutputRing>(fg, depth);
+            char rva[16]{};
+            sprintf_s(rva, "0x%X", state.ring->Rva());
+            WriteLog("output_ring_patch", "\"applied\":true,\"depth\":"+std::to_string(depth)+",\"rva\":\""+rva+
+                "\",\"count_offset\":"+std::to_string(state.ring->CountOffset())+fields);
+        }
+        catch (const std::exception& error)
+        {
+            WriteLog("output_ring_patch", "\"applied\":false,\"depth\":1,\"reason\":\""+escape(error.what())+"\""+fields);
+        }
+    }
+    catch (...) {}
+}
+
+// V1.6.2-alpha.20 hdrpq.1: under fgMutex, with the frame-count unlock's first application, before any XeFG context on
+// the image exists (no proxy swap chain has had SetColorSpace1 yet). Never throws: on any failure XeFG keeps its own
+// HDR10 handling and the unlock stands. OptiScaler.ini [XeFG] XeFGHdr10Flag = stock keeps it too.
+void ApplyHdr10Flag(State& state, HMODULE fg) noexcept
+{
+    try
+    {
+        std::wstring setting;
+        const bool off = optiscaler_host::ReadXefgHdr10FlagOff(setting);
+        const auto fields = ",\"setting\":\""+escape(utf8(setting))+"\",\"family\":\""+xess_layout::Get(fg).family+"\"";
+        if (!off)
+        {
+            WriteLog("hdr10_flag_patch", "\"applied\":false,\"mode\":\"stock\",\"reason\":\"setting\""+fields);
+            return;
+        }
+        try
+        {
+            state.hdr10 = std::make_unique<xess_host_unlock::Hdr10Flag>(fg);
+            char rva[16]{};
+            sprintf_s(rva, "0x%X", state.hdr10->Rva());
+            WriteLog("hdr10_flag_patch", "\"applied\":true,\"mode\":\"off\",\"rva\":\""+std::string(rva)+
+                "\",\"context_offset\":"+std::to_string(state.hdr10->ContextOffset())+fields);
+        }
+        catch (const std::exception& error)
+        {
+            WriteLog("hdr10_flag_patch", "\"applied\":false,\"mode\":\"stock\",\"reason\":\""+escape(error.what())+"\""+fields);
+        }
+    }
+    catch (...) {}
+}
+
 // Under fgMutex. Applies the frame-count unlock on first use; later callers must name the
 // same provider image and the same 2x-model choice. Returns the applied site names as a JSON
 // string list body.
@@ -486,6 +555,8 @@ std::string AcquireUnlock(State& state, HMODULE fg, HMODULE ll, bool keep2xModel
             keep2xModel);
         state.unlockFg = fg;
         ApplySceneDetector(state, fg);
+        ApplyOutputRing(state, fg);
+        ApplyHdr10Flag(state, fg);
     }
     else if (state.unlockFg != fg) throw std::runtime_error("unlock_on_other_provider_image");
     else if (state.unlock->Keeps2xModel() != keep2xModel) throw std::runtime_error("unlock_model_site_mismatch");
@@ -540,7 +611,8 @@ void PreparePort(State& state)
     if (!state.contexts.empty()) throw std::runtime_error("context_predates_model_publication");
     try
     {
-        auto shaders = std::make_unique<ShaderPort>(state.fgModule, Self(), state.root);
+        // amdkeep.1: the adapter vendor picks which of our replacements apply (set just before by the create hook).
+        auto shaders = std::make_unique<ShaderPort>(state.fgModule, Self(), state.root, state.display.adapterVendor);
         for (const char* key : kReconstructionPrograms)
             if (!shaders->hasProgram(key)) throw std::runtime_error("reconstruction_program_pair_missing");
         auto model = std::make_unique<ModelPort>(state.fgModule, true, true);
@@ -757,6 +829,22 @@ HostCallScope::~HostCallScope() { tHostCall = previous; }
 
 // A host-created XeLL context also counts through OptiScaler's XeLL wrapper (its real handle,
 // with the matching libxell header; see FindLatencyContext).
+bool HostOutputAttached(const void* handle, const char** reason) noexcept
+{
+    if (reason) *reason = "not_host_context";
+    if (!handle) return false;
+    try
+    {
+        auto& state = Get();
+        std::lock_guard lock(state.fgMutex);
+        const auto it = state.hostFg.find(static_cast<xefg_swapchain_handle_t>(const_cast<void*>(handle)));
+        if (it == state.hostFg.end()) return false;
+        if (reason) *reason = it->second.output ? nullptr : it->second.outputReason ? it->second.outputReason : "not_created";
+        return it->second.output != nullptr;
+    }
+    catch (...) { return false; }
+}
+
 bool HostOwnedHandle(const void* handle, bool fg) noexcept
 {
     if (!handle) return false;
@@ -781,6 +869,27 @@ bool HostOwnedHandle(const void* handle, bool fg) noexcept
             && header[0] == wrapper[0] && header[1] == wrapper[1];
     }
     catch (...) { return false; }
+}
+
+// vkxefg.1: the Vulkan host's xvk device (ConfigureHostFlipMetering keeps NVAPI away from its queues).
+std::atomic<ID3D12Device*> vulkanHostDevice{};
+
+void SetVulkanHostDevice(ID3D12Device* device) noexcept
+{
+    vulkanHostDevice.store(device, std::memory_order_release);
+}
+
+// xemfgsa.3: the XeMFG standalone D3D12 host's device (identity only, never called).
+std::atomic<ID3D12Device*> standaloneHostDevice{};
+
+void SetStandaloneHostDevice(ID3D12Device* device) noexcept
+{
+    standaloneHostDevice.store(device, std::memory_order_release);
+}
+
+bool StandaloneHostDevice(ID3D12Device* device) noexcept
+{
+    return device && device == standaloneHostDevice.load(std::memory_order_acquire);
 }
 
 void WriteLog(const char* stage, const std::string& fields) noexcept
@@ -965,11 +1074,11 @@ void PreparePresent(void* swapchain, uint64_t generation) noexcept
 // dev.48 (the default since beta.1): the shader and model port on OptiScaler's provider image, then the
 // frame-count unlock without the 2x-model site (XeFG remaps its 2x model to the ported model 16 for more than one
 // generated frame). Before OptiScaler's first XeFG creation; kept for the process lifetime. Under fgMutex.
-std::string PublishHostPort(State& state, HMODULE fg, HMODULE ll)
+std::string PublishHostPort(State& state, HMODULE fg, HMODULE ll, UINT vendor)
 {
     if (!state.contexts.empty() || state.model || state.unlock) throw std::runtime_error("route_already_published");
     Configuration(state);
-    auto shaders = std::make_unique<ShaderPort>(fg, Self(), state.root);
+    auto shaders = std::make_unique<ShaderPort>(fg, Self(), state.root, vendor);
     for (const char* key : kReconstructionPrograms)
         if (!shaders->hasProgram(key)) throw std::runtime_error("reconstruction_program_pair_missing");
     auto model = std::make_unique<ModelPort>(fg, true, true);
@@ -985,7 +1094,7 @@ std::string PublishHostPort(State& state, HMODULE fg, HMODULE ll)
 // the first one applies the frame-count unlock to the profiled pair (kept for the process
 // lifetime); without it, or on any mismatch, XeFG runs stock (2x). dev.48/beta.1: unless the 2x model
 // is selected, the ported MFG model is published first (on failure the 2x-model unlock applies as before).
-void ApplyHostUnlock(State& state)
+void ApplyHostUnlock(State& state, UINT vendor)
 {
     std::call_once(state.hostUnlockOnce, [&] {
         try
@@ -1009,7 +1118,7 @@ void ApplyHostUnlock(State& state)
             {
                 try
                 {
-                    const auto names = PublishHostPort(state, fg, ll);
+                    const auto names = PublishHostPort(state, fg, ll, vendor);
                     state.hostUnlocked = true;
                     WriteLog("host_unlock", "\"applied\":["+names+"],\"generated\":"+std::to_string(kGeneratedCapacity)+
                         ",\"model\":\"ported_mfg_model\""+UnlockXellField(ll)+ModelChoiceFields(HostModelChoice()));
@@ -1034,8 +1143,9 @@ void ApplyHostUnlock(State& state)
 
 xefg_swapchain_result_t HostCreateFg(State& state, ID3D12Device* device, xefg_swapchain_handle_t* output)
 {
-    const bool intel = adapter_support::VendorOf(device) == adapter_support::kIntelVendor;
-    if (!intel) ApplyHostUnlock(state);
+    const UINT vendor = adapter_support::VendorOf(device);
+    const bool intel = vendor == adapter_support::kIntelVendor;
+    if (!intel) ApplyHostUnlock(state, vendor);
     bool ported{};
     {
         std::lock_guard lock(state.fgMutex);
@@ -1138,9 +1248,10 @@ void ApplyHostSceneChangeThreshold(xefg_swapchain_handle_t handle)
 // (sdk_pacing.h SetFlipMetering). Decided once per process, at the first host init that reaches the
 // pacing route: an NVIDIA adapter, the NVIDIA driver's own NVAPI (never a fakenvapi: OptiScaler's
 // DisableFlipMetering works through fakenvapi), and NvAPI_D3D12_SetFlipConfig (R570+). OptiScaler.ini
-// [XeFG] XeFGFlipMetering = off turns it off; XeFGFlipMeteringHotkey = on lets Page Up toggle it live
-// (V1.5.1: opt-in); XeFGFlipMeteringLeadUs (0..8000, default 2500) is how early an output inside a
-// metered batch goes.
+// [XeFG] XeFGFlipMetering = off turns it off; XeFGFlipMeteringLeadUs (0..8000, default 2500) is how
+// early an output inside a metered batch goes. V1.7.0-alpha.19 flipkeyoff.1: the release never arms
+// Page Up as the live toggle (V1.5.1's opt-in XeFGFlipMeteringHotkey = on); the key is still read so a
+// leftover line shows in the log as hotkey_setting, with the hotkey off.
 void ConfigureHostFlipMetering(ID3D12Device* device) noexcept
 {
     static std::once_flag once;
@@ -1151,12 +1262,13 @@ void ConfigureHostFlipMetering(ID3D12Device* device) noexcept
             sdk_pacing::SetFlipConfigFunction function{};
             std::wstring setting, leadSetting, hotkeySetting;
             const bool enabled = optiscaler_host::ReadXefgFlipMetering(setting);
-            const bool hotkey = optiscaler_host::ReadXefgFlipMeteringHotkey(hotkeySetting);
+            optiscaler_host::ReadXefgFlipMeteringHotkey(hotkeySetting); // logged only (flipkeyoff.1)
             uint32_t leadUs = 2500;
             uint32_t configuredLead{};
             if (optiscaler_host::ReadXefgFlipMeteringLead(configuredLead, leadSetting)) leadUs = configuredLead;
             else if (!leadSetting.empty()) reason = "invalid_lead_setting";
-            if (adapter_support::VendorOf(device) != adapter_support::kNvidiaVendor) reason = "not_nvidia";
+            if (device && device == vulkanHostDevice.load(std::memory_order_acquire)) reason = "vulkan_host";
+            else if (adapter_support::VendorOf(device) != adapter_support::kNvidiaVendor) reason = "not_nvidia";
             else if (HMODULE nvapi = LoadLibraryExW(L"nvapi64.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32); !nvapi)
                 reason = "nvapi_missing";
             else
@@ -1177,21 +1289,286 @@ void ConfigureHostFlipMetering(ID3D12Device* device) noexcept
                     reason = "set_flip_config_missing";
             }
             sdk_pacing::SetFlipMetering(function, enabled, int64_t(leadUs)*1000);
-            sdk_pacing::SetFlipToggleHotkey(function && hotkey);
+            sdk_pacing::SetFlipToggleHotkey(false);
             WriteLog("host_flip_metering", "\"resolved\":"+std::string(function ? "true" : "false")+
                 ",\"enabled\":"+(function && enabled ? "true" : "false")+",\"lead_us\":"+std::to_string(leadUs)+
                 ",\"setting\":\""+escape(utf8(setting))+"\",\"lead_setting\":\""+escape(utf8(leadSetting))+
-                "\",\"hotkey\":\""+(function && hotkey ? "page_up" : "off")+"\",\"hotkey_setting\":\""+
+                "\",\"hotkey\":\"off\",\"hotkey_setting\":\""+
                 escape(utf8(hotkeySetting))+"\""+(reason.empty() ? "" : ",\"reason\":\""+reason+"\""));
         });
     }
     catch (...) {}
 }
 
+// amdflip.1: amdxc64.dll (AMD's D3D12 user-mode driver, already loaded with the device; FSR finds it with GetModuleHandle
+// too) and its AmdExtD3DCreateInterface, for an AMD adapter by its kernel IDs that is not the Vulkan host's device. The
+// module is pinned for the process. Returns the reason it is not resolved.
+const char* ResolveAmdExt(ID3D12Device* device, sdk_pacing::AmdExtCreateInterfaceFunction& create, HMODULE& driver,
+    std::wstring& path) noexcept
+{
+    create = nullptr; driver = nullptr; path.clear();
+    if (device && device == vulkanHostDevice.load(std::memory_order_acquire)) return "vulkan_host";
+    if (adapter_support::VendorOf(device) != adapter_support::kAmdVendor) return "not_amd";
+    const HMODULE amdxc = GetModuleHandleW(L"amdxc64.dll");
+    if (!amdxc) return "amdxc64_not_loaded";
+    HMODULE pinned{};
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN, reinterpret_cast<LPCWSTR>(amdxc),
+        &pinned);
+    wchar_t name[MAX_PATH]{};
+    if (GetModuleFileNameW(amdxc, name, MAX_PATH)) path = name;
+    driver = amdxc;
+    create = reinterpret_cast<sdk_pacing::AmdExtCreateInterfaceFunction>(GetProcAddress(amdxc, "AmdExtD3DCreateInterface"));
+    return create ? nullptr : "create_interface_missing";
+}
+
+// V1.6.2-alpha.13 amdflip.1: AMD's driver flip meter (sdk_pacing.h SetAmdFlipMeter), decided once per process before
+// the first pacing owner registers (host or tracked route), with amdxc64.dll resolved by ResolveAmdExt. OptiScaler.ini
+// [XeFG] XeFGAmdFlipMeter = auto (default: exclusive or borderless fullscreen, FSR's rule), on (also windowed) or off.
+void ConfigureAmdFlipMeter(ID3D12Device* device) noexcept
+{
+    static std::once_flag once;
+    try
+    {
+        std::call_once(once, [device] {
+            std::wstring setting, path;
+            const int mode = optiscaler_host::ReadXefgAmdFlipMeter(setting);
+            std::string reason;
+            sdk_pacing::AmdExtCreateInterfaceFunction create{};
+            HMODULE driver{};
+            if (!mode) reason = "off";
+            else if (const char* failed = ResolveAmdExt(device, create, driver, path)) reason = failed;
+            sdk_pacing::SetAmdFlipMeter(create, driver, mode);
+            WriteLog("host_amd_flip_meter", "\"resolved\":"+std::string(create ? "true" : "false")+",\"mode\":\""+
+                (mode == 2 ? "on" : mode ? "auto" : "off")+"\",\"setting\":\""+escape(utf8(setting))+"\",\"module\":\""+
+                escape(utf8(path))+"\""+(reason.empty() ? "" : ",\"reason\":\""+reason+"\""));
+        });
+    }
+    catch (...) {}
+}
+
+// V1.6.2-alpha.14 amdqueue.1 (user: "if there is no 7000 or 9000 amd gpu we should set xefgflipque to off by default for
+// those gpus"): on an AMD adapter the flip queue is on by default only where the driver's flip meter is usable (RX
+// 7000/9000 on Adrenalin 26.10.1+, amdflip.1). Without it (RX 6000 and older, older drivers) the queue's held presents
+// and the game's XeLL sleep lock each other below the GPU's rate (The Outer Worlds 2, RX 6700 XT, beta.2/beta.3: XeFG's
+// presenter idle 7-9 ms a batch, GPU 69%, 46 base fps against 55 with XeFG's own pacing;
+// build\amd-flipqueue-lock-20261022), so V1.6.0's CPU pacing is the default there. The ini's XeFGFlipQueue still decides
+// when it is set. Decided once per process with the first D3D12 device that asks (never the Vulkan host's): the meter is
+// opened on the driver's own device behind any proxy, its caps read and released (sdk_pacing.h ProbeAmdFlipMeter). An
+// AMD adapter whose driver cannot be asked counts as without. Logged once as amd_flip_queue_rule (AMD adapters only).
+// alpha.22 amdqueue.2: RX 7000 and later are told by their PCI device ID (adapter_support::AmdRdna3OrNewer), not by the
+// meter. Adrenalin 26.10.1 opens the meter only on RX 9000 (RX 7900 XTX: E_NOINTERFACE from the driver), so amdqueue.1
+// took the queue from RX 7000 too, and with it the latency testers had on beta.3 (a tester, Cyberpunk, RX 7900 XTX, 2x-4x
+// worse on beta.4/.5 until XeFGFlipQueue = on). The probe still runs and is logged; the queue defaults to off only on an
+// AMD adapter older than RDNA 3 without a usable meter.
+bool AmdQueueOffByDefault(ID3D12Device* device) noexcept
+{
+    if (!device || device == vulkanHostDevice.load(std::memory_order_acquire)) return false;
+    static std::once_flag once;
+    static bool without{};
+    try
+    {
+        std::call_once(once, [device] {
+            UINT vendor{}, id{};
+            if (!adapter_support::PciIdsOf(device, vendor, id) || vendor != adapter_support::kAmdVendor) return;
+            sdk_pacing::AmdExtCreateInterfaceFunction create{};
+            HMODULE driver{};
+            std::wstring path;
+            const char* reason = ResolveAmdExt(device, create, driver, path);
+            uint32_t mask{};
+            HRESULT result{};
+            Microsoft::WRL::ComPtr<IUnknown> identity;
+            Microsoft::WRL::ComPtr<ID3D12Device> native;
+            if (!reason && (!single_overlay::dx12::DeviceIdentity(device, identity) || FAILED(identity.As(&native)) || !native))
+                reason = "device_identity";
+            if (!reason) reason = sdk_pacing::ProbeAmdFlipMeter(create, driver, native.Get(), mask, result);
+            const bool rdna3 = adapter_support::AmdRdna3OrNewer(id);
+            without = reason != nullptr && !rdna3;
+            WriteLog("amd_flip_queue_rule", "\"flip_meter\":"+std::string(reason ? "false" : "true")+
+                ",\"flip_queue_default\":\""+(without ? "off" : "on")+"\""+(reason ? ",\"reason\":\""+std::string(reason)+"\"" : "")+
+                ",\"device_id\":"+std::to_string(id)+",\"rdna3_or_newer\":"+(rdna3 ? "true" : "false")+
+                ",\"caps_mask\":"+std::to_string(mask)+",\"result\":"+std::to_string(result)+",\"module\":\""+
+                escape(utf8(path))+"\"");
+        });
+    }
+    catch (...) {}
+    return without;
+}
+
+// V1.6.1 pacing.1: the flip queue (sdk_pacing.h SetFlipQueue), decided once per process before the first pacing
+// owner registers (host or tracked route). OptiScaler.ini [XeFG] XeFGFlipQueue = off keeps V1.6.0's CPU pacing;
+// XeFGFlipQueueBufferPct (0..100, default 50) is the base jitter buffer in percent of a batch.
+// firstready.1: XeFGFlipQueueFirst = buffer keeps that buffer before each batch's first output; by default the first
+// output flips at readiness (sdk_pacing.h SetFlipQueueFirst).
+// vkxefg.2: the Vulkan host's flip queue is off unless the ini sets it. There the game's hand-over follows the
+// meter's own releases, so one slow first frame (start-up, a load) holds the meter at that cadence for seconds
+// (harness through OptiScaler, 4x: 6 fps base for 10 s, then 125; queue off 155 from the start), and #598 measured
+// the queue off evener at a 40 fps cap as well.
+// xemfgsa.3: so is the XeMFG standalone D3D12 host's (Subnautica 2, RTX 4080, 6x on 8 native buffers: the game spent
+// 22 ms per base frame inside XeFG's Present, outputs waited ~7 ms at their gates and the clock learned ~9 ms per output
+// from hand-overs that followed its own releases, 100-110 fps against DLSS MFG's ~180; coupled_lead on 299 of 300
+// batches). There NVIDIA's driver flip metering and the CPU pacer space the outputs, as for DLSS-G.
+void ConfigureFlipQueue(ID3D12Device* device) noexcept
+{
+    static std::once_flag once;
+    try
+    {
+        std::call_once(once, [device] {
+            std::wstring setting, bufferSetting;
+            bool enabled = optiscaler_host::ReadXefgFlipQueue(setting);
+            if (enabled && device && device == vulkanHostDevice.load(std::memory_order_acquire) &&
+                !optiscaler_host::XefgFlipQueueSet())
+            {
+                enabled = false;
+                setting = L"auto (Vulkan host)";
+            }
+            else if (enabled && StandaloneHostDevice(device) && !optiscaler_host::XefgFlipQueueSet())
+            {
+                enabled = false;
+                setting = L"auto (XeMFG standalone)";
+            }
+            // amdqueue.1/.2: AMD older than RX 7000 without the driver's flip meter (AmdQueueOffByDefault).
+            else if (enabled && !optiscaler_host::XefgFlipQueueSet() && AmdQueueOffByDefault(device))
+            {
+                enabled = false;
+                setting = L"auto (AMD without flip meter)";
+            }
+            uint32_t percent = 50, configured{};
+            const bool buffer = optiscaler_host::ReadXefgFlipQueueBuffer(configured, bufferSetting);
+            if (buffer) percent = configured;
+            // firstready.1: batch-first outputs at readiness unless XeFGFlipQueueFirst = buffer.
+            std::wstring firstSetting;
+            const bool firstReady = optiscaler_host::ReadXefgFlipQueueFirst(firstSetting);
+            sdk_pacing::SetFlipQueueFirst(firstReady);
+            sdk_pacing::SetFlipQueue(enabled, int(percent));
+            WriteLog("flip_queue_config", "\"enabled\":"+std::string(enabled ? "true" : "false")+
+                ",\"buffer_percent\":"+std::to_string(percent)+",\"setting\":\""+escape(utf8(setting))+
+                "\",\"buffer_setting\":\""+escape(utf8(bufferSetting))+"\",\"first\":\""+(firstReady ? "ready" : "buffer")+
+                "\",\"first_setting\":\""+escape(utf8(firstSetting))+"\""+
+                (!buffer && !bufferSetting.empty() ? ",\"reason\":\"invalid_buffer_setting\"" : ""));
+        });
+    }
+    catch (...) {}
+}
+
+// pacing.1: the back buffers XeFG's native swap chain is created with for OptiScaler's contexts (0 = the game's
+// count): OptiScaler.ini [XeFG] XeFGNativeBuffers (default 8) while the flip queue is on. Decided once per process.
+// menucap.1: at most 8, the buffers OptiScaler's menu can draw on (optiscaler_host.h kMenuBackBuffers); a higher
+// setting is logged with what it asked for.
+// menu16.1: an OptiScaler with the upstream menu fix holds 16, so its default is 10 again and the cap 16
+// (optiscaler_host.h MenuBackBuffers); menu_fix in the log says which limit applied.
+// amdqueue.1/.2: none where the flip queue defaults to off on AMD older than RX 7000 without the driver's flip meter
+// (device: the presentation queue's, AmdQueueOffByDefault). xemfgsa.3: nor on the XeMFG standalone host, whose queue is
+// off (ConfigureFlipQueue).
+uint32_t HostNativeBuffers(ID3D12Device* device) noexcept
+{
+    static std::once_flag once;
+    static uint32_t buffers{};
+    try
+    {
+        std::call_once(once, [device] {
+            std::wstring queueSetting, setting;
+            uint32_t requested{};
+            const bool queue = optiscaler_host::ReadXefgFlipQueue(queueSetting);
+            const bool amdOff = queue && !optiscaler_host::XefgFlipQueueSet() && AmdQueueOffByDefault(device);
+            const bool standaloneOff = queue && !optiscaler_host::XefgFlipQueueSet() && StandaloneHostDevice(device);
+            buffers = queue && !amdOff && !standaloneOff ? optiscaler_host::ReadXefgNativeBuffers(setting, requested) : 0;
+            WriteLog("native_buffers_config", "\"buffers\":"+std::to_string(buffers)+",\"requested\":"+std::to_string(requested)+
+                ",\"limit\":"+std::to_string(optiscaler_host::MenuBackBuffers())+",\"menu_fix\":"+
+                (optiscaler_host::MenuBackBuffers() >= optiscaler_host::kFixedMenuBackBuffers ? "true" : "false")+
+                ",\"setting\":\""+escape(utf8(setting))+"\""+
+                (amdOff ? ",\"reason\":\"amd_without_flip_meter\"" : standaloneOff ? ",\"reason\":\"xemfg_standalone\""
+                    : requested > buffers ? ",\"reason\":\"optiscaler_menu_limit\"" : ""));
+        });
+    }
+    catch (...) {}
+    return buffers;
+}
+
+// factoryhook.1: with factory_not_dxgi, the modules holding the factory's table and its CreateSwapChainForHwnd
+// (table_system_dxgi true: dxgi.dll's own table with that slot patched; false: another module's factory wrapper).
+void LogNativeBuffersScope(const sdk_pacing::NativeBuffersScope& scope) noexcept
+{
+    static std::atomic<unsigned> logs{};
+    if (logs.fetch_add(1, std::memory_order_relaxed) < 8)
+        try
+        {
+            const std::string reason = scope.Reason();
+            WriteLog("native_buffers_scope", "\"applied\":false,\"reason\":\""+reason+"\""+
+                (reason == "factory_not_dxgi" ? ",\"table_module\":\""+escape(utf8(scope.TableModule()))+
+                    "\",\"create_module\":\""+escape(utf8(scope.CreateModule()))+"\",\"table_system_dxgi\":"+
+                    (scope.TableSystemDxgi() ? "true" : "false") : std::string()));
+        }
+        catch (...) {}
+}
+
+// xefgmenu.1: RTXMFG's menu on XeFG's native output chain of an OptiScaler context. XeFG creates that chain on the
+// factory OptiScaler passes, inside InitFromSwapChainDesc on OptiScaler's thread (NativeBuffersScope), and presents every
+// output frame on it, as OptiScaler's own menu sees it. Games whose own swapchain creation never reaches our factory
+// gateway get the menu there (Honkai Star Rail: OptiScaler's XeFG chain came before MHYPBase.dll's imports were armed).
+// Not on the chain GetSwapChainPtr returns: OptiScaler detours the code behind that object's vtable (HookFGSwapchain).
+struct HostOutput
+{
+    uint64_t generation{};
+    bool wanted{}, called{};
+    const char* reason{};
+    ComPtr<IDXGISwapChain> chain;
+};
+
+HostOutput PrepareHostOutput(State& state, xefg_swapchain_handle_t handle)
+{
+    HostOutput output;
+    std::lock_guard lock(state.fgMutex);
+    const auto it = state.hostFg.find(handle);
+    if (it == state.hostFg.end()) return output;
+    output.generation = it->second.generation;
+    if (it->second.output) output.reason = "already_attached";
+    else output.wanted = single_overlay::dx12::OutputSwapchainWanted();
+    return output;
+}
+
+void AttachHostOutput(IUnknown* queue, HWND window, IDXGISwapChain1** chain, void* context) noexcept
+{
+    auto& output = *static_cast<HostOutput*>(context);
+    output.called = true;
+    output.reason = single_overlay::dx12::AttachOutputSwapchain(chain, queue, window, output.generation,
+        output.chain.ReleaseAndGetAddressOf());
+}
+
+// After the provider's initialization: the context keeps the attached chain; a failed initialization retires its menu.
+void FinishHostOutput(State& state, xefg_swapchain_handle_t handle, HostOutput& output, xefg_swapchain_result_t result)
+{
+    bool kept{};
+    if (output.chain && result == XEFG_SWAPCHAIN_RESULT_SUCCESS)
+    {
+        std::lock_guard lock(state.fgMutex);
+        const auto it = state.hostFg.find(handle);
+        if (it != state.hostFg.end() && it->second.generation == output.generation && !it->second.output)
+        {
+            it->second.output = output.chain;
+            kept = true;
+        }
+    }
+    const bool dropped = output.chain && !kept;
+    const bool retired = dropped && single_overlay::dx12::RetireOutputSwapchain(output.chain.Get(), output.generation);
+    output.chain.Reset();
+    const char* reason = output.reason ? output.reason : !output.wanted ? "ui_mode" : !output.called ? "not_created"
+        : dropped ? "initialization_failed" : nullptr;
+    {
+        std::lock_guard lock(state.fgMutex);
+        const auto it = state.hostFg.find(handle);
+        if (it != state.hostFg.end() && it->second.generation == output.generation)
+            it->second.outputReason = kept ? nullptr : reason ? reason : "not_kept";
+    }
+    WriteLog("host_ui_attachment", "\"generation\":"+std::to_string(output.generation)+",\"attached\":"+
+        (kept ? "true" : "false")+(reason ? ",\"reason\":\""+std::string(reason)+"\"" : std::string())+
+        (dropped ? ",\"init_result\":"+std::to_string(result)+",\"retired\":"+(retired ? "true" : "false") : std::string()));
+}
+
 template<class Initialize>
-xefg_swapchain_result_t HostInitFg(State& state, xefg_swapchain_handle_t handle, Initialize initialize)
+xefg_swapchain_result_t HostInitFg(State& state, xefg_swapchain_handle_t handle, HostOutput* output, Initialize initialize)
 {
     const auto result = initialize();
+    if (output) try { FinishHostOutput(state, handle, *output, result); } catch (...) {}
     if (result != XEFG_SWAPCHAIN_RESULT_SUCCESS) return result;
     {
         std::lock_guard lock(state.fgMutex);
@@ -1224,25 +1601,48 @@ xefg_swapchain_result_t HostInitFg(State& state, xefg_swapchain_handle_t handle,
     else if (sdk_pacing::Install(fg, failure))
     {
         ConfigureHostFlipMetering(host.device.Get());
+        ConfigureFlipQueue(host.device.Get());
+        ConfigureAmdFlipMeter(host.device.Get());
         host.paced = sdk_pacing::Register(handle, host.generation, host.device.Get(), failure);
     }
     WriteLog("host_pacing_owner", "\"generation\":"+std::to_string(host.generation)+",\"handle\":"+
         std::to_string(uintptr_t(handle))+",\"registered\":"+(host.paced ? "true" : "false")+
         (failure.empty() ? "" : ",\"reason\":\""+escape(failure)+"\""));
+    // pacing.1: the ring depth this initialization sized the chain with.
+    uint64_t depth{};
+    if (state.ring && sdk_pacing::OutputRingDepth(handle, state.ring->CountOffset(), depth))
+        WriteLog("output_ring", "\"generation\":"+std::to_string(host.generation)+",\"depth\":"+std::to_string(depth)+
+            ",\"expected\":"+std::to_string(state.ring->Depth()));
     return result;
 }
 
 xefg_swapchain_result_t HostDestroyFg(State& state, xefg_swapchain_handle_t handle)
 {
     uint64_t generation{};
+    ComPtr<IDXGISwapChain> output;
     {
         std::lock_guard lock(state.fgMutex);
         const auto it = state.hostFg.find(handle);
         if (it != state.hostFg.end())
         {
             generation = it->second.generation;
+            output = std::move(it->second.output);
             if (it->second.paced) { sdk_pacing::Unregister(handle, generation); it->second.paced = false; }
         }
+    }
+    // xefgmenu.1: the menu on XeFG's output chain retires before the destruction (outside the lock: its GPU work
+    // drains), and our reference goes: XeFG releases that chain as its last user (POINTER_STILL_IN_USE otherwise).
+    // A Present or resize in flight on it finishes first.
+    if (output)
+    {
+        bool retired{};
+        for (int attempt = 0; attempt < 250; ++attempt)
+        {
+            if ((retired = single_overlay::dx12::RetireOutputSwapchain(output.Get(), generation))) break;
+            Sleep(1);
+        }
+        output.Reset();
+        WriteLog("host_ui_detach", "\"generation\":"+std::to_string(generation)+",\"retired\":"+(retired ? "true" : "false"));
     }
     const auto result = original.xefgSwapChainDestroy(handle);
     std::lock_guard lock(state.fgMutex);
@@ -1455,7 +1855,9 @@ static xefg_swapchain_result_t InitializeFg(xefg_swapchain_handle_t handle,
         std::string pacingFailure;
         // dev.42: the plain owner dev.41 gave OptiScaler's own XeFG: each extra output goes through
         // XeFG's own pacing wait and each deadline follows the batch interval (DLSS-G's CPU pacer
-        // rules, NativeDeadline).
+        // rules, NativeDeadline). pacing.1: or the flip queue (ConfigureFlipQueue).
+        ConfigureFlipQueue(context->device.Get());
+        ConfigureAmdFlipMeter(context->device.Get());
         if (!sdk_pacing::Register(handle, context->generation, context->device.Get(), pacingFailure))
         {
             context->poisoned = true;
@@ -1495,7 +1897,7 @@ xefg_swapchain_result_t Hook_xefgSwapChainD3D12InitFromSwapChain(xefg_swapchain_
     ID3D12CommandQueue* queue, const xefg_swapchain_d3d12_init_params_t* input)
 {
     if (tHostCall && HostOwnedHandle(handle, true))
-        return HostInitFg(Get(), handle, [&] { return original.xefgSwapChainD3D12InitFromSwapChain(handle, queue, input); });
+        return HostInitFg(Get(), handle, nullptr, [&] { return original.xefgSwapChainD3D12InitFromSwapChain(handle, queue, input); });
     return InitializeFg(handle, queue, input, nullptr, nullptr, nullptr, nullptr);
 }
 xefg_swapchain_result_t Hook_xefgSwapChainD3D12InitFromSwapChainDesc(xefg_swapchain_handle_t handle,
@@ -1503,8 +1905,23 @@ xefg_swapchain_result_t Hook_xefgSwapChainD3D12InitFromSwapChainDesc(xefg_swapch
     ID3D12CommandQueue* queue, IDXGIFactory2* factory, const xefg_swapchain_d3d12_init_params_t* input)
 {
     if (tHostCall && HostOwnedHandle(handle, true))
-        return HostInitFg(Get(), handle, [&] {
+    {
+        auto& state = Get();
+        HostOutput output = PrepareHostOutput(state, handle);
+        return HostInitFg(state, handle, &output, [&] {
+            // pacing.1: XeFG's native swap chain gets the flip queue's back buffers (sdk_pacing.h NativeBuffersScope).
+            Microsoft::WRL::ComPtr<ID3D12Device> queueDevice;
+            if (queue) queue->GetDevice(IID_PPV_ARGS(&queueDevice));
+            // xefgmenu.1: and RTXMFG's menu (AttachHostOutput).
+            const sdk_pacing::NativeBuffersScope buffers(factory, NativeFgModule(), HostNativeBuffers(queueDevice.Get()),
+                output.wanted ? &AttachHostOutput : nullptr, &output);
+            if (buffers.Reason())
+            {
+                LogNativeBuffersScope(buffers);
+                if (output.wanted && !output.reason) output.reason = buffers.Reason();
+            }
             return original.xefgSwapChainD3D12InitFromSwapChainDesc(handle, window, desc, full, queue, factory, input); });
+    }
     if (!desc) return kArgument;
     return InitializeFg(handle, queue, input, window, desc, full, factory);
 }

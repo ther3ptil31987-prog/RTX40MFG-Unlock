@@ -7,6 +7,15 @@
 //               InitializeASI under the loader lock.
 //   late        RTXMFG first, OptiScaler mapped afterwards.
 //   optin       proxy layout with "optiScalerUi":"rtxmfg" in the saved control.
+//   hidden      proxy layout with "optiScalerUi":"optiscaler": no RTXMFG menu (V1.6.2's
+//               default, alpha.16-alpha.18's too).
+//   shared      proxy layout with "optiScalerUi":"shared": RTXMFG's menu offers the
+//               DLSS presets and DLSS 5. The default without the key again since
+//               V1.7.0 alpha.19 (optimenu.1), so proxy, plugin, late and the
+//               Streamline modes run shared.
+//   forza       proxy layout without the key, run as forza_steamworks_release_final.exe
+//               (run.py): a ForzaTech executable defaults to hidden.
+//   forza-shared  the same with "optiScalerUi":"shared": the opt-in still applies.
 //   impostor    a non-OptiScaler caller invokes InitializeASI.
 //   fakenvapi   a game-folder nvapi64.dll that answers fakenvapi's interface.
 //   streamline  proxy layout; OptiScaler's private Streamline
@@ -20,6 +29,10 @@
 //               call reaches the instance (where slOnPluginStartup reads it).
 //               Only an armed RTX 30 reaches the RTX 30 startup decision there.
 //   streamline-warp  the same with a WARP device: nothing is selected or patched.
+//   xefg-output, xefg-output-optin, xefg-output-hidden, xefg-output-factory
+//               (xefgmenu.1, with the XeSS pair): the menu on OptiScaler's XeFG
+//               output when no factory route saw the game's swapchain
+//               (RunXefgOutput).
 // The Streamline modes check that RTXMFG routes and detours only the game's
 // interposer (and only slSetD3DDevice of OptiScaler's private one) and that
 // calls never cross instances.
@@ -395,6 +408,232 @@ int RunXefgEarly(const std::filesystem::path& here, const std::filesystem::path&
     std::printf("COMPLETE optiscaler xefg-%s failures=%d\n", pluginLayout ? "plugin" : "proxy", gFailures);
     return gFailures ? 1 : 0;
 }
+
+#if defined(OPTISCALER_FIXTURE_XEFG)
+size_t Count(const std::string& text, const char* needle)
+{
+    size_t count = 0;
+    for (size_t at = text.find(needle); at != std::string::npos; at = text.find(needle, at + 1)) ++count;
+    return count;
+}
+
+std::string StageLine(const std::string& log, const char* stage)
+{
+    const std::string key = std::string("\"stage\":\"") + stage + "\"";
+    const size_t at = log.rfind(key);
+    return at == std::string::npos ? std::string() : log.substr(at, log.find('\n', at) - at);
+}
+
+LRESULT CALLBACK OutputWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    return DefWindowProcW(window, message, wParam, lParam);
+}
+
+void Pump()
+{
+    MSG message{};
+    while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&message); DispatchMessageW(&message); }
+}
+
+// xefgmenu.1 (Honkai Star Rail, Unity 2019.4, OptiScaler as dbghelp.dll with XeFG output): the game created its
+// swapchain through imports RTXMFG had not armed yet, so the factory route never saw it and the menu never attached.
+// Here OptiScaler's plug-in route builds its XeFG output before this executable makes any factory call: RTXMFG's menu
+// attaches on XeFG's native output chain during OptiScaler's InitFromSwapChainDesc and draws on XeFG's output frames.
+//   xefg-output          "shared" (the default): registered there; nothing drawn while no DLSS feature runs
+//                        (the shared menu's rule).
+//   xefg-output-optin    "rtxmfg": registered, and the menu's startup hint is drawn there.
+//   xefg-output-hidden   "optiscaler": nothing attaches; XeFG presents unchanged.
+//   xefg-output-factory  shared; OptiScaler's factory hook answers this executable's own creation, made through
+//                        RTXMFG's factory proxy (the Subnautica 2 order): the factory route's one renderer only.
+int RunXefgOutput(const std::filesystem::path& here, const std::filesystem::path& host,
+    const std::filesystem::path& plugin, const std::filesystem::path& status, const std::wstring& variant)
+{
+    const bool optin = variant == L"xefg-output-optin", hidden = variant == L"xefg-output-hidden";
+    const bool factoryRoute = variant == L"xefg-output-factory";
+    SetEnvironmentVariableW(L"RTXMFG_TEST_OPTISCALER_XEFG", (here / L"OptiScaler").c_str());
+    SetEnvironmentVariableW(L"RTXMFG_TEST_OPTISCALER_PLUGIN", plugin.c_str());
+    HMODULE optiscaler = LoadLibraryW(host.c_str());
+    HMODULE rtxmfg = GetModuleHandleW(plugin.c_str());
+    SetEnvironmentVariableW(L"RTXMFG_TEST_OPTISCALER_XEFG", nullptr);
+    SetEnvironmentVariableW(L"RTXMFG_TEST_OPTISCALER_PLUGIN", nullptr);
+
+    using StateFn = void*(__cdecl*)(unsigned char*);
+    using SwapchainFn = int(__cdecl*)(ID3D12CommandQueue*, HWND, UINT, UINT, void**, IDXGISwapChain1**);
+    using DestroyFn = int(__cdecl*)(void*);
+    using IntFn = int(__cdecl*)();
+    using HookedFn = void*(__cdecl*)(int*, int*);
+    auto state = optiscaler ? reinterpret_cast<StateFn>(GetProcAddress(optiscaler, "OptiFixtureXefgCreate")) : nullptr;
+    auto makeOutput = optiscaler ? reinterpret_cast<SwapchainFn>(GetProcAddress(optiscaler, "OptiFixtureXefgSwapchain")) : nullptr;
+    auto destroyOutput = optiscaler ? reinterpret_cast<DestroyFn>(GetProcAddress(optiscaler, "OptiFixtureXefgDestroy")) : nullptr;
+    auto realFactory = optiscaler ? reinterpret_cast<IntFn>(GetProcAddress(optiscaler, "OptiFixtureRealFactory")) : nullptr;
+    auto hookFactory = optiscaler ? reinterpret_cast<IntFn>(GetProcAddress(optiscaler, "OptiFixtureHookFactory")) : nullptr;
+    auto hooked = optiscaler ? reinterpret_cast<HookedFn>(GetProcAddress(optiscaler, "OptiFixtureHookedXefg")) : nullptr;
+    unsigned char resolved[16]{};
+    auto* create = state ? static_cast<const unsigned char*>(state(resolved)) : nullptr;
+    Check(create && makeOutput && destroyOutput && realFactory && hookFactory && hooked,
+        "OptiScaler stand-in loaded its XeSS pair and builds OptiScaler's XeFG output");
+    Check(rtxmfg != nullptr, "stand-in loaded plugins\\MFGUnlocker.asi and called InitializeASI");
+    if (!create || !makeOutput || !destroyOutput || !realFactory || !hookFactory || !hooked || !rtxmfg) return 1;
+    bool routed = false;
+    for (unsigned waited = 0; waited <= 5000 && !routed; waited += 5)
+    {
+        routed = std::memcmp(resolved, create, sizeof(resolved)) != 0;
+        if (!routed) Sleep(5);
+    }
+    Check(routed, "RTXMFG's XeFG route is live before OptiScaler's first creation");
+    const char* owner = optin ? "\"rtxmfg\"" : hidden ? "\"optiscaler\"" : "\"shared\"";
+    const std::string json = WaitStatus(status, [&](const std::string& text) {
+        return Has(text, "optiScalerRoute", "\"plugin\"") && Has(text, "optiScalerUiOwner", owner); });
+    Check(Has(json, "optiScalerUiOwner", owner), "the saved UI mode is in force");
+
+    // The game's renderer: a D3D12 device on the default adapter, its direct queue and window.
+    using DeviceFn = HRESULT(WINAPI*)(IUnknown*, D3D_FEATURE_LEVEL, REFIID, void**);
+    HMODULE d3d12 = LoadLibraryExW(L"d3d12.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    auto createDevice = d3d12 ? reinterpret_cast<DeviceFn>(GetProcAddress(d3d12, "D3D12CreateDevice")) : nullptr;
+    Microsoft::WRL::ComPtr<ID3D12Device> device;
+    Microsoft::WRL::ComPtr<ID3D12CommandQueue> queue;
+    if (createDevice) createDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device));
+    D3D12_COMMAND_QUEUE_DESC queueDesc{};
+    queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    if (device) device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&queue));
+    WNDCLASSEXW windowClass{sizeof(windowClass)};
+    windowClass.lpfnWndProc = OutputWindowProc;
+    windowClass.hInstance = GetModuleHandleW(nullptr);
+    windowClass.lpszClassName = L"RTXMFGXefgOutputCase";
+    RegisterClassExW(&windowClass);
+    HWND window = CreateWindowExW(0, windowClass.lpszClassName, L"XeFG output", WS_OVERLAPPEDWINDOW, 40, 40, 1296, 759,
+        nullptr, nullptr, windowClass.hInstance, nullptr);
+    if (window) ShowWindow(window, SW_SHOWNA);
+    Pump();
+    Check(device && queue && window, "D3D12 device (default adapter), direct queue and window created");
+    if (!device || !queue || !window) return 1;
+    Check(realFactory() == 1, "the factory OptiScaler passes XeFG is DXGI's own object");
+    const auto before = Query(rtxmfg);
+    Check(before.swapchainWrappersCreated == 0, "no swapchain wrapped before OptiScaler's XeFG output");
+    std::printf("INFO before: factoryGatewayCalls=%llu factoryWrappers=%llu\n",
+        static_cast<unsigned long long>(before.factoryGatewayCalls), static_cast<unsigned long long>(before.factoryWrappersCreated));
+
+    void* context = nullptr;
+    Microsoft::WRL::ComPtr<IDXGISwapChain1> chain;
+    if (factoryRoute)
+    {
+        Check(hookFactory() == 0, "OptiScaler's factory hook installed");
+        // This executable's own factory, requested through its GetProcAddress: RTXMFG's gateway wraps it.
+        using FactoryFn = HRESULT(WINAPI*)(REFIID, void**);
+        HMODULE dxgi = LoadLibraryExW(L"dxgi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        auto createFactory = dxgi ? reinterpret_cast<FactoryFn>(GetProcAddress(dxgi, "CreateDXGIFactory1")) : nullptr;
+        Microsoft::WRL::ComPtr<IDXGIFactory2> factory;
+        if (createFactory) createFactory(IID_PPV_ARGS(&factory));
+        Check(factory && Query(rtxmfg).factoryWrappersCreated > before.factoryWrappersCreated,
+            "the game's factory is RTXMFG's factory proxy");
+        if (!factory) return 1;
+        DXGI_SWAP_CHAIN_DESC1 desc{};
+        desc.Width = 1280; desc.Height = 720; desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; desc.SampleDesc.Count = 1;
+        desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT; desc.BufferCount = 3; desc.Scaling = DXGI_SCALING_STRETCH;
+        desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+        const HRESULT created = factory->CreateSwapChainForHwnd(queue.Get(), window, &desc, nullptr, nullptr, &chain);
+        int calls = 0, result = 0;
+        context = hooked(&calls, &result);
+        std::printf("INFO factory creation 0x%08X hook calls=%d result=%d\n", static_cast<unsigned>(created), calls, result);
+        Check(SUCCEEDED(created) && chain && calls == 1 && result == 0 && context,
+            "OptiScaler's hook answered the game's creation with its XeFG output");
+    }
+    else
+    {
+        const int result = makeOutput(queue.Get(), window, 1280, 720, &context, chain.GetAddressOf());
+        std::printf("INFO OptiScaler XeFG output result %d\n", result);
+        Check(result == 0 && context && chain, "OptiScaler's XeFG output created (CreateContext, InitFromSwapChainDesc, GetSwapChainPtr)");
+    }
+    if (!context || !chain) return 1;
+
+    WaitLog("\"stage\":\"host_ui_attachment\"");
+    std::string log = WaitLog("\"stage\":\"host_pacing_owner\"");
+    const std::string attachment = StageLine(log, "host_ui_attachment");
+    std::printf("INFO %s\n", attachment.c_str());
+    Check(log.find("\"stage\":\"host_context_create\"") != std::string::npos
+        && log.find("\"stage\":\"host_pacing_owner\"") != std::string::npos,
+        "OptiScaler's XeFG creation and initialization reached RTXMFG's host route");
+    const auto attached = Query(rtxmfg);
+    const size_t renderers = Count(log, "MFG_PROXY_UI renderer registered");
+    if (hidden)
+    {
+        Check(attachment.find("\"attached\":false") != std::string::npos
+            && attachment.find("\"reason\":\"ui_mode\"") != std::string::npos, "hidden: no menu attaches to XeFG's output");
+        Check(renderers == 0 && attached.swapchainWrappersCreated == 0, "hidden: no renderer and no swapchain proxy");
+    }
+    else if (factoryRoute)
+    {
+        Check(attachment.find("\"attached\":false") != std::string::npos
+            && attachment.find("\"reason\":\"factory_route\"") != std::string::npos,
+            "XeFG's output chain is left to the factory route in flight");
+        Check(renderers == 1 && log.find("MFG_PROXY_UI renderer registered layer=creation-return base=OptiScaler swapchain") != std::string::npos,
+            "one renderer for the window: the factory route's, on OptiScaler's XeFG swapchain");
+        Check(attached.swapchainWrappersCreated == 1 && attached.liveSwapchainWrappers == 1, "one swapchain proxy");
+    }
+    else
+    {
+        Check(attachment.find("\"attached\":true") != std::string::npos,
+            "the menu attached on XeFG's output chain inside OptiScaler's InitFromSwapChainDesc");
+        Check(log.find("MFG_PROXY_UI renderer registered layer=xefg-output") != std::string::npos
+            && log.find("MFG_PROXY_UI XeFG output swapchain attached") != std::string::npos,
+            "renderer registered on XeFG's output chain (device, queue and LUID matched)");
+        Check(renderers == 1 && attached.swapchainWrappersCreated == 1 && attached.liveSwapchainWrappers == 1,
+            "one renderer and one swapchain proxy for the window");
+    }
+
+    // The game's frames, presented through the XeFG swapchain (generation off): XeFG presents each on its output chain.
+    const auto presentBefore = Query(rtxmfg);
+    unsigned presented = 0;
+    HRESULT last = S_OK;
+    for (int frame = 0; frame < 120; ++frame)
+    {
+        Pump();
+        last = chain->Present(0, 0);
+        if (SUCCEEDED(last)) ++presented;
+        Sleep(4);
+    }
+    Sleep(200);
+    Pump();
+    const auto presentAfter = Query(rtxmfg);
+    std::printf("INFO presented=%u last=0x%08X dxgiFrames %llu->%llu renderedFrames %llu->%llu\n", presented,
+        static_cast<unsigned>(last), static_cast<unsigned long long>(presentBefore.dxgiFrames),
+        static_cast<unsigned long long>(presentAfter.dxgiFrames), static_cast<unsigned long long>(presentBefore.renderedFrames),
+        static_cast<unsigned long long>(presentAfter.renderedFrames));
+    Check(presented == 120, "the game's 120 Presents through XeFG's swapchain succeed");
+    const uint64_t sessionFrames = presentAfter.dxgiFrames - presentBefore.dxgiFrames;
+    const uint64_t drawn = presentAfter.renderedFrames - presentBefore.renderedFrames;
+    if (hidden)
+        Check(sessionFrames == 0 && drawn == 0, "hidden: no menu session presents");
+    else
+        Check(sessionFrames > 0, factoryRoute ? "the factory route's session sees the game's Presents"
+            : "the menu session sees XeFG's output Presents");
+    if (optin)
+        Check(drawn > 0, "the menu draws on XeFG's output chain (startup hint)");
+    else if (!hidden)
+        Check(drawn == 0, "shared UI mode: nothing drawn while no DLSS feature runs");
+
+    // Teardown: the game's last reference to the XeFG swapchain goes, then OptiScaler destroys the XeFG context
+    // (XeFG 1.3.1 refuses its destruction with POINTER_STILL_IN_USE while that pointer is held).
+    chain.Reset();
+    const int destroyed = destroyOutput(context);
+    std::printf("INFO XeFG context destruction result %d\n", destroyed);
+    Check(destroyed == 0, "OptiScaler's XeFG context destroyed");
+    log = WaitLog("\"stage\":\"host_context_destroy\"");
+    if (!hidden && !factoryRoute)
+    {
+        log = WaitLog("\"stage\":\"host_ui_detach\"");
+        const std::string detach = StageLine(log, "host_ui_detach");
+        std::printf("INFO %s\n", detach.c_str());
+        Check(detach.find("\"retired\":true") != std::string::npos, "the menu retired with the XeFG context");
+    }
+    else Check(log.find("\"stage\":\"host_ui_detach\"") == std::string::npos, "no menu to retire with the XeFG context");
+    Check(Query(rtxmfg).liveSwapchainWrappers == 0, "no swapchain proxy left");
+    DestroyWindow(window);
+    Pump();
+    std::printf("COMPLETE optiscaler %ls failures=%d\n", variant.c_str(), gFailures);
+    return gFailures ? 1 : 0;
+}
+#endif
 }
 
 int wmain(int argc, wchar_t** argv)
@@ -409,16 +648,30 @@ int wmain(int argc, wchar_t** argv)
     SetEnvironmentVariableW(L"RTX_MFG_CONFIG_PATH", config.c_str());
     SetEnvironmentVariableW(L"RTX_MFG_STATUS_PATH", status.c_str());
     const bool known = mode == L"standalone" || mode == L"proxy" || mode == L"plugin"
-        || mode == L"late" || mode == L"optin" || mode == L"impostor" || mode == L"fakenvapi"
+        || mode == L"late" || mode == L"optin" || mode == L"hidden" || mode == L"shared" || mode == L"impostor"
+        || mode == L"fakenvapi"
         || mode == L"streamline" || mode == L"second-streamline" || mode == L"streamline-device"
-        || mode == L"streamline-warp" || mode == L"xefg-proxy" || mode == L"xefg-plugin";
+        || mode == L"streamline-warp" || mode == L"xefg-proxy" || mode == L"xefg-plugin"
+        || mode == L"xefg-output" || mode == L"xefg-output-optin" || mode == L"xefg-output-hidden"
+        || mode == L"xefg-output-factory" || mode == L"forza" || mode == L"forza-shared";
+    const bool forza = mode == L"forza" || mode == L"forza-shared";
     const bool privateStartup = mode == L"streamline-device" || mode == L"streamline-warp";
     if (!known || std::filesystem::exists(config)) return 2;
+    if (forza)
+    {
+        // The gate's file-name rule: this harness must run under a Forza executable name.
+        wchar_t self[MAX_PATH]{};
+        GetModuleFileNameW(nullptr, self, MAX_PATH);
+        if (_wcsnicmp(std::filesystem::path(self).filename().c_str(), L"forza", 5) != 0) return 2;
+    }
 
     std::string saved = R"({"followGame":false,"mode":"fixed","multiplier":4,"dlssgPreset":1,)"
         R"("vsyncMode":1,"reflexFrameLimitFps":90,"xessMultiplier":4,"xessForceEnable":true,)"
-        R"("xessLowLatencyMode":2,"xessFrameLimitFps":120,"generatedOnlyDebug":true)";
-    saved += mode == L"optin" ? R"(,"optiScalerUi":"rtxmfg"})" : "}";
+        R"("xessLowLatencyMode":2,"xessFrameLimitFps":120,"generatedOnlyDebug":true,"dlssSrPreset":11,"dlss5":true)";
+    saved += mode == L"optin" || mode == L"xefg-output-optin" ? R"(,"optiScalerUi":"rtxmfg"})"
+        : mode == L"hidden" || mode == L"xefg-output-hidden" ? R"(,"optiScalerUi":"optiscaler"})"
+        : mode == L"shared" || mode == L"forza-shared" || mode == L"xefg-output" || mode == L"xefg-output-factory"
+        ? R"(,"optiScalerUi":"shared"})" : "}";
     std::ofstream(config, std::ios::binary) << saved;
 
     const auto host = here / L"OptiScaler.dll";
@@ -429,6 +682,15 @@ int wmain(int argc, wchar_t** argv)
     if (!CopyFileW(candidate.c_str(), plugin.c_str(), FALSE)) return 3;
     if (mode == L"xefg-proxy" || mode == L"xefg-plugin")
         return RunXefgEarly(here, candidate, host, plugin, mode == L"xefg-plugin");
+    if (mode.starts_with(L"xefg-output"))
+    {
+#if defined(OPTISCALER_FIXTURE_XEFG)
+        return RunXefgOutput(here, host, plugin, status, mode);
+#else
+        Check(false, "harness built with the XeSS SDK headers (XESS_SDK_ROOT)");
+        return 1;
+#endif
+    }
 
     HMODULE rtxmfg = nullptr;
     HMODULE optiscaler = nullptr;
@@ -436,7 +698,8 @@ int wmain(int argc, wchar_t** argv)
     {
         rtxmfg = LoadLibraryW(candidate.c_str());
     }
-    else if (mode == L"proxy" || mode == L"optin" || mode == L"streamline" || privateStartup)
+    else if (mode == L"proxy" || mode == L"optin" || mode == L"hidden" || mode == L"shared" || mode == L"streamline"
+        || privateStartup || forza)
     {
         optiscaler = LoadLibraryW(host.c_str());
         rtxmfg = LoadLibraryW(candidate.c_str());
@@ -482,8 +745,11 @@ int wmain(int argc, wchar_t** argv)
     Check(Query(rtxmfg).backendOwner == 1, "candidate owns the backend");
 
     const bool expectHost = mode == L"proxy" || mode == L"plugin" || mode == L"late" || mode == L"optin"
-        || mode == L"streamline" || privateStartup;
+        || mode == L"hidden" || mode == L"shared" || mode == L"streamline" || privateStartup || forza;
+    // Frame generation is OptiScaler's unless "rtxmfg"; the menu is gone when "optiscaler" and, without the key, for a
+    // ForzaTech executable (alpha.19 optimenu.1; shared everywhere else, as in beta.4).
     const bool delegated = expectHost && mode != L"optin";
+    const bool hidden = mode == L"hidden" || mode == L"forza";
     const char* route = mode == L"plugin" ? "\"plugin\"" : mode == L"late" ? "\"late\""
         : expectHost ? "\"proxy\"" : "\"none\"";
     const std::string json = WaitStatus(status, [&](const std::string& text) {
@@ -494,9 +760,9 @@ int wmain(int argc, wchar_t** argv)
     Check(Has(json, "integrationMode", expectHost ? "\"optiscaler\"" : "\"standalone\""), "integration mode");
     Check(Has(json, "optiScalerDetected", expectHost ? "true" : "false"), "OptiScaler detection by version resource");
     Check(Has(json, "optiScalerRoute", route), "OptiScaler route");
-    Check(Has(json, "optiScalerUiOwner", delegated ? "\"optiscaler\"" : expectHost ? "\"rtxmfg\"" : "\"none\""),
+    Check(Has(json, "optiScalerUiOwner", hidden ? "\"optiscaler\"" : delegated ? "\"shared\"" : expectHost ? "\"rtxmfg\"" : "\"none\""),
         "UI owner");
-    Check(Has(json, "optiScalerMenuSuppressed", delegated ? "true" : "false"), "menu suppression");
+    Check(Has(json, "optiScalerMenuSuppressed", hidden ? "true" : "false"), "menu suppression");
     if (expectHost)
         Check(Has(json, "optiScalerProductVersion", "\"10.0.0-fixture\""), "OptiScaler version read from the mapped image");
     Check(Has(json, "optiScalerPluginCallerAccepted", mode == L"plugin" ? "true" : "false"), "plugin caller acceptance");
@@ -517,12 +783,15 @@ int wmain(int argc, wchar_t** argv)
         && json.find("\"xessFrameLimitFps\"") == std::string::npos && json.find("\"xessLowLatencyMode\"") == std::string::npos,
         "no XeSS multiplier, force or XeLL keys in the status");
     Check(Has(json, "generatedOnlyDebug", delegated ? "false" : "true"), "debug presentation override");
+    // Shared UI mode: the DLSS SR/RR presets and DLSS 5 stay RTXMFG's; hidden delegates them too.
+    Check(Has(json, "dlssSrPresetRequested", hidden ? "0" : "11"), "saved DLSS SR preset applies unless the menu is hidden");
+    Check(Has(json, "dlss5", hidden ? "false" : "true"), "saved DLSS 5 applies unless the menu is hidden");
 
     // Menu factories: wrapped for RTXMFG's own UI, untouched for OptiScaler's.
     const uint64_t wrappers = FactoryWrappersAfterCreate(rtxmfg);
-    Check(delegated ? wrappers == 0 : wrappers > 0, delegated
-        ? "no RTXMFG factory proxy while OptiScaler owns the UI"
-        : "RTXMFG factory proxy created for its own UI");
+    Check(hidden ? wrappers == 0 : wrappers > 0, hidden
+        ? "no RTXMFG factory proxy while the RTXMFG menu is hidden"
+        : "RTXMFG factory proxy created for its menu");
 
     Sleep(400);
     const std::string log = ReadText(RuntimeLog());
@@ -536,6 +805,9 @@ int wmain(int argc, wchar_t** argv)
     Check(!facadeClassified, "OptiScaler's NGX facade is never inventoried as an NVIDIA module");
     if (expectHost)
         Check(log.find("OptiScaler") != std::string::npos, "runtime log records OptiScaler mode");
+    if (expectHost)
+        Check((log.find("ForzaTech executable") != std::string::npos) == forza,
+            forza ? "runtime log records the ForzaTech default" : "no ForzaTech default outside a Forza executable");
 
     if (mode == L"streamline" || mode == L"second-streamline")
         Check(Has(WaitStatus(status, [](const std::string& text) {

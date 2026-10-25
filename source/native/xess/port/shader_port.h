@@ -158,7 +158,8 @@ class ShaderPort {
     }
 public:
     bool hasProgram(const char* key) const { return programs.contains(key); }
-    explicit ShaderPort(HMODULE module,HMODULE payload,const std::filesystem::path& dataRoot = {}) {
+    // amdkeep.1: adapterVendor = PCI vendor of the provider's device (0 = unknown).
+    explicit ShaderPort(HMODULE module,HMODULE payload,const std::filesystem::path& dataRoot = {},UINT adapterVendor = 0) {
         const auto& layout=xess_layout::Get(module);
         base=reinterpret_cast<uintptr_t>(module); site=reinterpret_cast<unsigned char*>(base+layout.Rva(0x1ad217));
         MEMORY_BASIC_INFORMATION m{};
@@ -179,6 +180,22 @@ public:
         programs=xess_payload::LoadPrograms(payload);
         // splat.1, unet.1: our own splat and U-Net conv shaders replace Intel's (proven byte-identical; always validated).
         replacements=xess_payload::LoadReplacements(payload);
+        // amdkeep.1 (= wmma.1's rule, lost in V1.6.x): on AMD, Intel's aa016078 and efbe3788 run faster than unet.1's
+        // (RX 7800 XT at 4K: 266 vs 337 us and 161 vs 163, at 1440p 162 vs 175 and 81 vs 84; RX 9070 XT at 4K: 160 vs
+        // 172 and 64 vs 79; amdwmma.1 tester runs, board #456), so those two keep Intel's bytes there. Both outputs
+        // are identical, so only the speed differs.
+        std::string kept;
+        if (adapterVendor==0x1002) {
+            std::erase_if(replacements,[&](const xess_payload::Replacement& r) {
+                if (r.name!="shaders/unet_aa016078.dxil" && r.name!="shaders/unet_efbe3788.dxil") return false;
+                kept+=(kept.empty() ? "\"" : ",\"")+r.name+"\"";
+                return true;
+            });
+        }
+        std::string replaced;
+        for (const auto& r:replacements) replaced+=(replaced.empty() ? "\"" : ",\"")+r.name+"\"";
+        logEvent("shader_replacement_set","\"vendor_id\":"+std::to_string(adapterVendor)+",\"kept_intel\":["+kept+
+            "],\"replaced\":["+replaced+"]");
         // Search only free regions within the signed-rel32 range of this call.
         const auto callEnd=reinterpret_cast<uintptr_t>(site+5);
         const uintptr_t low=callEnd>0x7ffe0000 ? callEnd-0x7ffe0000 : 0x10000;

@@ -1,12 +1,16 @@
 #include "single_module.h"
 #include "overlay_vulkan.h"
 #include "overlay_platform.h"
+#include "overlay_dx12.h"
 #include "overlay_hook.h"
 #include "overlay_install.h"
 #include "overlay_color_spv.h"
 #include "present_counter.h"
 #include "ui_input_coherence.h"
 #include "vsync_control.h"
+#if MFG_UNLOCK_XESS
+#include "xess/vulkan/vk_host.h"
+#endif
 #include <backends/imgui_impl_vulkan.h>
 #include <algorithm>
 #include <array>
@@ -159,11 +163,18 @@ struct State
         else return false;
         queue = presentQueue;
         if (!vk.Load(*device)) return false;
+        // vkxefg.1: a chain the XeMFG Vulkan host took over has XeFG's back buffers as its images.
+        auto images_ = [&](uint32_t* count, VkImage* images) {
+#if MFG_UNLOCK_XESS
+            VkResult hosted = VK_SUCCESS;
+            if (xess_vulkan::GetSwapchainImages(device->handle, swapchain, count, images, hosted)) return hosted;
+#endif
+            return vk.GetSwapchainImagesKHR(device->handle, swapchain, count, images);
+        };
         uint32_t count = 0;
-        if (vk.GetSwapchainImagesKHR(device->handle, swapchain, &count, nullptr) != VK_SUCCESS
-            || count < 2 || count > 16) return false;
+        if (images_(&count, nullptr) != VK_SUCCESS || count < 2 || count > 16) return false;
         std::vector<VkImage> images(count);
-        if (vk.GetSwapchainImagesKHR(device->handle, swapchain, &count, images.data()) != VK_SUCCESS) return false;
+        if (images_(&count, images.data()) != VK_SUCCESS) return false;
         if (!platform.Initialize(window)) return false;
         ContextScope current(platform.context);
         InternalScope internal;
@@ -202,6 +213,12 @@ struct State
             auto& frame = frames[index];
             frame.image = images[index];
             VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+#if MFG_UNLOCK_XESS
+            // vkxefg.1: XeFG's back buffers also carry storage usage, which an sRGB view must not inherit.
+            VkImageViewUsageCreateInfo viewUsage{VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO, nullptr,
+                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT};
+            if (xess_vulkan::OwnsSwapchain(swapchain)) viewInfo.pNext = &viewUsage;
+#endif
             viewInfo.image = images[index];
             viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
             viewInfo.format = format;
@@ -451,14 +468,31 @@ struct CreateInstanceTag
     static VkResult Call(PFN_vkCreateInstance original, const VkInstanceCreateInfo* info,
         const VkAllocationCallbacks* allocator, VkInstance* output)
     {
+        const VkInstanceCreateInfo* used = info;
+#if MFG_UNLOCK_XESS
+        // vkxefg.1: the XeMFG Vulkan host's programs need Vulkan 1.3 (the game's own version, if lower, is
+        // raised only when the host is enabled and the loader offers it; a refusal retries the game's own).
+        xess_vulkan::InstanceEdit edit;
+        if (!gInsideOverlay) used = xess_vulkan::PrepareInstance(info, gLoaderGipa.load(std::memory_order_acquire), edit);
+        VkResult result = original(used, allocator, output);
+        if (result != VK_SUCCESS && used != info)
+        {
+            used = info;
+            result = original(info, allocator, output);
+        }
+#else
         const VkResult result = original(info, allocator, output);
-        if (!gInsideOverlay && result == VK_SUCCESS && output && info)
+#endif
+        if (!gInsideOverlay && result == VK_SUCCESS && output && used)
         {
             auto instance = std::make_shared<Instance>();
             instance->handle = *output;
             instance->gipa = gLoaderGipa.load(std::memory_order_acquire);
-            if (info->pApplicationInfo && info->pApplicationInfo->apiVersion)
-                instance->apiVersion = info->pApplicationInfo->apiVersion;
+            if (used->pApplicationInfo && used->pApplicationInfo->apiVersion)
+                instance->apiVersion = used->pApplicationInfo->apiVersion;
+#if MFG_UNLOCK_XESS
+            xess_vulkan::InstanceCreated(*output, used, instance->gipa);
+#endif
             std::lock_guard lock(gRegistryMutex);
             if (instance->gipa && gInstances.size() < 16) gInstances[*output] = std::move(instance);
         }
@@ -487,8 +521,25 @@ struct CreateDeviceTag
     static VkResult Call(PFN_vkCreateDevice original, VkPhysicalDevice physical,
         const VkDeviceCreateInfo* info, const VkAllocationCallbacks* allocator, VkDevice* output)
     {
+#if MFG_UNLOCK_XESS
+        // vkxefg.1: the XeMFG Vulkan host's queues, extensions and features join the game's device. A device
+        // that refuses them is created again exactly as the game asked, and stays native.
+        auto edit = gInsideOverlay ? xess_vulkan::DeviceEditPtr() : xess_vulkan::PrepareDevice(physical, info);
+        VkResult result = original(physical, xess_vulkan::EditedInfo(edit.get(), info), allocator, output);
+        if (result != VK_SUCCESS && edit)
+        {
+            edit.reset();
+            result = original(physical, info, allocator, output);
+        }
+        if (!gInsideOverlay && result == VK_SUCCESS && output)
+        {
+            RememberDevice(physical, *output);
+            if (edit) xess_vulkan::DeviceCreated(std::move(edit), *output);
+        }
+#else
         const VkResult result = original(physical, info, allocator, output);
         if (!gInsideOverlay && result == VK_SUCCESS && output) RememberDevice(physical, *output);
+#endif
         return result;
     }
 };
@@ -498,6 +549,9 @@ struct GetQueueTag
     {
         original(device, family, index, output);
         if (!gInsideOverlay && output) RememberQueue(device, family, false, *output);
+#if MFG_UNLOCK_XESS
+        if (!gInsideOverlay && output && *output) xess_vulkan::QueueSeen(device, family, index, *output);
+#endif
     }
 };
 struct GetQueue2Tag
@@ -508,6 +562,10 @@ struct GetQueue2Tag
         original(device, info, output);
         if (!gInsideOverlay && output && info)
             RememberQueue(device, info->queueFamilyIndex, (info->flags & VK_DEVICE_QUEUE_CREATE_PROTECTED_BIT) != 0, *output);
+#if MFG_UNLOCK_XESS
+        if (!gInsideOverlay && output && *output && info && !info->flags)
+            xess_vulkan::QueueSeen(device, info->queueFamilyIndex, info->queueIndex, *output);
+#endif
     }
 };
 struct CreateSemaphoreTag
@@ -562,6 +620,9 @@ struct CreateSurfaceTag
             std::lock_guard lock(gRegistryMutex);
             if (gSurfaces.size() < 64) gSurfaces[*output] = Surface{info->hwnd, instance};
         }
+#if MFG_UNLOCK_XESS
+        if (!gInsideOverlay && result == VK_SUCCESS && output && info) xess_vulkan::SurfaceCreated(instance, *output, info->hwnd);
+#endif
         return result;
     }
 };
@@ -670,7 +731,11 @@ struct CreateSwapchainTag
             // Windows Vulkan drivers may build an internal DXGI swapchain.
             // It belongs to Vulkan WSI, not the application's D3D12 renderer.
             InternalScope internal;
-            result = original(handle, &adjusted, allocator, output);
+#if MFG_UNLOCK_XESS
+            // vkxefg.1: the XeMFG Vulkan host may take the chain over (the handle is then its own).
+            if (!device || !xess_vulkan::CreateSwapchain(handle, &adjusted, allocator, output, original, result))
+#endif
+                result = original(handle, &adjusted, allocator, output);
         }
         if (device)
             vsync_control::AfterVulkanSwapchain(vsync, result,
@@ -748,7 +813,11 @@ struct PresentTag
             if (next->sType == VK_STRUCTURE_TYPE_PRESENT_REGIONS_KHR
                 || next->sType == VK_STRUCTURE_TYPE_DEVICE_GROUP_PRESENT_INFO_KHR)
                 supportedPresent = false;
-        if (selected && supportedPresent && nativeWaits && single_module::OverlayAllowed())
+        // interopmenu.2: one menu per window. OptiScaler's XeFG-on-Vulkan interop presents this chain's image through
+        // XeFG's D3D12 output chain on the same window, whose output layer draws the menu after frame generation; a
+        // menu drawn here would be in the game's frame that XeFG interpolates.
+        if (selected && supportedPresent && nativeWaits && single_module::OverlayAllowed()
+            && !dx12::WindowSession(selected->window))
         {
             gVulkanFrames.fetch_add(1, std::memory_order_relaxed);
             selected->Render(queue, info->pImageIndices[selectedIndex], *info, renderFailure);
@@ -762,10 +831,25 @@ struct PresentTag
         // The device dispatch may re-enter the loader entry. Only one layer
         // may consume or substitute this call's original semaphore set.
         InternalScope internal;
+        VulkanPresentForwardingScope forwarding;
+#if MFG_UNLOCK_XESS
+        // vkxefg.1: a taken-over chain presents through XeFG (after the menu was drawn into the game's image).
+        VkResult hosted = VK_SUCCESS;
+        if (xess_vulkan::QueuePresent(handle, info, hosted))
+        {
+            if (selected && (hosted == VK_SUCCESS || hosted == VK_SUBOPTIMAL_KHR))
+                frame_telemetry::SampleVulkanPresent();
+            return hosted;
+        }
+#endif
         const VkResult result = original(handle, info);
         if (selected && (result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR))
             frame_telemetry::SampleVulkanPresent();
+#if MFG_UNLOCK_XESS
+        return xess_vulkan::AfterNativePresent(handle, info, result);
+#else
         return result;
+#endif
     }
 };
 
@@ -801,6 +885,10 @@ struct DestroySwapchainTag
         {
             ForgetSwapchain(device, swapchain);
             vsync_control::VulkanSwapchainDestroyed(reinterpret_cast<uint64_t>(swapchain));
+#if MFG_UNLOCK_XESS
+            InternalScope internal;
+            if (xess_vulkan::DestroySwapchain(device, swapchain)) return;
+#endif
         }
         original(device, swapchain, allocator);
     }
@@ -828,6 +916,10 @@ struct DestroyDeviceTag
                 std::erase_if(gNativeSemaphores, [&](const auto& row) { return row.second == device; });
                 gDevices.erase(device);
             }
+#if MFG_UNLOCK_XESS
+            InternalScope internal;
+            xess_vulkan::DeviceDestroying(device);
+#endif
         }
         original(device, allocator);
     }
@@ -842,6 +934,9 @@ struct DestroySurfaceTag
             std::lock_guard lock(gRegistryMutex);
             gSurfaces.erase(surface);
         }
+#if MFG_UNLOCK_XESS
+        if (!gInsideOverlay) xess_vulkan::SurfaceDestroyed(surface);
+#endif
         original(instance, surface, allocator);
     }
 };
@@ -855,9 +950,85 @@ struct DestroyInstanceTag
             std::erase_if(gPhysicalDevices, [&](const auto& row) { return row.second->handle == instance; });
             gInstances.erase(instance);
         }
+#if MFG_UNLOCK_XESS
+        if (!gInsideOverlay) xess_vulkan::InstanceDestroyed(instance);
+#endif
         original(instance, allocator);
     }
 };
+
+#if MFG_UNLOCK_XESS
+// vkxefg.1: vkDeviceWaitIdle synchronizes every queue of the device, the XeMFG host's layer queues included.
+struct DeviceWaitIdleTag
+{
+    static VkResult Call(PFN_vkDeviceWaitIdle original, VkDevice device)
+    {
+        VkResult result = VK_SUCCESS;
+        if (!gInsideOverlay && xess_vulkan::DeviceWaitIdle(device, result)) return result;
+        return original(device);
+    }
+};
+// vkxefg.1: the swap-chain entry points a taken-over chain's handle reaches. Native handles pass straight on.
+struct GetSwapchainImagesTag
+{
+    static VkResult Call(PFN_vkGetSwapchainImagesKHR original, VkDevice device, VkSwapchainKHR swapchain,
+        uint32_t* count, VkImage* images)
+    {
+        VkResult result = VK_SUCCESS;
+        if (!gInsideOverlay && xess_vulkan::GetSwapchainImages(device, swapchain, count, images, result)) return result;
+        return original(device, swapchain, count, images);
+    }
+};
+struct AcquireNextImageTag
+{
+    static VkResult Call(PFN_vkAcquireNextImageKHR original, VkDevice device, VkSwapchainKHR swapchain,
+        uint64_t timeout, VkSemaphore semaphore, VkFence fence, uint32_t* index)
+    {
+        VkResult result = VK_SUCCESS;
+        if (!gInsideOverlay)
+        {
+            InternalScope internal;
+            if (xess_vulkan::AcquireNextImage(device, swapchain, timeout, semaphore, fence, index, result)) return result;
+        }
+        return original(device, swapchain, timeout, semaphore, fence, index);
+    }
+};
+struct AcquireNextImage2Tag
+{
+    static VkResult Call(PFN_vkAcquireNextImage2KHR original, VkDevice device, const VkAcquireNextImageInfoKHR* info, uint32_t* index)
+    {
+        VkResult result = VK_SUCCESS;
+        if (!gInsideOverlay && info)
+        {
+            InternalScope internal;
+            if (xess_vulkan::AcquireNextImage(device, info->swapchain, info->timeout, info->semaphore, info->fence, index, result))
+                return result;
+        }
+        return original(device, info, index);
+    }
+};
+struct SetHdrMetadataTag
+{
+    static void Call(PFN_vkSetHdrMetadataEXT original, VkDevice device, uint32_t count,
+        const VkSwapchainKHR* swapchains, const VkHdrMetadataEXT* metadata)
+    {
+        if (!gInsideOverlay && count && swapchains && metadata)
+        {
+            std::vector<VkSwapchainKHR> native;
+            std::vector<VkHdrMetadataEXT> nativeMetadata;
+            for (uint32_t i = 0; i < count; ++i)
+                if (!xess_vulkan::SetHdrMetadata(device, swapchains[i], &metadata[i]))
+                {
+                    native.push_back(swapchains[i]);
+                    nativeMetadata.push_back(metadata[i]);
+                }
+            if (!native.empty()) original(device, uint32_t(native.size()), native.data(), nativeMetadata.data());
+            return;
+        }
+        original(device, count, swapchains, metadata);
+    }
+};
+#endif
 
 PFN_vkVoidFunction Wrap(const char* name, PFN_vkVoidFunction original)
 {
@@ -880,8 +1051,25 @@ PFN_vkVoidFunction Wrap(const char* name, PFN_vkVoidFunction original)
             HookFamily<CreateSwapchainTag, VkResult, VkDevice, const VkSwapchainCreateInfoKHR*,
                 const VkAllocationCallbacks*, VkSwapchainKHR*>::Bind(reinterpret_cast<void*>(original), false));
         if (wrapped != original) vsync_control::VulkanSwapchainHookInstalled();
+#if MFG_UNLOCK_XESS
+        if (wrapped != original) xess_vulkan::EntryWrapped("vkCreateSwapchainKHR");
+#endif
         return wrapped;
     }
+#if MFG_UNLOCK_XESS
+    // vkxefg.1: a taken-over chain needs every entry point its handle reaches to be ours.
+    for (const char* hosted : {"vkQueuePresentKHR", "vkDestroySwapchainKHR"})
+        if (strcmp(name, hosted) == 0)
+        {
+            const auto wrapped = strcmp(name, "vkQueuePresentKHR") == 0
+                ? reinterpret_cast<PFN_vkVoidFunction>(HookFamily<PresentTag, VkResult, VkQueue, const VkPresentInfoKHR*>::Bind(
+                    reinterpret_cast<void*>(original), false))
+                : reinterpret_cast<PFN_vkVoidFunction>(HookFamily<DestroySwapchainTag, void, VkDevice, VkSwapchainKHR,
+                    const VkAllocationCallbacks*>::Bind(reinterpret_cast<void*>(original), false));
+            if (wrapped != original) xess_vulkan::EntryWrapped(hosted);
+            return wrapped;
+        }
+#endif
 #define MFG_VK_WRAP(nameLiteral, Tag, Result, ...) \
     if (strcmp(name, nameLiteral) == 0) return reinterpret_cast<PFN_vkVoidFunction>( \
         HookFamily<Tag, Result, __VA_ARGS__>::Bind(reinterpret_cast<void*>(original), false));
@@ -899,6 +1087,20 @@ PFN_vkVoidFunction Wrap(const char* name, PFN_vkVoidFunction original)
     MFG_VK_WRAP("vkDestroyDevice", DestroyDeviceTag, void, VkDevice, const VkAllocationCallbacks*)
     MFG_VK_WRAP("vkDestroySurfaceKHR", DestroySurfaceTag, void, VkInstance, VkSurfaceKHR, const VkAllocationCallbacks*)
     MFG_VK_WRAP("vkDestroyInstance", DestroyInstanceTag, void, VkInstance, const VkAllocationCallbacks*)
+#if MFG_UNLOCK_XESS
+#define MFG_VK_HOST_WRAP(nameLiteral, Tag, Result, ...) \
+    if (strcmp(name, nameLiteral) == 0) { \
+        const auto wrapped = reinterpret_cast<PFN_vkVoidFunction>( \
+            HookFamily<Tag, Result, __VA_ARGS__>::Bind(reinterpret_cast<void*>(original), false)); \
+        if (wrapped != original) xess_vulkan::EntryWrapped(nameLiteral); \
+        return wrapped; }
+    MFG_VK_HOST_WRAP("vkGetSwapchainImagesKHR", GetSwapchainImagesTag, VkResult, VkDevice, VkSwapchainKHR, uint32_t*, VkImage*)
+    MFG_VK_HOST_WRAP("vkAcquireNextImageKHR", AcquireNextImageTag, VkResult, VkDevice, VkSwapchainKHR, uint64_t, VkSemaphore, VkFence, uint32_t*)
+    MFG_VK_HOST_WRAP("vkAcquireNextImage2KHR", AcquireNextImage2Tag, VkResult, VkDevice, const VkAcquireNextImageInfoKHR*, uint32_t*)
+    MFG_VK_HOST_WRAP("vkSetHdrMetadataEXT", SetHdrMetadataTag, void, VkDevice, uint32_t, const VkSwapchainKHR*, const VkHdrMetadataEXT*)
+    MFG_VK_HOST_WRAP("vkDeviceWaitIdle", DeviceWaitIdleTag, VkResult, VkDevice)
+#undef MFG_VK_HOST_WRAP
+#endif
 #undef MFG_VK_WRAP
     return original;
 }

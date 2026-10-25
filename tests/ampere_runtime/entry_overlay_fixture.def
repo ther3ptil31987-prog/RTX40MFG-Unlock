@@ -1,0 +1,13 @@
+LIBRARY EntryOverlayFixture
+EXPORTS
+    OverlayTargetCurrent
+    OverlayTargetRel32
+    OverlayTargetShort
+    OverlayTargetAbsolute
+    OverlayTargetRestored
+    OverlayTargetOurs
+    OverlayTargetTail
+    OverlayTargetHotpatch
+    OverlaySetNext
+    OverlayForeignCalls
+    OverlayForeignHook

@@ -7,7 +7,7 @@ struct ManifestEntry { std::string_view key; Tier tier; };
 
 // Source: https://www.nvidia.com/content/dam/en-zz/Solutions/geforce/news/nvidia-rtx-games-engines-apps/dlss-rt-games-apps-overrides.json
 // NoMfgOverride: native FG listed, MFG cell blank; 2x is the mod fallback, not a published maximum.
-inline constexpr char kManifestFetchedDate[] = "2026-10-20";
+inline constexpr char kManifestFetchedDate[] = "2026-10-25";
 inline constexpr char kManifestSha256[] = "B11550FF03738E43BA5F724782A45A68503D1AA40546BAB9B1C3A051250B490D";
 inline constexpr std::array<ManifestEntry, 407> kManifest = {{
     {"007firstlight", Tier::eSixX}, // 007 First Light

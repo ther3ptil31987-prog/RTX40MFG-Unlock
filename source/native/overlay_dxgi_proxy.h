@@ -14,5 +14,9 @@ HRESULT ParentFactoryCall(ParentFn,IDXGIObject*,REFIID,void**) noexcept;
 // returned it, so its swapchains get the menu. True when *output was replaced.
 bool Owned(IUnknown*) noexcept;
 bool WrapUpgraded(void** output) noexcept;
+// diag171.1 logging: "<pointer> <kind> ours=<0|1> queryInterface=<module+0xRVA>".
+// Kind is the first public interface the object answers: factory, swapchain,
+// d3d12-device, d3d12-queue, adapter or other.
+void Describe(IUnknown*,wchar_t* text,size_t count) noexcept;
 void ReadStatus(MfgSingleModuleStatus&) noexcept;
 }
